@@ -1,0 +1,76 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="light">
+  <meta name="description" content="PostPlus — 安全、简洁的个人邮箱与邮件服务器管理。">
+  <title>PostPlus · 邮件，井然有序</title>
+  <link rel="stylesheet" href="/style.css">
+  <script src="/app.js" defer></script>
+</head>
+<body>
+  <div id="notice" class="notice" role="status" aria-live="polite" hidden></div>
+  <main id="login-screen" class="login-screen">
+    <section class="login-story" aria-label="PostPlus">
+      <a class="brand" href="/" aria-label="PostPlus 首页"><span class="brand-mark" aria-hidden="true">p<span>+</span></span>PostPlus</a>
+      <div class="story-copy"><p class="eyebrow">YOUR MAIL. YOUR SPACE.</p><h1>每一封来信，<br>都有自己的位置。</h1><p>一个专注沟通的邮箱。<br>从第一句问候，到下一个好消息。</p></div>
+      <div class="envelope-art" aria-hidden="true"><span class="envelope-stamp">P+</span><span class="envelope-line"></span><span class="envelope-line short"></span></div>
+      <footer>PostPlus Mail Server <span>C++20 · OPEN SOURCE</span></footer>
+    </section>
+    <section class="login-panel">
+      <div class="login-box"><p class="eyebrow">WELCOME BACK</p><h2>回到你的邮箱</h2><p class="muted">使用管理员分配的账号登录。</p>
+        <form id="login-form">
+          <label for="login-email">邮箱地址 <span>Email</span></label><input id="login-email" name="username" type="email" autocomplete="username" placeholder="you@example.com" required maxlength="254">
+          <label for="login-password">密码 <span>Password</span></label><input id="login-password" name="password" type="password" autocomplete="current-password" required maxlength="1024">
+          <p id="login-error" class="form-error" role="alert" hidden></p>
+          <button class="button primary full" type="submit">登录邮箱 <span aria-hidden="true">↗</span></button>
+        </form>
+        <p class="account-note">需要账号或重置密码？请联系邮箱管理员。</p>
+      </div>
+      <span class="login-bottom">简单沟通，自在掌控。</span>
+    </section>
+  </main>
+
+  <div id="app-screen" class="app-shell" hidden>
+    <aside class="sidebar">
+      <a class="brand" href="/" aria-label="PostPlus 首页"><span class="brand-mark" aria-hidden="true">p<span>+</span></span>PostPlus</a>
+      <button id="compose-open" class="button compose-button"><span aria-hidden="true">＋</span> 写邮件</button>
+      <p class="nav-caption">工作空间 <span>WORKSPACE</span></p>
+      <nav aria-label="邮箱导航">
+        <button id="nav-inbox" class="nav-item active" aria-current="page"><span aria-hidden="true">▤</span>收件箱 <span id="inbox-count" class="nav-count">0</span></button>
+        <button id="nav-admin" class="nav-item" hidden><span aria-hidden="true">⚙</span>管理后台</button>
+      </nav>
+      <div class="sidebar-note"><span class="tiny-plus" aria-hidden="true">+</span><p>留一点空间，<br>给重要的消息。</p></div>
+      <div class="identity"><span id="user-avatar" class="avatar">P</span><div><strong id="user-name">用户</strong><span id="user-address"></span></div><button id="logout" class="icon-button" aria-label="退出登录" title="退出登录">↪</button></div>
+    </aside>
+
+    <main class="workspace">
+      <section id="inbox-view" class="inbox-view" aria-labelledby="inbox-title">
+        <header class="workspace-header"><div><p class="eyebrow">YOUR INBOX</p><h1 id="inbox-title">收件箱<span class="heading-dot">.</span></h1></div><div class="header-actions"><span id="mail-status" class="muted">准备就绪</span><button id="refresh" class="button secondary">↻ 刷新</button></div></header>
+        <div class="mail-workspace">
+          <section class="message-column" aria-label="邮件列表"><div class="list-heading"><span>全部邮件</span><span id="message-total">0 封</span></div><div id="message-list" class="message-list" aria-live="polite"></div><div id="empty-mail" class="empty-list" hidden><span aria-hidden="true">✉</span><h2>还没有新邮件</h2><p>新消息到达后，会出现在这里。</p></div></section>
+          <article id="reader" class="reader" aria-label="邮件内容">
+            <div id="reader-placeholder" class="reader-placeholder"><div class="reader-symbol" aria-hidden="true">✉<span>+</span></div><p class="eyebrow">A LITTLE ROOM TO READ</p><h2>打开一封邮件，<br>开始一段对话。</h2><p class="muted">从左侧选择一封来信。</p></div>
+            <div id="reader-content" hidden><div class="reader-toolbar"><button id="reader-back" class="button text-button">← 返回列表</button><button id="message-delete" class="button danger-text">删除邮件</button></div><h2 id="message-subject" tabindex="-1"></h2><dl class="message-meta"><div><dt>发件人</dt><dd id="message-from"></dd></div><div><dt>收件人</dt><dd id="message-to"></dd></div><div><dt>时间</dt><dd id="message-date"></dd></div></dl><pre id="message-body" class="message-body"></pre><details class="raw-message"><summary>查看原始邮件 / MIME</summary><pre id="message-raw"></pre></details></div>
+          </article>
+        </div>
+      </section>
+
+      <section id="admin-view" class="admin-view" aria-labelledby="admin-title" hidden>
+        <header class="workspace-header"><div><p class="eyebrow">SERVER ADMINISTRATION</p><h1 id="admin-title">管理后台<span class="heading-dot">.</span></h1></div><button id="admin-refresh" class="button secondary">↻ 刷新</button></header>
+        <div class="admin-content"><div class="stat-grid"><section class="stat-card"><p>邮件总数</p><strong id="stat-messages">—</strong><span>已存储的来信</span></section><section class="stat-card"><p>待投递</p><strong id="stat-queued">—</strong><span>等待后台投递处理</span></section><section class="stat-card"><p>邮件空间</p><strong id="stat-bytes">—</strong><span>当前邮件内容大小</span></section></div>
+          <section class="accounts-section" aria-labelledby="accounts-title"><div class="section-heading"><div><h2 id="accounts-title">用户账号</h2><p class="muted">由管理员管理账号与访问权限。</p></div><button id="user-create-open" class="button primary">＋ 新建用户</button></div><div class="table-scroll"><table><thead><tr><th scope="col">邮箱地址</th><th scope="col">角色</th><th scope="col">操作</th></tr></thead><tbody id="users-body"></tbody></table></div></section>
+          <section class="accounts-section" aria-labelledby="queue-title"><div class="section-heading"><div><h2 id="queue-title">投递队列</h2><p class="muted">最多显示 100 个待处理或隔离任务。</p></div></div><div class="table-scroll"><table><thead><tr><th scope="col">收件人</th><th scope="col">状态</th><th scope="col">尝试次数</th><th scope="col">原因</th></tr></thead><tbody id="queue-body"></tbody></table></div><p id="queue-empty" class="muted" hidden>当前没有排队的邮件。</p></section>
+        </div>
+      </section>
+    </main>
+  </div>
+
+  <dialog id="compose-dialog" class="compose-dialog"><form id="compose-form"><header class="dialog-header"><div><p class="eyebrow">NEW MESSAGE</p><h2>写一封邮件</h2></div><button type="button" class="icon-button" data-close="compose-dialog" aria-label="关闭写邮件窗口">×</button></header><div class="dialog-body"><label for="compose-to">收件人</label><input id="compose-to" name="to" type="text" placeholder="多个邮箱使用逗号分隔" required maxlength="25500"><label for="compose-subject">主题</label><input id="compose-subject" name="subject" type="text" placeholder="关于……" maxlength="512"><label for="compose-text">正文</label><textarea id="compose-text" name="text" rows="11" placeholder="你好，" required></textarea><p id="compose-error" class="form-error" role="alert" hidden></p></div><footer class="dialog-footer"><span class="muted">以当前账号发送</span><button type="submit" class="button primary">发送邮件 ↗</button></footer></form></dialog>
+
+  <dialog id="user-dialog"><form id="user-form"><header class="dialog-header"><div><p class="eyebrow">ACCOUNT MANAGEMENT</p><h2 id="user-dialog-title">新建用户</h2></div><button type="button" class="icon-button" data-close="user-dialog" aria-label="关闭账号窗口">×</button></header><div class="dialog-body"><label for="new-email">邮箱地址</label><input id="new-email" type="email" autocomplete="off" required maxlength="254"><label for="new-password">新密码</label><input id="new-password" type="password" autocomplete="new-password" required minlength="12" maxlength="1024"><p class="field-hint">至少 12 个字符。</p><label id="admin-checkbox-label" class="checkbox-label"><input id="new-admin" type="checkbox">授予管理员权限</label><p id="user-error" class="form-error" role="alert" hidden></p></div><footer class="dialog-footer"><button type="button" class="button secondary" data-close="user-dialog">取消</button><button type="submit" class="button primary">保存账号</button></footer></form></dialog>
+
+  <dialog id="delete-dialog"><form id="delete-form"><header class="dialog-header"><h2>删除这封邮件？</h2></header><div class="dialog-body"><p>邮件将从服务器永久删除。</p><p id="delete-error" class="form-error" role="alert" hidden></p></div><footer class="dialog-footer"><button type="button" class="button secondary" data-close="delete-dialog">取消</button><button type="submit" class="button danger">确认删除</button></footer></form></dialog>
+</body>
+</html>

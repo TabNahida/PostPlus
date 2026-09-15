@@ -1,0 +1,10 @@
+.xmake/
+build/
+data/
+config/postplus.json
+config/*.pem
+*.db
+*.db-shm
+*.db-wal
+__pycache__/
+compile_commands.json

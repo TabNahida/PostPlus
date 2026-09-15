@@ -1,0 +1,43 @@
+name: Build and test
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
+        mode: [debug, release]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@v4
+      - uses: xmake-io/github-action-setup-xmake@v1
+        with:
+          xmake-version: '3.0.9'
+          actions-cache-folder: '.xmake-cache'
+          actions-cache-key: '${{ runner.os }}-${{ runner.arch }}-${{ matrix.mode }}-v1'
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.13'
+      - name: Configure
+        run: xmake f -m ${{ matrix.mode }} -y
+      - name: Build all services
+        run: xmake build -y
+      - name: Unit tests
+        run: xmake test -v
+      - name: Protocol and service integration
+        run: python tests/integration.py --build-dir build --mode ${{ matrix.mode }}
+      - name: Upload diagnostic logs
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: logs-${{ runner.os }}-${{ matrix.mode }}
+          path: build/test-runs/
+          retention-days: 7
