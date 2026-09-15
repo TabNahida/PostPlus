@@ -1,5 +1,6 @@
 "use strict";
 
+const t = (...args) => PostPlusI18n.t(...args);
 const $ = (id) => document.getElementById(id);
 const state = { user: null, messages: [], selected: null, previews: new Map(), view: "inbox", userMode: "create", loading: false, readVersion: 0 };
 let noticeTimer;
@@ -25,17 +26,17 @@ async function api(path, { method = "GET", body, quiet = false } = {}) {
   try {
     response = await fetch(path, { method, headers, body: body === undefined ? undefined : JSON.stringify(body), credentials: "same-origin", cache: "no-store" });
   } catch {
-    throw new Error("暂时无法连接服务器，请检查网络后重试。");
+    throw new Error(t("Cannot connect to the server. Check your connection and try again."));
   }
   let data;
   try { data = await response.json(); }
-  catch { throw new Error("服务器返回了无法读取的响应。"); }
+  catch { throw new Error(t("The server returned an unreadable response.")); }
   if (!response.ok || !data.ok) {
     if (response.status === 401 && path !== "/api/login" && !quiet) {
       signedOut();
-      showNotice("登录已过期，请重新登录。", true);
+      showNotice(t("Your session has expired. Please sign in again."), true);
     }
-    throw new Error(data.error || "请求失败，请稍后重试。");
+    throw new Error(PostPlusI18n.error(data));
   }
   return data;
 }
@@ -70,8 +71,11 @@ function signedOut() {
   $("message-list").replaceChildren();
   $("message-body").textContent = "";
   $("message-raw").textContent = "";
+  for (const id of ["users-body", "queue-body", "logs-body"]) $(id).replaceChildren();
+  logData = null;
+  logVersion++;
   $("login-email").focus();
-  document.title = "PostPlus · 邮件，井然有序";
+  document.title = t("PostPlus · Your mail, in order");
 }
 
 async function signedIn(user) {
@@ -112,7 +116,7 @@ $("logout").addEventListener("click", async () => {
 
 async function switchView(view) {
   state.view = view;
-  if (state.user) document.title = `${view === "admin" ? "管理后台" : "收件箱"} · ${state.user.username} · PostPlus`;
+  if (state.user) document.title = `${t(view === "admin" ? "Administration" : "Inbox")} · ${state.user.username} · PostPlus`;
   $("inbox-view").hidden = view !== "inbox";
   $("admin-view").hidden = view !== "admin";
   for (const name of ["inbox", "admin"]) {
@@ -121,13 +125,13 @@ async function switchView(view) {
     else $(`nav-${name}`).removeAttribute("aria-current");
   }
   if (view === "inbox") await loadInbox();
-  else await loadAdmin();
+  else { await loadAdmin(); await loadLogs(); }
 }
 
 $("nav-inbox").addEventListener("click", () => switchView("inbox"));
 $("nav-admin").addEventListener("click", () => switchView("admin"));
 $("refresh").addEventListener("click", loadInbox);
-$("admin-refresh").addEventListener("click", loadAdmin);
+$("admin-refresh").addEventListener("click", () => { loadAdmin(); loadLogs(); });
 
 function renderMessages() {
   const fragment = document.createDocumentFragment();
@@ -139,13 +143,13 @@ function renderMessages() {
     button.classList.toggle("seen", Boolean(message.seen));
     button.classList.toggle("selected", state.selected === id);
     button.setAttribute("aria-pressed", String(state.selected === id));
-    const title = preview?.subject || `邮件 #${message.uid}`;
-    button.setAttribute("aria-label", `${message.seen ? "" : "未读，"}${title}`);
+    const title = preview?.subject || t("Message #{id}", {id: message.uid});
+    button.setAttribute("aria-label", message.seen ? title : t("Unread, {title}", {title}));
     const avatar = element("span", "avatar", preview?.from?.slice(0, 1) || "✉");
     avatar.setAttribute("aria-hidden", "true");
     const copy = element("span", "message-row-copy");
     copy.append(element("span", "message-row-title", title));
-    copy.append(element("span", "message-row-subtitle", preview?.from || `${bytes(message.size)} · ${message.seen ? "已读" : "未读"}`));
+    copy.append(element("span", "message-row-subtitle", preview?.from || `${bytes(message.size)} · ${t(message.seen ? "Read" : "Unread")}`));
     const dot = element("span", "message-dot");
     dot.setAttribute("aria-hidden", "true");
     button.append(avatar, copy, dot);
@@ -153,7 +157,7 @@ function renderMessages() {
     fragment.append(button);
   });
   $("message-list").replaceChildren(fragment);
-  $("message-total").textContent = `${state.messages.length} 封`;
+  $("message-total").textContent = t(state.messages.length === 1 ? "{count} message" : "{count} messages", {count: state.messages.length});
   $("inbox-count").textContent = String(state.messages.filter((message) => !message.seen).length);
   $("empty-mail").hidden = state.messages.length !== 0;
 }
@@ -171,7 +175,7 @@ async function loadInbox() {
   state.loading = true;
   $("refresh").disabled = true;
   $("message-list").setAttribute("aria-busy", "true");
-  $("mail-status").textContent = "正在同步…";
+  $("mail-status").textContent = t("Syncing…");
   const user = state.user;
   try {
     const data = await api("/api/messages");
@@ -179,10 +183,10 @@ async function loadInbox() {
     state.messages = data.messages;
     if (!state.selected || !state.messages.some((message) => String(message.id) === state.selected)) clearReader();
     renderMessages();
-    $("mail-status").textContent = `更新于 ${new Date().toLocaleTimeString("zh-CN", { hour: "2-digit", minute: "2-digit" })}`;
-    if (state.view === "inbox") document.title = `收件箱 · ${user.username} · PostPlus`;
+    $("mail-status").textContent = t("Updated at {time}", {time: new Date().toLocaleTimeString(PostPlusI18n.language, { hour: "2-digit", minute: "2-digit" })});
+    if (state.view === "inbox") document.title = `${t("Inbox")} · ${user.username} · PostPlus`;
   } catch (error) {
-    $("mail-status").textContent = "同步失败";
+    $("mail-status").textContent = t("Sync failed");
     showNotice(error.message, true);
   } finally {
     state.loading = false;
@@ -202,11 +206,11 @@ async function openMessage(id) {
     state.previews.set(id, preview);
     const message = state.messages.find((item) => String(item.id) === id);
     if (message) message.seen = true;
-    $("message-subject").textContent = preview.subject || "（无主题）";
+    $("message-subject").textContent = preview.subject || t("(No subject)");
     $("message-from").textContent = preview.from || "—";
     $("message-to").textContent = preview.to || state.user.username;
     $("message-date").textContent = preview.date || "—";
-    $("message-body").textContent = preview.text || "（空白邮件）";
+    $("message-body").textContent = preview.text || t("(Empty message)");
     $("message-raw").textContent = data.raw || "";
     document.querySelector(".raw-message").open = false;
     $("reader-placeholder").hidden = true;
@@ -234,12 +238,12 @@ $("compose-form").addEventListener("submit", (event) => {
   busy(event.currentTarget, async () => {
     formError("compose-error");
     const recipients = $("compose-to").value.split(/[,;，；\n]/).map((value) => value.trim()).filter(Boolean);
-    if (!recipients.length) { formError("compose-error", "请填写至少一个收件人邮箱。"); return; }
+    if (!recipients.length) { formError("compose-error", t("Enter at least one recipient email address.")); return; }
     try {
       await api("/api/send", { method: "POST", body: { to: recipients, subject: $("compose-subject").value, text: $("compose-text").value } });
       $("compose-dialog").close();
       $("compose-form").reset();
-      showNotice("邮件已加入投递队列。");
+      showNotice(t("Your message has been queued for delivery."));
       await loadInbox();
     } catch (error) { formError("compose-error", error.message); }
   });
@@ -261,7 +265,7 @@ $("delete-form").addEventListener("submit", (event) => {
       state.previews.delete(state.selected);
       clearReader();
       $("delete-dialog").close();
-      showNotice("邮件已删除。");
+      showNotice(t("Message deleted."));
       await loadInbox();
     } catch (error) { formError("delete-error", error.message); }
   });
@@ -276,8 +280,8 @@ async function loadAdmin() {
     if (user !== state.user) return;
     if (results[0].status === "fulfilled") {
       const stats = results[0].value;
-      $("stat-messages").textContent = Number(stats.messages).toLocaleString();
-      $("stat-queued").textContent = Number(stats.queued).toLocaleString();
+      $("stat-messages").textContent = Number(stats.messages).toLocaleString(PostPlusI18n.language);
+      $("stat-queued").textContent = Number(stats.queued).toLocaleString(PostPlusI18n.language);
       $("stat-bytes").textContent = bytes(stats.bytes);
     } else {
       ["stat-messages", "stat-queued", "stat-bytes"].forEach((id) => { $(id).textContent = "—"; });
@@ -289,11 +293,11 @@ async function loadAdmin() {
         const row = element("tr");
         const email = element("td", "", account.username);
         const role = element("td");
-        role.append(element("span", account.admin ? "role-badge admin" : "role-badge", account.admin ? "管理员" : "普通用户"));
+        role.append(element("span", account.admin ? "role-badge admin" : "role-badge", t(account.admin ? "Administrator" : "User")));
         const actions = element("td");
-        const button = element("button", "table-action", "重置密码");
+        const button = element("button", "table-action", t("Reset password"));
         button.type = "button";
-        button.setAttribute("aria-label", `重置 ${account.username} 的密码`);
+        button.setAttribute("aria-label", t("Reset password for {username}", {username: account.username}));
         button.addEventListener("click", () => openUserDialog(account.username));
         actions.append(button);
         row.append(email, role, actions);
@@ -308,7 +312,7 @@ async function loadAdmin() {
       const fragment = document.createDocumentFragment();
       results[2].value.jobs.forEach((job) => {
         const row = element("tr");
-        row.append(element("td", "", job.recipient), element("td", "", job.state === "pending" ? "等待投递" : "已隔离"),
+        row.append(element("td", "", job.recipient), element("td", "", t(job.state === "pending" ? "Pending" : "Quarantined")),
           element("td", "", String(job.attempts)), element("td", "", job.error || "—"));
         fragment.append(row);
       });
@@ -326,7 +330,7 @@ function openUserDialog(username = "") {
   state.userMode = username ? "password" : "create";
   $("user-form").reset();
   formError("user-error");
-  $("user-dialog-title").textContent = username ? "重置密码" : "新建用户";
+  $("user-dialog-title").textContent = username ? t("Reset password") : t("Create user");
   $("new-email").value = username;
   $("new-email").readOnly = Boolean(username);
   $("admin-checkbox-label").hidden = Boolean(username);
@@ -348,9 +352,9 @@ $("user-form").addEventListener("submit", (event) => {
       $("new-password").value = "";
       if (changing && currentAccount) {
         signedOut();
-        showNotice("密码已更新，请使用新密码登录。");
+        showNotice(t("Password updated. Sign in with your new password."));
       } else {
-        showNotice(changing ? "密码已更新，该用户的登录会话已失效。" : "用户账号已创建。");
+        showNotice(changing ? t("Password updated. This user's sessions have been revoked.") : t("User account created."));
         await loadAdmin();
       }
     } catch (error) { formError("user-error", error.message); }
@@ -366,3 +370,82 @@ $("user-dialog").addEventListener("close", () => { $("new-password").value = "";
   try { await signedIn(await api("/api/session", { quiet: true })); }
   catch { $("login-email").focus(); }
 })();
+
+
+let logVersion = 0;
+let logData = null;
+function renderLogs() {
+  if (!logData) return;
+  const selected = $("logs-service").value;
+  const all = element("option", "", t("All services"));
+  all.value = "";
+  $("logs-service").replaceChildren(all);
+  const services = [...new Set([...(logData.services || []), ...(selected ? [selected] : [])])].sort();
+  services.forEach(service => {
+    const option = element("option", "", service);
+    option.value = service;
+    $("logs-service").append(option);
+  });
+  $("logs-service").value = selected;
+  const fragment = document.createDocumentFragment();
+  (logData.entries || []).forEach(entry => {
+    const row = element("tr");
+    const level = {debug:"Debug",info:"Info",warn:"Warning",warning:"Warning",error:"Error"}[entry.level] || entry.level;
+    row.append(element("td", "log-time", entry.timestamp), element("td", "", entry.service),
+      element("td", "", t(level)), element("td", "", String(entry.pid ?? "")), element("td", "log-message", entry.message));
+    fragment.append(row);
+  });
+  $("logs-body").replaceChildren(fragment);
+  $("logs-empty").hidden = Boolean(logData.entries?.length);
+  $("logs-status").textContent = t(logData.truncated ? "Showing {count} recent events. Older events are omitted." : "Showing {count} recent events.", {count: logData.entries?.length || 0});
+}
+async function loadLogs() {
+  if (!state.user?.admin) return;
+  const user = state.user;
+  const version = ++logVersion;
+  const query = new URLSearchParams({limit:"100"});
+  if ($("logs-service").value) query.set("service", $("logs-service").value);
+  if ($("logs-level").value) query.set("level", $("logs-level").value);
+  $("logs-refresh").disabled = true;
+  $("logs-body").setAttribute("aria-busy", "true");
+  $("logs-status").textContent = t("Loading logs…");
+  formError("logs-error");
+  try {
+    const result = await api(`/api/admin/logs?${query}`);
+    if (version !== logVersion || user !== state.user) return;
+    logData = result;
+    renderLogs();
+  } catch (error) {
+    if (version !== logVersion || user !== state.user) return;
+    logData = null;
+    $("logs-body").replaceChildren();
+    $("logs-empty").hidden = true;
+    $("logs-status").textContent = "";
+    formError("logs-error", error.message);
+  } finally {
+    if (version === logVersion) {
+      $("logs-refresh").disabled = false;
+      $("logs-body").removeAttribute("aria-busy");
+    }
+  }
+}
+$("logs-refresh").addEventListener("click", loadLogs);
+$("logs-service").addEventListener("change", loadLogs);
+$("logs-level").addEventListener("change", loadLogs);
+document.addEventListener("postplus:language", () => {
+  document.title = state.user ? `${t(state.view === "admin" ? "Administration" : "Inbox")} · ${state.user.username} · PostPlus` : t("PostPlus · Your mail, in order");
+  $("notice").hidden = true;
+  for (const id of ["login-error", "compose-error", "user-error", "delete-error", "logs-error"]) formError(id);
+  $("user-dialog-title").textContent = t(state.userMode === "password" ? "Reset password" : "Create user");
+  $("mail-status").textContent = t(state.loading ? "Syncing…" : "Ready");
+  renderMessages();
+  if (state.selected) {
+    const preview = state.previews.get(state.selected) || {};
+    $("message-subject").textContent = preview.subject || t("(No subject)");
+    $("message-body").textContent = preview.text || t("(Empty message)");
+  }
+  if (state.user?.admin && state.view === "admin") { loadAdmin(); renderLogs(); }
+});
+document.title = t("PostPlus · Your mail, in order");
+$("mail-status").textContent = t("Ready");
+$("message-total").textContent = t("{count} messages", {count:0});

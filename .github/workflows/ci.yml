@@ -26,13 +26,18 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: '3.13'
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
       - name: Configure
         run: xmake f -m ${{ matrix.mode }} -y
       - name: Build all services
         run: xmake build -y
       - name: Unit tests
         run: xmake test -v
-      - name: Protocol and service integration
+      - name: Web language and asset checks
+        run: node tests/web_test.js
+      - name: Protocol, setup and supervisor integration
         run: python tests/integration.py --build-dir build --mode ${{ matrix.mode }}
       - name: Upload diagnostic logs
         if: failure()

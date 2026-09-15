@@ -1,4 +1,5 @@
 #include <postplus/core.hpp>
+#include <postplus/process.hpp>
 #include <asio/ssl.hpp>
 #include <openssl/crypto.h>
 #include <openssl/evp.h>
@@ -87,12 +88,6 @@ std::string base64_decode(std::string_view input) {
     if (base64_encode(output) != input) throw std::invalid_argument("noncanonical base64");
     return output;
 }
-void log(const std::string& service, const std::string& message) {
-    static std::mutex mutex;
-    std::lock_guard lock(mutex);
-    // Callers must never log credentials, message bodies, or arbitrary protocol lines.
-    std::cerr << '[' << service << "] " << message << '\n';
-}
 Config Config::load(int argc, char** argv) {
     std::filesystem::path path = "config/postplus.json";
     for (int i = 1; i < argc; ++i) {
@@ -101,13 +96,16 @@ Config Config::load(int argc, char** argv) {
             path = argv[i];
         }
     }
+    return from_file(path);
+}
+Config Config::from_file(const std::filesystem::path& path) {
     Config config;
     config.source = std::filesystem::absolute(path);
     std::ifstream file(config.source);
     if (!file) throw std::runtime_error("cannot open config: " + config.source.string());
     file >> config.values;
     if (!config.values.is_object()) throw std::invalid_argument("config must be a JSON object");
-    for (const auto* key : {"data_dir", "web_root", "tls_certificate", "tls_private_key"}) {
+    for (const auto* key : {"data_dir", "web_root", "tls_certificate", "tls_private_key", "log_dir", "service_token_file"}) {
         auto value = config.text(key);
         if (value.empty()) continue;
         auto resolved = std::filesystem::path(value);
@@ -115,6 +113,7 @@ Config Config::load(int argc, char** argv) {
         config.values[key] = resolved.lexically_normal().string();
     }
     if (config.text("data_dir").empty()) config.values["data_dir"] = (config.source.parent_path() / "../data").lexically_normal().string();
+    if (config.text("log_dir").empty()) config.values["log_dir"] = (std::filesystem::path(config.text("data_dir")) / "logs").string();
     if (config.text("tls_certificate").empty() != config.text("tls_private_key").empty()) throw std::invalid_argument("both TLS certificate and private key are required");
     if (config.number("max_message_bytes", 10485760) < 1024 || config.number("max_message_bytes", 10485760) > 100 * 1024 * 1024) throw std::invalid_argument("max_message_bytes must be 1024..104857600");
     if (config.number("max_connections", 32) < 1 || config.number("max_connections", 32) > 1024) throw std::invalid_argument("max_connections must be 1..1024");
@@ -136,9 +135,19 @@ int Config::port(const std::string& service) const {
 std::string Config::token() const {
     const auto name = text("service_token_env", "POSTPLUS_SERVICE_TOKEN");
     const char* token_value = std::getenv(name.c_str());
-    if (!token_value || std::string_view(token_value).size() < 32) throw std::runtime_error("set " + name + " to a random secret of at least 32 characters");
-    const std::string result(token_value);
-    if (result.size() > 1024 || result.find_first_of("\r\n") != std::string::npos) throw std::invalid_argument("invalid service token");
+    std::string result;
+    if (token_value && *token_value) result = token_value;
+    else if (!text("service_token_file").empty()) {
+        auto path = std::filesystem::path(text("service_token_file"));
+        if (path.is_relative()) path = source.parent_path() / path;
+        if (std::filesystem::is_symlink(std::filesystem::symlink_status(path)) || !std::filesystem::is_regular_file(path) || std::filesystem::file_size(path) > 1024)
+            throw std::runtime_error("invalid service token file");
+        std::ifstream file(path,std::ios::binary);
+        if (!file) throw std::runtime_error("cannot read service token file");
+        result.assign(std::istreambuf_iterator<char>(file),std::istreambuf_iterator<char>());
+        result = trim(result);
+    } else throw std::runtime_error("set " + name + " or configure service_token_file");
+    if (result.size() < 32 || result.size() > 1024 || result.find_first_of("\r\n\0",0,3) != std::string::npos) throw std::invalid_argument("invalid service token");
     return result;
 }
 
@@ -251,7 +260,7 @@ void Connection::start_tls_client(const std::string& hostname) {
     if (SSL_set_tlsext_host_name(impl_->tls->native_handle(), hostname.c_str()) != 1) throw std::runtime_error("cannot set TLS hostname");
     impl_->wait([&](auto done) { impl_->tls->async_handshake(asio::ssl::stream_base::client, done); });
 }
-void serve_tcp(const Config& config, const std::string& service, Session handler, bool internal) {
+void serve_tcp(const Config& config, const std::string& service, Session handler, bool internal, std::function<bool()> stop_requested) {
     asio::io_context io;
     const auto address = asio::ip::make_address(internal ? "127.0.0.1" : config.text("bind", "127.0.0.1"));
     tcp::acceptor acceptor(io, {address, static_cast<unsigned short>(config.port(service))});
@@ -261,10 +270,24 @@ void serve_tcp(const Config& config, const std::string& service, Session handler
     // Registry is only accessed from the listener executor, never from workers.
     std::vector<std::weak_ptr<Connection>> connections;
     asio::signal_set signals(io, SIGINT, SIGTERM);
-    signals.async_wait([&](std::error_code, int) {
+    asio::steady_timer stop_timer(io);
+    (void)process_stop_requested();
+    auto stop_listener = [&](bool cancel_sessions) {
         std::error_code ec; acceptor.close(ec);
-        for (auto& weak : connections) if (auto connection = weak.lock()) connection->request_stop();
+        signals.cancel(); stop_timer.cancel();
+        if (cancel_sessions) for (auto& weak : connections) if (auto connection = weak.lock()) connection->request_stop();
+    };
+    signals.async_wait([&](std::error_code ec, int) {
+        if (!ec) stop_listener(true);
     });
+    std::function<void()> check_stop;
+    check_stop = [&] {
+        if (process_stop_requested()) { stop_listener(true); return; }
+        if (stop_requested && stop_requested()) { stop_listener(false); return; }
+        stop_timer.expires_after(std::chrono::milliseconds(100));
+        stop_timer.async_wait([&](std::error_code ec) { if (!ec) check_stop(); });
+    };
+    check_stop();
     std::function<void()> accept_next;
     accept_next = [&] {
         auto connection = std::make_shared<Connection>(std::chrono::seconds(config.number("timeout_seconds", 30)));
@@ -275,7 +298,7 @@ void serve_tcp(const Config& config, const std::string& service, Session handler
                 ++active;
                 asio::post(workers, [&,connection] {
                     try { handler(*connection); }
-                    catch (const std::exception&) { log(service, "session closed after I/O or protocol error"); }
+                    catch (const std::exception&) { log(service, "session closed after I/O or protocol error", "debug"); }
                     --active;
                 });
             }
@@ -382,7 +405,7 @@ void reject_request(Connection& connection, const HttpRequest& request, const Ht
 HttpResponse json_response(const Json& value, int status) {
     return {status, "application/json; charset=utf-8", value.dump(-1, ' ', false, Json::error_handler_t::replace), {}};
 }
-void serve_http(const Config& config, const std::string& service, HttpHandler handler, bool internal, HttpPreflight preflight) {
+void serve_http(const Config& config, const std::string& service, HttpHandler handler, bool internal, HttpPreflight preflight, std::function<bool()> stop_requested) {
     serve_tcp(config, service, [&](Connection& connection) {
         if (!internal && !config.text("tls_certificate").empty()) connection.start_tls_server(config);
         try {
@@ -431,7 +454,7 @@ void serve_http(const Config& config, const std::string& service, HttpHandler ha
             connection.set_deadline(std::nullopt);
             send_response(connection, json_response({{"ok",false},{"error","service unavailable"}}, 503));
         }
-    }, internal);
+    }, internal, std::move(stop_requested));
 }
 void serve_rpc(const Config& config, const std::string& service, std::function<Json(const Json&)> handler) {
     serve_http(config, service, [handler](const HttpRequest& request) {
@@ -465,10 +488,13 @@ int service_main(const std::string& name, int argc, char** argv, std::function<v
             return 0;
         }
         const auto config = Config::load(argc, argv);
+        configure_logging(config,name);
+        log(name,"service starting");
         run(config);
+        log(name,"service stopped");
         return 0;
     } catch (const std::exception& error) {
-        log(name, error.what());
+        log(name, error.what(), "error");
         return 1;
     }
 }

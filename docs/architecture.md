@@ -1,43 +1,109 @@
-# 架构、可靠性与容量目标
+# Architecture, reliability, and operations
 
-## 边界
+## Process boundaries
 
-PostPlus 0.1 是单机、多进程实现。SMTP、POP3、IMAP 分别持有客户端会话，使用同一认证和存储 RPC 约定。认证进程独占 `auth.sqlite3`，存储进程独占 `storage.sqlite3`。MIME 是共享库，反垃圾规则和 ClamAV 客户端位于独立 filter 进程。Webmail 与管理员 API 共用 Web 进程，但账户角色检查在服务器端执行。
+PostPlus is a single-host, multi-process mail server. SMTP, POP3, and IMAP own their client sessions and share authentication and storage RPC contracts. `postplus-auth` owns `auth.sqlite3`; `postplus-storage` owns `storage.sqlite3`. MIME parsing is a shared C++ library. Spam rules and the ClamAV client run in the filter service. Webmail and administrator APIs share the web service, with server-side role checks.
 
-内部 RPC 没有网络部署模式：固定连接 127.0.0.1，不能把内部端口暴露给不受信任的网络。共享服务令牌赋予内部权限，不提供进程间细粒度授权。Unix 新数据目录设为仅 owner 可访问，数据库文件限制为 owner 读写；Windows 部署需要通过 ACL 限制数据目录。不要与不受信任的程序共用服务账户。
+```mermaid
+flowchart LR
+    Launcher[Native supervisor] -. manages .-> Services[Nine service processes]
+    Clients[Mail clients] --> SMTP[SMTP]
+    Clients --> Access[POP3 / IMAP]
+    Browser[Browser] --> Web[Webmail / administration / API]
+    SMTP --> Auth[Authentication]
+    Access --> Auth
+    Web --> Auth
+    SMTP --> Storage[Mailbox and queue storage]
+    Access --> Storage
+    Web --> Storage
+    Delivery[Delivery worker] --> Storage
+    Delivery --> Filter[Spam rules / ClamAV]
+    Delivery --> Transfer[SMTP transfer]
+    Transfer --> Relay[Configured SMTP relay]
+```
 
-## 接收与投递
+Internal RPC uses HTTP/1.1 JSON on `127.0.0.1`. Raw mail is encoded as Base64 on the RPC wire so binary content survives JSON transport. A shared token authenticates internal requests and grants full internal access; there is no remote RPC deployment mode or per-service authorization policy.
 
-1. SMTP 校验本域收件人，外域需认证且配置上游；限制大小与收件人数。
-2. storage 在单事务中把每个收件人写成独立队列任务，提交后 SMTP 才返回 250。
-3. 单个 delivery 工作进程读取一个到期任务，调用 filter。
-4. 明确拒绝进入持久隔离状态；scanner/RPC/存储故障触发重试，不当作安全通过。
-5. 本域按 `delivery_id + username` 幂等投递并删除任务；外域由 transfer 通过 SMTP 发给指定上游。
+Run the services under a dedicated, trusted account. Newly created Unix data directories are owner-only and databases are owner-readable/writable. Windows installations should restrict data-directory ACLs. Setup creates its configuration and token files with restrictive permissions on both platform families.
 
-投递进程使用配置中的本机 `delivery_lock_port` 绑定作为单实例锁，崩溃会自动释放。服务重启保留账号、邮件、UID、UIDVALIDITY、队列、重试状态和幂等记录。外发无法保证 exactly-once；SMTP 对端已经接收而本地未记录成功时，重试可能出现重复。
+## Native startup and shutdown
 
-当前无自动退信、保留期清理或隔离邮件释放 UI。后台队列提供任务、次数、下次尝试时间和最后错误，运维可据此定位。永久上游错误也保留队列，后续应分类 4xx/5xx 并生成 DSN。幂等墓碑和隔离邮件需要在实现可审计的保留期策略后再清理。
+`postplus` locates its sibling executables and starts them directly, without a shell. It checks the installation and service ports before launch, then starts authentication, storage, filtering, and transfer before delivery and the public-facing services. Each service has a bounded readiness check. Any unexpected child exit stops the entire group and makes the launcher fail.
 
-## 网络资源模型
+Ctrl+C or SIGTERM requests group shutdown. Children receive a graceful stop request and share a 35-second shutdown budget; remaining children are terminated and reaped. Windows children have no visible console windows, use stop events, and belong to a Job Object configured to terminate them when the launcher closes. Unix children use process groups and SIGTERM followed by SIGKILL when necessary. Linux additionally requests termination when the parent process dies.
 
-standalone Asio 执行异步 socket、TLS 和定时器操作；协议层通过 `Connection` 进行阻塞式会话编排。每个监听进程拥有 `max_connections` 个工作线程，接入会话总数达到限制时关闭新连接，不积累无界任务。默认每服务 32 个会话，不代表 32 个账户。HTTP 一请求一连接，未实现 keep-alive、chunked request、HTTP/2 或反向代理身份头信任。
+The launcher can be run from a terminal or supervised by an OS service manager. Service installation, automatic restart policies, configuration reload, and boot integration are not bundled. Keep all service executables beside the launcher and retain access to the configured web assets.
 
-操作超时在整个命令行或固定长度读取期间生效；HTTP 的请求行、整组请求头和正文共用总截止时间，慢速输入不能持续刷新预算。Web 登录正文最多 16 KiB，发送较大正文前先验证会话与 CSRF。SMTP DATA 阶段整体最多 `smtp_data_timeout_seconds`（默认 120 秒），已认证 IMAP 会话没有独立总时长限制。操作系统停止信号关闭接收器，并标记现有连接停止；当前操作在截止时间内结束，之后不再接受新操作。服务管理器仍应配置停止宽限期和强制终止上限。
+## First-run configuration
 
-共享 auth 进程当前每账户每分钟最多 30 次、全局每分钟最多 600 次密码验证。Web 额外限制每 IP 每分钟 20 次、全局 120 次登录。达到限制返回认证失败/429；这些是开发版的保守上限，重启后窗口清空，不是分布式防爆破系统。
+Only a missing configuration file starts setup. Invalid JSON, unreadable existing files, and other existing configuration paths fail without being overwritten.
 
-## 面向数百到数千用户的下一阶段
+The native launcher serves a temporary setup page on IPv4 loopback, normally port 8080. A random per-run token is printed in a URL fragment; the page removes the fragment from the address bar and sends the token in `X-Setup-Token` headers. Setup checks loopback peers, allowed Host values, and supplied Origin headers. The normal web server does not expose setup routes.
 
-优先次序由用户确定：协议兼容与安全在先。
+The form configures a single domain, the first administrator, storage, all service ports, TLS, the SMTP relay, and ClamAV. Local development mode permits unencrypted authentication only from loopback. Public listening addresses require a valid, matching TLS certificate/key pair and disabled insecure authentication. Certificate generation, DNS changes, relay connectivity, and ClamAV installation are outside the wizard.
 
-1. **协议互操作**：补齐 IMAP mailbox/APPEND/COPY/ENVELOPE/BODYSTRUCTURE/IDLE，POP3 独占锁；对 Thunderbird、Apple Mail 和其他目标客户端建立真实互操作回归集。不能仅凭 CAPABILITY 中的 IMAP4rev1 字样判断完整兼容。
-2. **安全边界**：状态机 fuzz、TLS 降级/重协商/握手洪泛测试、统一 IP/账户限流和审计事件、会话撤销、服务间分角色令牌，防止一个组件泄漏后获得所有内部权限。
-3. **容量测量**：建立代表性 100/1,000/5,000 账户、不同活跃连接数、10 KiB/1 MiB/10 MiB 邮件、含附件和大邮箱的基线。测量认证 p95/p99、SMTP 入队时延、队列年龄、FETCH 吞吐、内存、线程数、数据库 WAL 和磁盘同步时延。
-4. **根据测量改造**：让每个协议会话使用共享 io_context 上的协程；PBKDF2 和数据库单独使用有界执行队列；邮件原文与邮箱元数据分离，减少多收件人 BLOB 复制；加入领取租约后再并行消费队列，避免绕过幂等保证。
-5. **运维能力**：配额管理、数据库在线备份/恢复演练、可观测性、保留期清理、隔离释放审核、优雅重载、系统服务安装包；需要公网收发时再补 DNS/MX、DKIM/SPF/DMARC 和退信机制。
+On submission, setup:
 
-在这些测量和互操作测试完成前，当前提交适合开发和受控试用，不能给出生产并发容量承诺。
+1. Validates field types, domain/account consistency, TLS files, and distinct available ports.
+2. Writes a private random token file and an exclusive staging configuration beside the requested destination.
+3. Starts an isolated authentication process and provisions the administrator through authenticated RPC. An existing account is accepted only when its password matches and it already has administrator privileges.
+4. Stops the temporary authentication process and atomically commits the configuration without replacing an existing destination.
+5. Closes the setup listener and starts the normal service group.
 
-## 备份与恢复
+The plaintext administrator password is not written to configuration or log files. If provisioning or commit fails, temporary configuration and token files are cleaned up; the authentication database can retain a provisioned account. Retrying with the same administrator credentials handles that case without resetting an existing account.
 
-最简单的一致备份方式是先停止全部进程，再复制整个数据目录及配置，安全保存服务令牌与 TLS 私钥。运行中不能只复制 `.sqlite3` 而遗漏 WAL；在线备份应使用 SQLite backup API（当前没有专门管理端点）。恢复后先在隔离端口验证 UID、队列和认证，再接收新邮件。切勿手工只回滚某一个数据库而假设与另一个数据库仍然一致。
+`service_token_env` takes precedence when its environment variable is nonempty. Otherwise, `service_token_file` supplies the shared token. The wizard generates the latter so a new installation does not require manual environment setup. Relative paths in manually maintained configurations resolve from the configuration directory. Configuration changes require a restart; the setup API is not a general configuration editor.
+
+## Receiving and delivering mail
+
+1. SMTP validates local recipients. External recipients require authentication and a configured relay.
+2. Storage creates one queue job per recipient in a single transaction. SMTP returns success only after commit.
+3. The delivery worker reads a due job and invokes the filter service.
+4. Explicit rejection persists the job in quarantine. Scanner, RPC, or storage failures trigger retries.
+5. Local delivery is deduplicated by delivery ID and username. External mail is sent by the transfer service through the configured SMTP relay.
+
+SQLite uses WAL and FULL synchronization. Restarts preserve accounts, messages, UIDs, UIDVALIDITY, queue state, retries, and deduplication records. `delivery_lock_port`, default 18085, is a loopback socket used as an exclusive worker lock and released by the OS when the process exits.
+
+Retries use exponential backoff, capped at one hour. Local deduplication records survive message deletion so a retry cannot restore a deleted message. Outbound SMTP has at-least-once semantics: a crash after the relay accepts mail but before local acknowledgement can cause a duplicate.
+
+There is no automatic DSN generation, retention cleanup, or quarantine-release interface. Permanent relay errors remain queued. Queue inspection exposes attempts, retry times, states, and diagnostic errors without exposing message bodies. An audited retention policy is needed before purging quarantine or deduplication records.
+
+## Logging
+
+The supervisor and services write structured JSON Lines logs under `log_dir`, defaulting to `<data_dir>/logs`. Entries contain `timestamp` in UTC, `service`, `level`, `pid`, and `message`. Log levels are `debug`, `info`, `warn`, and `error`; the configured threshold defaults to `info`.
+
+Files are named `<service>.jsonl`, with `.1` through `.N` rotation backups. `log_max_bytes` defaults to 5 MiB and accepts 1 KiB through 100 MiB. `log_backups` defaults to 3 and accepts 1 through 10. A per-service interprocess lock serializes appends and rotation. The CLI shares the `postplus` log file.
+
+Events include service lifecycle, delivery results, login outcomes, and administrator account operations. Callers exclude credentials and message bodies; the logger additionally redacts the configured service token and relay password and removes terminal control characters. Logging failures are reported to stderr without aborting mail transactions. Logs are diagnostic records, not a durable transactional audit ledger.
+
+Administration shows recent entries with service and exact-level filters. Its API reads at most 64 KiB from each current/rotated file and returns up to 500 entries, newest first, with a `truncated` flag. This bounded snapshot is not a complete log export. File rotation can race with reads; unavailable tails are skipped.
+
+All web interfaces default to English and offer Simplified Chinese. The browser stores the language preference locally. Account data, mail content, API field names, and recorded log messages are not translated.
+
+## Resource model and security limits
+
+Standalone Asio performs asynchronous socket, TLS, and timer operations. Protocol code composes them through blocking `Connection` sessions on a bounded worker pool. `max_connections` defaults to 32 per listening service; excess connections are closed rather than queued without a bound. This is a session limit, not an account limit.
+
+HTTP handles one request per connection. Keep-alive, chunked requests, HTTP/2, and trusted reverse-proxy identity headers are not implemented. Request lines, headers, and bodies share a total deadline. Login bodies are limited to 16 KiB, and authenticated web operations check the session and CSRF before reading large bodies. SMTP DATA has a separate total deadline, defaulting to 120 seconds. Services close listeners and mark active connections for cancellation when stopping.
+
+Passwords use salted PBKDF2-HMAC-SHA256 with at least 600,000 iterations and constant-time comparison. Unknown users incur password-hashing work. Auth currently limits verification to 30 attempts per account per minute and 600 globally. Web login additionally limits each IP to 20 attempts per minute and the web process to 120. These in-memory limits reset on restart.
+
+TLS requires version 1.2 or newer. Web sessions use random tokens, HttpOnly/SameSite cookies, CSRF checks, and administrator roles. The mail viewer renders text rather than executing message HTML. Input sizes, parser depth, mailbox size, and queue resources are bounded; detailed protocol behavior is documented in [protocols.md](protocols.md).
+
+## Capacity and development priorities
+
+The architecture targets deployments with hundreds to thousands of accounts, but that capacity has not been validated. The current worker pools, serialized SQLite writes, and single delivery worker require representative workload measurements.
+
+Development priorities are:
+
+1. Complete IMAP interoperability, POP3 locking, and regression tests with real mail clients.
+2. Extend protocol fuzzing, TLS/state-machine tests, rate limits, session revocation, and service-specific authorization.
+3. Measure authentication latency, SMTP enqueue latency, queue age, FETCH throughput, memory, threads, and disk synchronization under realistic mailbox sizes and active-session counts.
+4. Use those measurements to guide coroutine sessions, bounded hash/database execution, content-storage separation, and leased parallel delivery.
+5. Add backup/recovery tooling, retention policy, quarantine review, service packaging, and internet-mail features as required.
+
+## Backup and recovery
+
+For a consistent offline backup, stop the entire service group and copy the data directory, configuration, service-token file, and TLS credentials to protected storage. Copying only live `.sqlite3` files can omit WAL contents; a future online backup facility should use SQLite's backup API.
+
+After restoring, validate authentication, UIDs, and queue state on isolated ports before accepting mail. Treat authentication and storage databases as one installation snapshot rather than independently rolling one back.

@@ -36,7 +36,7 @@ def run(s):
     for user in (alice, bob, charlie, delta):
         assert s.rpc("auth", op="create", username=user, password=PASSWORD)["ok"]
 
-    with smtplib.SMTP("127.0.0.1", s.ports["smtp"], timeout=10) as client:
+    with smtplib.SMTP("127.0.0.1", s.ports["smtp"], local_hostname="localhost", timeout=10) as client:
         client.ehlo()
         for invalid, code in (("MAIL FROM:garbage", 501), ("MAIL FROM:<alice@localhost> SIZE=65537", 552),
                               ("MAIL FROM:<alice@localhost> SIZE=garbage", 555)):
@@ -134,7 +134,7 @@ def run(s):
         stream.close()
     print("PASS literal continuations, zero/oversized literal handling and LF-smuggling rejection", flush=True)
 
-    with smtplib.SMTP("127.0.0.1", s.ports["smtp"], timeout=10) as client:
+    with smtplib.SMTP("127.0.0.1", s.ports["smtp"], local_hostname="localhost", timeout=10) as client:
         client.ehlo()
         for index in range(3):
             encoded = base64.b64encode(f"\0missing-smtp-{index}@localhost\0wrong-password".encode()).decode()
@@ -176,7 +176,7 @@ def data_deadline(s):
         s.start(name)
     recipient = "deadline@localhost"
     assert s.rpc("auth", op="create", username=recipient, password=PASSWORD)["ok"]
-    with smtplib.SMTP("127.0.0.1", s.ports["smtp"], timeout=5) as client:
+    with smtplib.SMTP("127.0.0.1", s.ports["smtp"], local_hostname="localhost", timeout=5) as client:
         client.ehlo()
         assert client.mail("sender@localhost")[0] == 250
         assert client.rcpt(recipient)[0] == 250
@@ -200,7 +200,7 @@ def data_deadline(s):
         client.close()
     assert s.rpc("storage", op="queue_list", limit=100)["jobs"] == []
     # A complete DATA exchange clears the absolute deadline for subsequent commands.
-    with smtplib.SMTP("127.0.0.1", s.ports["smtp"], timeout=5) as client:
+    with smtplib.SMTP("127.0.0.1", s.ports["smtp"], local_hostname="localhost", timeout=5) as client:
         client.ehlo()
         assert client.sendmail("sender@localhost", [recipient], b"Subject: complete\r\n\r\nbody\r\n") == {}
         time.sleep(1.2)

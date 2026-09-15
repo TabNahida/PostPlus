@@ -85,7 +85,7 @@ def check_protocol_tls(suite):
     for username in (alice, bob):
         assert suite.rpc("auth", op="create", username=username, password=PASSWORD, admin=username == alice)["ok"]
     raw = b"From: alice@localhost\r\nTo: bob@localhost\r\nSubject: TLS delivery\r\n\r\nTLS mail\r\n.dot\r\n"
-    with smtplib.SMTP("localhost", suite.ports["smtp"], timeout=10) as client:
+    with smtplib.SMTP("localhost", suite.ports["smtp"], local_hostname="localhost", timeout=10) as client:
         client.ehlo()
         assert client.has_extn("starttls") and not client.has_extn("auth")
         credentials = base64.b64encode(b"\0" + alice.encode() + b"\0" + PASSWORD.encode()).decode()

@@ -151,6 +151,7 @@ public:
                 update.done();
                 if (sqlite3_changes(db_) != 1) return {{"ok", false}, {"error", "user does not exist"}};
             }
+            log("auth",(operation == "create" ? "account created: " : "password changed: ") + username);
             return {{"ok", true}, {"username", username}};
         }
         if (operation == "exists") {
@@ -208,7 +209,10 @@ private:
         }
         const auto computed = password_hash(password, salt_value, iterations);
         const auto matches = secure_equal(computed, expected);
-        if (!found || !matches) return {{"ok", false}, {"error", "invalid credentials"}};
+        if (!found || !matches) {
+            log("auth","authentication failed: " + username,"warn");
+            return {{"ok", false}, {"error", "invalid credentials"}};
+        }
         if (iterations < rounds_) {
             auto new_salt = salt();
             auto new_hash = password_hash(password, new_salt, rounds_);

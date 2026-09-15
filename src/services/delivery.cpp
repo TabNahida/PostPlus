@@ -1,4 +1,5 @@
 #include <postplus/core.hpp>
+#include <postplus/process.hpp>
 #include <algorithm>
 #include <csignal>
 #include <fstream>
@@ -20,7 +21,7 @@ void process(const Config& config, const Json& job) {
     if (scan.value("action", "reject") != "accept") {
         // Keep rejected mail durable and visible to administrators; never auto-release it.
         require_ok(rpc(config,"storage",{{"op","queue_reject"},{"id",id},{"error",scan.value("reason","policy rejection")}}));
-        log("delivery", "quarantined queue item " + id);
+        log("delivery", "quarantined queue item " + id, "warn");
         return;
     }
     const auto local_domain = lower(config.text("domain","localhost"));
@@ -48,22 +49,22 @@ int main(int argc, char** argv) {
         worker_lock.bind({asio::ip::address_v4::loopback(),static_cast<unsigned short>(lock_port)});
         worker_lock.listen(1);
         log("delivery","queue worker started");
-        while (!stopping) {
+        while (!stopping && !process_stop_requested()) {
             try {
                 const auto batch = require_ok(rpc(config,"storage",{{"op","queue_list"},{"limit",1}}));
                 for (const auto& job : batch.at("jobs")) {
-                    if (stopping) break;
+                    if (stopping || process_stop_requested()) break;
                     try { process(config,job); }
                     catch (const std::exception&) {
                         const auto id = job.at("id").get<std::string>();
                         const int attempts = std::clamp(job.value("attempts",0),0,10);
                         require_ok(rpc(config,"storage",{{"op","queue_retry"},{"id",id},{"delay",std::min(3600, 5 * (1 << attempts))},{"error","temporary delivery failure; check service health and configuration"}}));
-                        log("delivery","deferred queue item " + id);
+                        log("delivery","deferred queue item " + id, "warn");
                     }
                 }
                 if (!batch.at("jobs").empty()) continue;
-            } catch (const std::exception&) { log("delivery","queue unavailable; retrying"); }
-            for (int i=0; i<10 && !stopping; ++i) std::this_thread::sleep_for(std::chrono::milliseconds(100));
+            } catch (const std::exception&) { log("delivery","queue unavailable; retrying", "warn"); }
+            for (int i=0; i<10 && !stopping && !process_stop_requested(); ++i) std::this_thread::sleep_for(std::chrono::milliseconds(100));
         }
     });
 }

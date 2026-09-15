@@ -2,6 +2,7 @@
 #include "postplus/mime.hpp"
 
 #include <algorithm>
+#include <charconv>
 #include <fstream>
 #include <map>
 #include <mutex>
@@ -65,6 +66,31 @@ void require_ok(const Json& value, const std::string& message, int status = 503)
     if (!value.value("ok", false)) throw ApiError(status, message);
 }
 
+Json log_query(const Config& config, const std::string& path) {
+    std::string service, level;
+    std::size_t limit = 100;
+    const auto question = path.find('?');
+    std::set<std::string> seen;
+    if (question != std::string::npos) {
+        std::istringstream query(path.substr(question + 1));
+        std::string item;
+        while (std::getline(query,item,'&')) {
+            const auto equals = item.find('=');
+            if (equals == std::string::npos) throw ApiError(400,"Invalid log filters.");
+            const auto key = item.substr(0,equals), value = item.substr(equals + 1);
+            if (!seen.insert(key).second) throw ApiError(400,"Invalid log filters.");
+            if (key == "service") service = value;
+            else if (key == "level") level = value;
+            else if (key == "limit") {
+                const auto [end,error] = std::from_chars(value.data(),value.data()+value.size(),limit);
+                if (error != std::errc{} || end != value.data()+value.size()) throw ApiError(400,"Invalid log limit.");
+            } else throw ApiError(400,"Invalid log filters.");
+        }
+    }
+    try { return read_logs(config,service,level,limit); }
+    catch (const std::invalid_argument&) { throw ApiError(400,"Invalid log filters or limit."); }
+}
+
 std::optional<std::string> plain_text(const mime::Part& part) {
     if (lower(mime::header(part, "content-disposition")).starts_with("attachment")) return std::nullopt;
     if (part.content_type == "text/plain") return part.body;
@@ -103,6 +129,7 @@ public:
         const auto root = std::filesystem::path(config_.text("web_root", "web"));
         load_static(root, "/", "index.html", "text/html; charset=utf-8");
         load_static(root, "/app.js", "app.js", "application/javascript; charset=utf-8");
+        load_static(root, "/i18n.js", "i18n.js", "application/javascript; charset=utf-8");
         load_static(root, "/style.css", "style.css", "text/css; charset=utf-8");
     }
 
@@ -209,6 +236,7 @@ private:
         auto username = username_field(input);
         auto password = field(input, "password", 1024);
         auto user = rpc(config_, "auth", {{"op", "verify"}, {"username", username}, {"password", password}});
+        if (!user.value("ok",false)) log("web","sign-in failed for " + username + " from " + request.peer_address,"warn");
         require_ok(user, "The email address or password is incorrect.", 401);
         auto token = random_hex(32);
         WebSession session{user.at("username").get<std::string>(), random_hex(32), user.value("admin", false),
@@ -224,6 +252,7 @@ private:
                                        {"csrf", session.csrf}, {"expires_in", session_seconds_}});
         response.headers["Set-Cookie"] = "pp_session=" + token + "; Path=/; HttpOnly; SameSite=Strict; Max-Age=" +
                                          std::to_string(session_seconds_) + (request.encrypted ? "; Secure" : "");
+        log("web","signed in " + session.username + " from " + request.peer_address);
         return response;
     }
 
@@ -272,12 +301,15 @@ private:
             if (request.method == "DELETE") {
                 auto result = rpc(config_, "storage", {{"op", "delete"}, {"username", session.username}, {"ids", Json::array({id})}});
                 require_ok(result, "Unable to delete message.");
+                log("web","message deleted by " + session.username + ": " + id);
                 return json_response(result);
             }
         }
         if (request.method == "POST" && request.path == "/api/send") return send_mail(request, session);
         if (request.path.starts_with("/api/admin/")) {
             if (!session.admin) throw ApiError(403, "Administrator access is required.");
+            if (request.method == "GET" && (request.path == "/api/admin/logs" || request.path.starts_with("/api/admin/logs?")))
+                return json_response(log_query(config_,request.path));
             if (request.method == "GET" && request.path == "/api/admin/users") {
                 auto result = rpc(config_, "auth", {{"op", "list"}});
                 require_ok(result, "Unable to load accounts.");
@@ -301,6 +333,7 @@ private:
                 const auto password = password_field(input);
                 auto result = rpc(config_, "auth", {{"op", "create"}, {"username", username}, {"password", password}, {"admin", input.value("admin", false)}});
                 require_ok(result, "Unable to create account. This address may already exist.", 409);
+                log("web","administrator " + session.username + " created account " + username);
                 return json_response(result, 201);
             }
             if (request.method == "POST" && request.path == "/api/admin/password") {
@@ -309,6 +342,7 @@ private:
                 const auto password = password_field(input);
                 auto result = rpc(config_, "auth", {{"op", "change_password"}, {"username", username}, {"password", password}});
                 require_ok(result, "Unable to change password.", 400);
+                log("web","administrator " + session.username + " changed password for " + username);
                 std::lock_guard lock(mutex_);
                 std::erase_if(sessions_, [&username](const auto& item) { return item.second.username == username; });
                 return json_response(result);
@@ -351,6 +385,7 @@ HttpResponse Web::send_mail(const HttpRequest& request, const WebSession& sessio
     if (scanned.value("action", "reject") != "accept") throw ApiError(422, "The message was rejected by the server mail filter.");
     const auto result = rpc(config_, "storage", {{"op", "enqueue"}, {"sender", session.username}, {"recipients", recipients}, {"raw", raw}});
     require_ok(result, "Unable to queue your message.");
+    log("web","message queued by " + session.username + " for " + std::to_string(recipients.size()) + " recipients");
     return json_response(result, 202);
 }
 } // namespace

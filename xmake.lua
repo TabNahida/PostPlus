@@ -35,6 +35,14 @@ for _, service in ipairs({"auth", "storage", "filter", "smtp", "pop3", "imap", "
         end
 end
 
+target("postplus")
+    set_kind("binary")
+    add_files("src/tools/main.cpp")
+    add_deps("postplus-core")
+    for _, service in ipairs({"auth", "storage", "filter", "smtp", "pop3", "imap", "delivery", "transfer", "web"}) do
+        add_deps("postplus-" .. service, {inherit = false})
+    end
+
 target("postplus-ctl")
     set_kind("binary")
     add_files("src/tools/ctl.cpp")
@@ -51,3 +59,15 @@ target("postplus-mime-tests")
     add_files("tests/mime_test.cpp")
     add_deps("postplus-core")
     add_tests("mime")
+
+target("postplus-logging-tests")
+    set_kind("binary")
+    add_files("tests/logging_test.cpp")
+    add_deps("postplus-core")
+    add_tests("logging")
+
+target("postplus-process-tests")
+    set_kind("binary")
+    add_files("tests/process_test.cpp")
+    add_deps("postplus-core")
+    add_tests("process")

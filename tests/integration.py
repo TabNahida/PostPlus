@@ -59,6 +59,7 @@ class Suite:
         self.config.update(ports={k: v for k, v in self.ports.items() if k != "delivery"},
                            delivery_lock_port=self.ports["delivery"],
                            data_dir=str(directory / "data"), web_root=str(ROOT / "web"),
+                           log_dir=str(directory / "data/logs"),
                            max_message_bytes=65536, timeout_seconds=5, max_connections=8,
                            allow_insecure_auth=True)
         self.path = directory / "postplus.json"
@@ -142,7 +143,7 @@ def run(s):
 
     raw = (b"From: alice@localhost\r\nTo: bob@localhost\r\nSubject: protocol integration\r\n"
            b"Content-Type: text/plain; charset=iso-8859-1\r\n\r\nHello\r\n.dot-prefixed\r\nLatin byte: \xff\r\n")
-    with smtplib.SMTP("127.0.0.1", s.ports["smtp"], timeout=10) as client:
+    with smtplib.SMTP("127.0.0.1", s.ports["smtp"], local_hostname="localhost", timeout=10) as client:
         client.ehlo()
         assert client.mail(alice)[0] == 250
         assert client.rcpt("unknown@localhost")[0] == 550
@@ -206,6 +207,9 @@ def run(s):
     cookies = {"Cookie": headers["Set-Cookie"].split(";", 1)[0]}
     csrf = {**cookies, "X-CSRF-Token": login["csrf"]}
     assert s.http("web", "GET", "/api/admin/users", headers=cookies)[0] == 403
+    assert s.http("web", "GET", "/api/admin/logs", headers=cookies)[0] == 403
+    assert s.http("web", "GET", "/api/admin/logs")[0] == 401
+    assert s.http("web", "GET", "/i18n.js")[0] == 200
     payload = {"to": [alice], "subject": "Webmail test", "text": "Hello from Webmail"}
     assert s.http("web", "POST", "/api/send", payload, cookies)[0] == 403
     assert s.http("web", "POST", "/api/send", payload, csrf)[0] in (200, 202)
@@ -215,6 +219,12 @@ def run(s):
     admin_headers = {"Cookie": headers["Set-Cookie"].split(";", 1)[0], "X-CSRF-Token": admin["csrf"]}
     assert s.http("web", "GET", "/api/admin/users", headers=admin_headers)[0] == 200
     assert s.http("web", "GET", "/api/admin/stats", headers=admin_headers)[0] == 200
+    status, _, logs = s.http("web", "GET", "/api/admin/logs?service=web&level=info&limit=2", headers=admin_headers)
+    assert status == 200 and 0 < len(logs["entries"]) <= 2, logs
+    assert all(entry["service"] == "web" and entry["level"] == "info" for entry in logs["entries"]), logs
+    assert PASSWORD not in json.dumps(logs) and s.token not in json.dumps(logs), "secrets in admin logs"
+    for query in ("service=../auth", "service=%2e%2e", "level=critical", "limit=0", "limit=501", "limit=-1", "limit=2&limit=3", "path=config"):
+        assert s.http("web", "GET", "/api/admin/logs?" + query, headers=admin_headers)[0] == 400, query
     alice_id = s.rpc("storage", op="list", username=alice)["messages"][0]["id"]
     assert s.http("web", "GET", f"/api/messages/{alice_id}", headers=cookies)[0] in (403, 404)
     assert s.http("web", "POST", "/api/logout", {}, csrf)[0] in (200, 204)
@@ -243,7 +253,7 @@ def run(s):
     s.config["allow_insecure_auth"] = False
     s.save()
     s.start("smtp")
-    with smtplib.SMTP("127.0.0.1", s.ports["smtp"], timeout=10) as client:
+    with smtplib.SMTP("127.0.0.1", s.ports["smtp"], local_hostname="localhost", timeout=10) as client:
         client.ehlo()
         assert not client.has_extn("auth")
         assert client.docmd("AUTH", "PLAIN " + base64.b64encode(b"\0" + alice.encode() + b"\0" + PASSWORD.encode()).decode())[0] == 538
@@ -276,6 +286,8 @@ def main():
         subprocess.run([os.sys.executable, str(ROOT / "tests/protocol_security.py"),
                         "--bin-dir", str(binaries)], check=True)
         subprocess.run([os.sys.executable, str(ROOT / "tests/http_security.py"),
+                        "--bin-dir", str(binaries)], check=True)
+        subprocess.run([os.sys.executable, str(ROOT / "tests/setup_integration.py"),
                         "--bin-dir", str(binaries)], check=True)
         print("All integration tests passed", flush=True)
     except BaseException:

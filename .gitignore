@@ -8,3 +8,5 @@ config/*.pem
 *.db-wal
 __pycache__/
 compile_commands.json
+*.service-token-*
+*.setup-*.tmp
