@@ -7,6 +7,7 @@ let settingsData = null;
 let settingsEditor = null;
 let settingsLoading = false;
 let settingsSaving = false;
+let acmeControl=null;
 let noticeTimer;
 
 function showNotice(message, error = false) {
@@ -47,13 +48,7 @@ async function api(path, { method = "GET", body, quiet = false } = {}) {
   return data;
 }
 
-function bytes(value) {
-  const size = Number(value || 0);
-  if (size < 1024) return `${size} B`;
-  if (size < 1048576) return `${(size / 1024).toFixed(1)} KB`;
-  if (size < 1073741824) return `${(size / 1048576).toFixed(1)} MB`;
-  return `${(size / 1073741824).toFixed(1)} GB`;
-}
+function bytes(value) { return PostPlusSize.format(value); }
 
 function element(tag, className, text) {
   const result = document.createElement(tag);
@@ -75,6 +70,9 @@ function signedOut() {
   logVersion++;
   settingsData = null;
   settingsEditor = null;
+  acmeControl?.dispose();acmeControl=null;$("admin-acme").replaceChildren();
+  clearInspection();
+  quotaUsername="";
   $("login-email").focus();
   document.title = t("PostPlus · Administration");
 }
@@ -162,7 +160,12 @@ async function loadAdmin() {
         button.type = "button";
         button.setAttribute("aria-label", t("Reset password for {username}", {username: account.username}));
         button.addEventListener("click", () => openUserDialog(account.username));
-        actions.append(button);
+        const inspect = element("button","table-action",t("Inspect mail"));
+        inspect.type="button";inspect.addEventListener("click",()=>openInspection(account.username));
+        const quota = element("button","table-action",t("Storage quota"));
+        quota.type="button";quota.addEventListener("click",()=>openQuota(account.username));
+        actions.classList.add("account-actions");
+        actions.append(inspect,quota,button);
         row.append(email, role, actions);
         fragment.append(row);
       });
@@ -306,6 +309,7 @@ async function loadSettings() {
     const data = await api("/api/admin/config");
     if (state.user !== user) return;
     settingsData = data;
+    if (!acmeControl) acmeControl=PostPlusAcme.create($("admin-acme"),{request:(path,options)=>api("/api/admin/acme"+path,options),domain:data.values.domain,prefix:"admin-acme",onCertificate:async paths=>{if($("settings-form").hidden)await loadSettings();if(!settingsEditor || $("settings-form").hidden)throw new Error(t("Load server settings before applying certificate paths."));for(const [key,value] of Object.entries(paths)){const input=$("config-"+key);if(input){input.value=value;input.closest("details").open=true;}}}});
     $("settings-pending").hidden = !data.restart_required;
     settingsEditor = PostPlusSettings.create($("settings-fields"),data.schema,data.values,{prefix:"config",secretStatus:data.secret_status});
     $("settings-success").hidden = true;
@@ -346,7 +350,86 @@ document.addEventListener("postplus:language", () => {
   for (const id of ["login-error","user-error","logs-error","settings-error"]) formError(id);
   $("user-dialog-title").textContent = t(state.userMode === "password" ? "Reset password" : "Create user");
   settingsEditor?.translate();
+  acmeControl?.translate();
+  renderInspection();
   if (state.user) { loadAdmin(); renderLogs(); }
 });
+
+const mailFolderLabels={INBOX:"Inbox",Sent:"Sent",Drafts:"Drafts",Trash:"Trash",Junk:"Junk",Archive:"Archive"};
+let inspectUsername="",inspectVersion=0,inspectReadVersion=0,inspectMessages=[],inspectSelected=null;
+let quotaUsername="",quotaControl=null;
+function clearInspection() {
+  inspectUsername="";inspectVersion++;inspectReadVersion++;inspectMessages=[];inspectSelected=null;
+  $("inspect-messages").replaceChildren();$("inspect-body").textContent="";$("inspect-raw").textContent="";
+  $("inspect-content").hidden=true;$("inspect-placeholder").hidden=false;
+}
+function renderInspection() {
+  const rows=document.createDocumentFragment();
+  inspectMessages.forEach(message=>{
+    const row=element("button","message-row");row.type="button";
+    row.classList.toggle("selected",String(message.id)===inspectSelected);
+    const copy=element("span","message-row-copy");
+    copy.append(element("span","message-row-title",message.subject || t("(No subject)")),element("span","message-row-subtitle",t(mailFolderLabels[message.folder] || message.folder)+" · "+(message.from || "")),element("span","message-row-subtitle",message.to || ""));
+    row.append(copy);row.addEventListener("click",()=>inspectMessage(message));rows.append(row);
+  });
+  $("inspect-messages").replaceChildren(rows);$("inspect-empty").hidden=inspectMessages.length>0;
+}
+async function loadInspection() {
+  const version=++inspectVersion;inspectReadVersion++;
+  inspectSelected=null;inspectMessages=[];renderInspection();
+  $("inspect-content").hidden=true;$("inspect-placeholder").hidden=false;
+  formError("inspect-error");$("inspect-messages").setAttribute("aria-busy","true");
+  try {
+    const selectedFolder=$("inspect-folder").value;
+    const folders=selectedFolder === "all" ? Object.keys(mailFolderLabels) : [selectedFolder];
+    const results=await Promise.all(folders.map(folder=>api(`/api/admin/messages?username=${encodeURIComponent(inspectUsername)}&folder=${encodeURIComponent(folder)}`)));
+    const data={messages:results.flatMap(result=>result.messages || []).sort((a,b)=>String(b.internal_date).localeCompare(String(a.internal_date)))};
+    if(version!==inspectVersion) return;
+    inspectMessages=data.messages || [];renderInspection();
+  } catch(error) {if(version===inspectVersion) formError("inspect-error",error.message);}
+  finally {if(version===inspectVersion) $("inspect-messages").removeAttribute("aria-busy");}
+}
+function openInspection(username) {clearInspection();inspectUsername=username;$("inspect-user").textContent=username;$("inspect-folder").value="all";$("inspect-dialog").showModal();loadInspection();}
+async function inspectMessage(message) {
+  const version=++inspectReadVersion;formError("inspect-error");
+  try {
+    const data=await api(`/api/admin/messages/${encodeURIComponent(message.id)}?username=${encodeURIComponent(inspectUsername)}`);
+    if(version!==inspectReadVersion) return;
+    inspectSelected=String(message.id);const preview=data.message || {};
+    $("inspect-subject").textContent=preview.subject || t("(No subject)");
+    $("inspect-from").textContent=preview.from || "—";$("inspect-to").textContent=preview.to || "—";$("inspect-date").textContent=preview.date || "—";
+    $("inspect-body").textContent=preview.text || t("(Empty message)");$("inspect-raw").textContent=data.raw || "";
+    $("inspect-message-folder").textContent=t(mailFolderLabels[message.folder] || message.folder);
+    $("inspect-content").hidden=false;$("inspect-placeholder").hidden=true;renderInspection();
+  } catch(error) {if(version===inspectReadVersion) formError("inspect-error",error.message);}
+}
+$("inspect-folder").addEventListener("change",loadInspection);
+$("inspect-dialog").addEventListener("close",clearInspection);
+async function openQuota(username) {
+  quotaUsername=username;quotaControl=null;$("quota-user").textContent=username;formError("quota-error");
+  $("quota-usage").textContent=t("Loading quota…");$("quota-byte-control").replaceChildren();$("quota-dialog").showModal();
+  try {
+    const data=await api(`/api/admin/quota?username=${encodeURIComponent(username)}`);if(quotaUsername!==username) return;
+    const usage=data.usage || data;
+    $("quota-usage").textContent=t("{used} used · {messages} messages",{used:bytes(usage.bytes),messages:usage.messages});
+    $("quota-inherit-bytes").checked=usage.quota_bytes===null || usage.quota_bytes===undefined;
+    const input=element("input");input.id="quota-bytes";input.type="text";input.inputMode="decimal";
+    const unit=element("select");unit.setAttribute("aria-label",t("Size unit"));
+    $("quota-byte-control").className="byte-control";$("quota-byte-control").append(input,unit);
+    const binding=PostPlusSize.create(input,unit,usage.quota_bytes ?? usage.max_bytes,{min:1,max:2**50});
+    quotaControl={read:binding.read,disable:flag=>{input.disabled=flag;unit.disabled=flag;}};quotaControl.disable($("quota-inherit-bytes").checked);
+  } catch(error) {formError("quota-error",error.message);}
+}
+$("quota-inherit-bytes").addEventListener("change",()=>quotaControl?.disable($("quota-inherit-bytes").checked));
+$("quota-dialog").addEventListener("close",()=>{quotaUsername="";quotaControl=null;});
+$("quota-form").addEventListener("submit",event=>{
+  event.preventDefault();if(!quotaControl) return;
+  busy(event.currentTarget,async()=>{
+    formError("quota-error");
+    try {let quota_bytes=null; if(!$("quota-inherit-bytes").checked) {try {quota_bytes=quotaControl.read();}catch(problem){throw new Error(PostPlusI18n.error({error:problem.message}));}}await api("/api/admin/quota",{method:"POST",body:{username:quotaUsername,quota_bytes}});$("quota-dialog").close();showNotice(t("Mailbox quota updated."));}
+    catch(error) {formError("quota-error",error.message);}
+  });
+});
+
 document.title = t("PostPlus · Administration");
 (async () => {try {await signedIn(await api("/api/session",{quiet:true}));} catch {$("login-email").focus();}})();

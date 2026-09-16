@@ -1,6 +1,7 @@
 #include "postplus/core.hpp"
 #include "postplus/mime.hpp"
 #include "postplus/settings.hpp"
+#include "postplus/acme.hpp"
 
 #include <algorithm>
 #include <charconv>
@@ -74,6 +75,52 @@ void require_ok(const Json& value, const std::string& message, int status = 503)
     if (!value.value("ok", false)) throw ApiError(status, message);
 }
 
+std::map<std::string,std::string> query_fields(const std::string& path) {
+    auto decode = [](std::string_view input) {
+        std::string out;
+        auto hex = [](char ch) { if(ch >= '0' && ch <= '9') return ch-'0'; if(ch >= 'a' && ch <= 'f') return ch-'a'+10; if(ch >= 'A' && ch <= 'F') return ch-'A'+10; return -1; };
+        for(std::size_t i=0;i<input.size();++i) {
+            unsigned char ch=input[i];
+            if(ch=='%') {
+                if(i+2>=input.size() || hex(input[i+1])<0 || hex(input[i+2])<0) throw ApiError(400,"Invalid query string.");
+                ch=static_cast<unsigned char>(hex(input[i+1])*16+hex(input[i+2])); i+=2;
+            } else if(ch=='+') ch=' ';
+            if(ch<32 || ch==127) throw ApiError(400,"Invalid query string.");
+            out+=static_cast<char>(ch);
+        }
+        return out;
+    };
+    std::map<std::string,std::string> result;
+    const auto question=path.find('?');
+    if(question==std::string::npos) return result;
+    std::istringstream input(path.substr(question+1)); std::string item;
+    while(std::getline(input,item,'&')) {
+        auto equal=item.find('=');
+        if(equal==std::string::npos || !result.emplace(decode(std::string_view(item).substr(0,equal)),decode(std::string_view(item).substr(equal+1))).second)
+            throw ApiError(400,"Invalid query string.");
+    }
+    return result;
+}
+
+std::string message_id(const std::string& id) {
+    if(id.empty() || id.size()>128 || !std::all_of(id.begin(),id.end(),[](unsigned char c) {
+        return (c>='a' && c<='z') || (c>='A' && c<='Z') || (c>='0' && c<='9') || c=='-' || c=='_';
+    })) throw ApiError(400,"Invalid message ID.");
+    return id;
+}
+
+std::string folder_name(const std::string& name) {
+    static const std::set<std::string> names{"INBOX","Sent","Trash","Drafts","Junk","Archive"};
+    if(!names.contains(name)) throw ApiError(400,"Unknown mail folder.");
+    return name;
+}
+
+bool forbidden_portal_route(const HttpRequest& request) {
+    const auto path=request.path.substr(0,request.path.find('?'));
+    return (!admin_only && path.starts_with("/api/admin/")) ||
+        (admin_only && (path.starts_with("/api/messages") || path=="/api/folders" || path=="/api/drafts" || path=="/api/send"));
+}
+
 Json log_query(const Config& config, const std::string& path) {
     std::string service, level;
     std::size_t limit = 100;
@@ -137,9 +184,12 @@ public:
         const auto root = std::filesystem::path(config_.text("web_root", "web"));
         load_static(root, "/", admin_only ? "admin.html" : "index.html", "text/html; charset=utf-8");
         if (admin_only) {
+            acme_ = std::make_unique<AcmeManager>(AcmeOptions{config_.source.parent_path()/"certificates"});
             load_static(root, "/admin.js", "admin.js", "application/javascript; charset=utf-8");
             load_static(root, "/settings.js", "settings.js", "application/javascript; charset=utf-8");
+            load_static(root, "/acme.js", "acme.js", "application/javascript; charset=utf-8");
         } else load_static(root, "/app.js", "app.js", "application/javascript; charset=utf-8");
+        load_static(root, "/size.js", "size.js", "application/javascript; charset=utf-8");
         load_static(root, "/favicon.svg", "favicon.svg", "image/svg+xml");
         load_static(root, "/i18n.js", "i18n.js", "application/javascript; charset=utf-8");
         load_static(root, "/style.css", "style.css", "text/css; charset=utf-8");
@@ -156,6 +206,7 @@ public:
             response = json_response({{"ok", false}, {"code", "invalid_configuration"},
                                       {"field", error.field}, {"error", error.what()}}, error.status);
         }
+        catch (const AcmeError& error) { response = json_response({{"ok",false},{"code",error.code},{"error",error.what()}},error.status); }
         catch (const Json::exception&) { response = json_response({{"ok", false}, {"error", "Invalid request data."}}, 400); }
         catch (const std::exception&) { response = json_response({{"ok", false}, {"error", "A required service is unavailable. Please retry."}}, 503); }
         response.headers["Cache-Control"] = "no-store";
@@ -168,8 +219,7 @@ public:
     }
 
     std::optional<HttpResponse> preflight(const HttpRequest& request) {
-        if ((!admin_only && request.path.starts_with("/api/admin/")) ||
-            (admin_only && (request.path.starts_with("/api/messages") || request.path == "/api/send")))
+        if (forbidden_portal_route(request))
             return json_response({{"ok",false},{"error","API route not found."}},404);
         // Verify session and CSRF before core allocates a potentially large compose body.
         if (!request.path.starts_with("/api/") || request.path == "/api/login") return std::nullopt;
@@ -186,6 +236,7 @@ public:
 
 private:
     Config config_;
+    std::unique_ptr<AcmeManager> acme_;
     std::mutex mutex_;
     std::map<std::string, WebSession> sessions_;
     struct Rate { Clock::time_point expires; unsigned count = 0; };
@@ -291,10 +342,10 @@ private:
     }
 
     HttpResponse send_mail(const HttpRequest& request, const WebSession& session);
+    HttpResponse save_draft(const HttpRequest& request, const WebSession& session);
 
     HttpResponse route(const HttpRequest& request) {
-        if ((!admin_only && request.path.starts_with("/api/admin/")) ||
-            (admin_only && (request.path.starts_with("/api/messages") || request.path == "/api/send")))
+        if (forbidden_portal_route(request))
             throw ApiError(404, "API route not found.");
         if (request.method == "GET" && request.path == "/health")
             return json_response({{"ok", true}, {"service", service_name}});
@@ -308,6 +359,9 @@ private:
         if (request.method == "POST" && request.path == "/api/login") return login(request);
         const auto session = authenticate(request);
         if (request.method != "GET") require_csrf(request, session);
+        const auto path = request.path.substr(0,request.path.find('?'));
+        const auto query = query_fields(request.path);
+        auto parameter = [&](const std::string& key, const std::string& fallback = "") { auto found=query.find(key); return found==query.end()?fallback:found->second; };
         if (request.method == "GET" && request.path == "/api/session")
             return json_response({{"ok", true}, {"username", session.username}, {"admin", session.admin}, {"csrf", session.csrf}});
         if (request.method == "POST" && request.path == "/api/logout") {
@@ -318,26 +372,44 @@ private:
                                              std::string(request.encrypted ? "; Secure" : "");
             return response;
         }
-        if (request.method == "GET" && request.path == "/api/messages") {
-            auto result = rpc(config_, "storage", {{"op", "list"}, {"username", session.username}, {"include_envelope", true}});
+        if (request.method == "GET" && path == "/api/folders") {
+            auto result = rpc(config_, "storage", {{"op", "folders"}, {"username", session.username}});
+            require_ok(result,"Unable to load messages.");
+            for(auto& folder:result["folders"]) { folder["total"]=folder["messages"]; folder["unread"]=folder["unseen"]; }
+            return json_response(result);
+        }
+        if (request.method == "POST" && path == "/api/drafts") return save_draft(request,session);
+        if (request.method == "GET" && path == "/api/messages") {
+            auto result = rpc(config_, "storage", {{"op", "list"}, {"username", session.username}, {"folder",folder_name(parameter("folder","INBOX"))}, {"include_envelope", true}});
             require_ok(result, "Unable to load messages.");
             return json_response(result);
         }
-        if (request.path.starts_with("/api/messages/")) {
-            auto id = request.path.substr(std::string("/api/messages/").size());
-            if (id.empty() || id.size() > 128 || !std::all_of(id.begin(), id.end(), [](unsigned char ch) {
-                    return (ch >= 'a' && ch <= 'z') || (ch >= 'A' && ch <= 'Z') || (ch >= '0' && ch <= '9') || ch == '-' || ch == '_';
-                })) throw ApiError(400, "Invalid message ID.");
+        if (path.starts_with("/api/messages/")) {
+            const bool moving=path.ends_with("/move");
+            auto id = message_id(path.substr(14,path.size()-14-(moving?5:0)));
+            if(moving && request.method=="POST") {
+                auto input=request_json(request);
+                auto result=rpc(config_,"storage",{{"op","move"},{"username",session.username},{"ids",Json::array({id})},{"folder",folder_name(field(input,"folder",32))}});
+                require_ok(result,"Unable to move message.",400);
+                return json_response(result);
+            }
+            if(moving) throw ApiError(404,"API route not found.");
             if (request.method == "GET") {
                 auto result = rpc(config_, "storage", {{"op", "get"}, {"username", session.username}, {"id", id}});
                 require_ok(result, "Message not found.", 404);
-                auto marked = rpc(config_, "storage", {{"op", "flags"}, {"username", session.username}, {"id", id}, {"seen", true}});
+                auto marked = rpc(config_, "storage", {{"op", "flags"}, {"username", session.username}, {"id", id}, {"seen", true},{"uid",result.at("uid")}});
                 require_ok(marked, "Unable to update message flags.");
                 result["message"] = message_view(result.at("raw").get<std::string>());
                 return json_response(result);
             }
             if (request.method == "DELETE") {
-                auto result = rpc(config_, "storage", {{"op", "delete"}, {"username", session.username}, {"ids", Json::array({id})}});
+                const auto message=rpc(config_,"storage",{{"op","get"},{"username",session.username},{"id",id}});
+                require_ok(message,"Message not found.",404);
+                if(query.contains("permanent") && parameter("permanent")!="true" && parameter("permanent")!="false") throw ApiError(400,"Invalid deletion mode.");
+                const bool permanent=parameter("permanent")=="true";
+                if(permanent && message.value("folder",std::string{})!="Trash") throw ApiError(409,"Move the message to Trash before permanently deleting it.");
+                auto result = rpc(config_, "storage", {{"op", "delete"}, {"username", session.username}, {"ids", Json::array({id})},{"permanent",permanent},
+                    {"folder",message.at("folder")},{"expected_uids",{{id,message.at("uid")}}}});
                 require_ok(result, "Unable to delete message.");
                 log(service_name,"message deleted by " + session.username + ": " + id);
                 return json_response(result);
@@ -347,6 +419,54 @@ private:
         if (request.path.starts_with("/api/admin/")) {
             if (!admin_only) throw ApiError(404,"API route not found.");
             if (!session.admin) throw ApiError(403, "Administrator access is required.");
+            if(path.starts_with("/api/admin/acme/")) {
+                if(request.method=="GET" && path=="/api/admin/acme/terms") return json_response(acme_->terms(parameter("directory","staging")));
+                if(request.method=="GET" && path=="/api/admin/acme/status") return json_response(acme_->status(parameter("job_id")));
+                if(request.method=="POST" && path=="/api/admin/acme/start") {
+                    auto result=acme_->start(request_json(request));
+                    log(service_name,"administrator " + session.username + " requested a TLS certificate");
+                    return json_response(result,202);
+                }
+                if(request.method=="POST" && path=="/api/admin/acme/cancel") return json_response(acme_->cancel(field(request_json(request),"job_id",128)));
+                throw ApiError(404,"API route not found.");
+            }
+            if(path=="/api/admin/messages" || path.starts_with("/api/admin/messages/") || path=="/api/admin/quota") {
+                if(path!="/api/admin/quota" && request.method!="GET") throw ApiError(405,"Administrator mail inspection is read-only.");
+                auto input=request.method=="GET" ? Json{{"username",parameter("username")}} : request_json(request);
+                const auto username=username_field(input);
+                auto exists=rpc(config_,"auth",{{"op","exists"},{"username",username}});
+                require_ok(exists,"Unable to load accounts.");
+                if(!exists.value("exists",false)) throw ApiError(404,"Account not found.");
+                if(path=="/api/admin/quota") {
+                    Json command{{"op",request.method=="GET"?"quota_get":"quota_set"},{"username",username}};
+                    if(request.method=="POST") {
+                        if(!input.contains("quota_bytes")) throw ApiError(400,"A quota is required.");
+                        const auto& quota=input["quota_bytes"];
+                        if(!quota.is_null() && (!quota.is_number_integer() ||
+                            (quota.is_number_unsigned() && quota.get<std::uint64_t>()>UINT64_C(1125899906842624)) ||
+                            quota.get<std::int64_t>()<1 || quota.get<std::int64_t>()>INT64_C(1125899906842624)))
+                            throw ApiError(400,"Invalid account quota.");
+                        command["max_bytes"]=input["quota_bytes"];
+                    } else if(request.method!="GET") throw ApiError(405,"Use GET or POST.");
+                    auto result=rpc(config_,"storage",command);
+                    require_ok(result,"Invalid account quota.",400);
+                    if(request.method=="POST") log(service_name,"administrator " + session.username + " changed quota for " + username);
+                    return json_response(result);
+                }
+                if(request.method!="GET") throw ApiError(405,"Administrator mail inspection is read-only.");
+                if(path=="/api/admin/messages") {
+                    auto result=rpc(config_,"storage",{{"op","list"},{"username",username},{"folder",folder_name(parameter("folder","INBOX"))},{"include_envelope",true}});
+                    require_ok(result,"Unable to load messages.");
+                    log(service_name,"administrator " + session.username + " inspected mailbox " + username);
+                    return json_response(result);
+                }
+                const auto id=message_id(path.substr(std::string("/api/admin/messages/").size()));
+                auto result=rpc(config_,"storage",{{"op","get"},{"username",username},{"id",id}});
+                require_ok(result,"Message not found.",404);
+                result["message"]=message_view(result.at("raw").get<std::string>());
+                log(service_name,"administrator " + session.username + " inspected message " + id + " in mailbox " + username);
+                return json_response(result);
+            }
             if (request.path == "/api/admin/config") {
                 if (request.method == "GET") return json_response(settings_view(config_));
                 if (request.method == "POST") return json_response(save_settings(config_, request_json(request)));
@@ -426,10 +546,32 @@ HttpResponse Web::send_mail(const HttpRequest& request, const WebSession& sessio
     const auto scanned = rpc(config_, "filter", {{"op", "scan"}, {"raw", raw}});
     require_ok(scanned, "The message scanning service is unavailable.");
     if (scanned.value("action", "reject") != "accept") throw ApiError(422, "The message was rejected by the server mail filter.");
-    const auto result = rpc(config_, "storage", {{"op", "enqueue"}, {"sender", session.username}, {"recipients", recipients}, {"raw", raw}});
+    Json submission={{"op", "enqueue"}, {"sender", session.username}, {"recipients", recipients}, {"raw", raw},{"sent_username",session.username}};
+    if(input.contains("draft_id")) submission["draft_id"]=message_id(field(input,"draft_id",128));
+    const auto result = rpc(config_, "storage", submission);
     require_ok(result, "Unable to queue your message.");
     log(service_name,"message queued by " + session.username + " for " + std::to_string(recipients.size()) + " recipients");
     return json_response(result, 202);
+}
+HttpResponse Web::save_draft(const HttpRequest& request, const WebSession& session) {
+    const auto input=request_json(request);
+    const auto maximum=static_cast<std::size_t>(config_.number("max_message_bytes",10485760));
+    const auto subject=field(input,"subject",512), text=field(input,"text",maximum);
+    if(!input.contains("to") || !input["to"].is_array() || input["to"].size()>100) throw ApiError(400,"Invalid recipient address.");
+    std::vector<std::string> recipients;
+    for(const auto& address:input["to"]) {
+        if(!address.is_string() || !valid_address(address.get<std::string>())) throw ApiError(400,"Invalid recipient address.");
+        recipients.push_back(address.get<std::string>());
+    }
+    std::string raw;
+    try {raw=mime::compose(session.username,recipients,subject,text,true);}
+    catch(const std::exception&) {throw ApiError(400,"The message contains invalid headers or content.");}
+    if(raw.size()>maximum) throw ApiError(413,"The encoded message exceeds the server size limit.");
+    Json command={{"op","draft_save"},{"username",session.username},{"raw",raw}};
+    if(input.contains("id")) command["id"]=message_id(field(input,"id",128));
+    const auto result=rpc(config_,"storage",command);
+    require_ok(result,"Unable to save draft. Check your mailbox capacity.",409);
+    return json_response(result);
 }
 } // namespace
 } // namespace postplus

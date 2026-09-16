@@ -167,8 +167,8 @@ std::string decode_header(std::string_view value) {
     }
     return out;
 }
-std::string compose(const std::string& from, const std::vector<std::string>& to, const std::string& subject, const std::string& text) {
-    if (!valid_address(from) || to.empty() || to.size() > 100) invalid("Invalid message addresses");
+std::string compose(const std::string& from, const std::vector<std::string>& to, const std::string& subject, const std::string& text, bool draft) {
+    if (!valid_address(from) || (!draft && to.empty()) || to.size() > 100) invalid("Invalid message addresses");
     if (subject.size() > 998 || subject.find_first_of("\r\n\0", 0, 3) != std::string::npos) invalid("Invalid message subject");
     std::string raw = "From: " + from + "\r\nTo: ";
     for (std::size_t i = 0; i < to.size(); ++i) {

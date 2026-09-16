@@ -71,7 +71,12 @@ window.PostPlusSettings = (() => {
         input.setAttribute("aria-describedby",`${id}-help`);
         const help = node("p", "field-hint", field.help || "");
         help.id = `${id}-help`;
-        wrapper.append(label,input,help);
+        let sizeControl=null;
+        if(field.unit === "bytes") {
+          const unit=node("select");unit.id=`${id}-unit`;unit.setAttribute("data-i18n-aria-label","Size unit");unit.setAttribute("aria-label",t("Size unit"));unit.disabled=input.disabled;
+          sizeControl=PostPlusSize.create(input,unit,Number(initial),{min:field.min,max:field.max});
+          const size=node("div","size-control");size.append(input,unit);wrapper.append(label,size,help);
+        } else wrapper.append(label,input,help);
         if (field.readonly) wrapper.append(node("p","field-hint readonly-hint","Managed by the server. Change this in the configuration file while PostPlus is stopped."));
         let clearPassword = null;
         if (field.type === "password") {
@@ -86,7 +91,7 @@ window.PostPlusSettings = (() => {
           }
         }
         input.addEventListener("input", () => input.removeAttribute("aria-invalid"));
-        controls.set(field.key,{field,input,initial:input.value,clearPassword});
+        controls.set(field.key,{field,input,initial:sizeControl ? Number(initial) : input.value,clearPassword,sizeControl});
         grid.append(wrapper);
       }
       section.append(grid);
@@ -94,14 +99,15 @@ window.PostPlusSettings = (() => {
     }
     function read({changedOnly = true} = {}) {
       const result = {};
-      for (const [key,{field,input,initial,clearPassword}] of controls) {
+      for (const [key,{field,input,initial,clearPassword,sizeControl}] of controls) {
         if (clearPassword?.checked) {result.clear_smarthost_password = true; continue;}
-        if (field.readonly || (changedOnly && input.value === initial)) continue;
+        if (field.readonly || (!sizeControl && changedOnly && input.value === initial)) continue;
         if (field.type === "password" && !input.value) continue;
         let value;
         try {
-          if (!input.checkValidity() || field.type === "number" && (!input.value || !Number.isSafeInteger(Number(input.value)))) throw new Error();
-          value = field.type === "number" ? Number(input.value) : field.type === "boolean" ? input.value === "true" : field.type === "lines" ? input.value.split(/\r?\n/).map(line => line.trim()).filter(Boolean) : field.type === "json" ? JSON.parse(input.value) : field.type === "password" ? input.value : input.value.trim();
+          if (!input.checkValidity() || !sizeControl && field.type === "number" && (!input.value || !Number.isSafeInteger(Number(input.value)))) throw new Error();
+          value = sizeControl ? sizeControl.read() : field.type === "number" ? Number(input.value) : field.type === "boolean" ? input.value === "true" : field.type === "lines" ? input.value.split(/\r?\n/).map(line => line.trim()).filter(Boolean) : field.type === "json" ? JSON.parse(input.value) : field.type === "password" ? input.value : input.value.trim();
+          if(sizeControl && changedOnly && value===initial) continue;
         } catch {
           reveal(input);
           throw new Error(t("Check the value for {field}.",{field:t(field.label)}));

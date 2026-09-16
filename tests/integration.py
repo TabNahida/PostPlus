@@ -305,6 +305,12 @@ def main():
         suite.close()
         subprocess.run([os.sys.executable, str(ROOT / "tests/storage_integration.py"),
                         "--bin-dir", str(binaries)], check=True)
+        subprocess.run([os.sys.executable, str(ROOT / "tests/folders_integration.py"),
+                        "--bin-dir", str(binaries)], check=True)
+        subprocess.run([os.sys.executable, str(ROOT / "tests/clean_data_integration.py"),
+                        "--bin-dir", str(binaries)], check=True)
+        subprocess.run([os.sys.executable, str(ROOT / "tests/mailbox_web_integration.py"),
+                        "--bin-dir", str(binaries)], check=True)
         subprocess.run([os.sys.executable, str(ROOT / "tests/tls_transfer_integration.py"),
                         "--bin-dir", str(binaries)], check=True)
         subprocess.run([os.sys.executable, str(ROOT / "tests/protocol_security.py"),
@@ -312,6 +318,8 @@ def main():
         subprocess.run([os.sys.executable, str(ROOT / "tests/http_security.py"),
                         "--bin-dir", str(binaries)], check=True)
         subprocess.run([os.sys.executable, str(ROOT / "tests/setup_integration.py"),
+                        "--bin-dir", str(binaries)], check=True)
+        subprocess.run([os.sys.executable, str(ROOT / "tests/setup_options_integration.py"),
                         "--bin-dir", str(binaries)], check=True)
         print("All integration tests passed", flush=True)
     except BaseException:

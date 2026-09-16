@@ -17,7 +17,9 @@
 ## A home for your email
 
 - **Start in your browser.** Run PostPlus, open the setup address printed in the terminal, and create your first administrator.
-- **Keep administration separate.** A dedicated administration service manages accounts, delivery queues, logs, and server settings. Webmail runs on its own port.
+- **Keep administration separate.** Manage accounts, inspect a user’s mail without changing its read status, set individual storage quotas, and review queues and logs. Webmail runs on its own port.
+- **Give every message a place.** Use Inbox, Sent, Drafts, Trash, Junk, and Archive. Save a draft, resume writing later, and move messages between folders.
+- **Set up encrypted connections.** Request a Let’s Encrypt certificate through the browser, or use certificates you already have.
 - **Use your preferred language.** Setup, administration, and Webmail default to English and support Simplified Chinese.
 - **Connect mail clients.** Send through SMTP and read through POP3 or the supported IMAP commands, with TLS support.
 - **Keep mail on disk.** Accounts, mailboxes, delivery queues, and retries survive restarts. Rejected mail is retained in quarantine.
@@ -70,6 +72,8 @@ The native launcher starts and monitors all service processes. A standalone inst
 
 ## Configure and operate
 
+Storage-size fields offer byte, KiB, MiB, GiB, and TiB selectors while configuration files retain exact integer byte values. Per-user quotas in **User accounts → Storage quota** take effect immediately; global settings apply after a manual restart.
+
 Most day-to-day options are available in **Administration → Server settings**: listener addresses and ports, TLS, relay delivery, filtering, resource limits, sessions, and logging. Saving validates the configuration, creates a backup, and shows the addresses that will apply after restart. The current services keep running. When ready, press **Ctrl+C** in the launcher terminal, wait for shutdown, then run the same launch command to apply the saved settings.
 
 - [Getting started](docs/getting-started.md) — from first launch to your first message.
@@ -80,7 +84,7 @@ Most day-to-day options are available in **Administration → Server settings**:
 
 The [example configuration](config/postplus.example.json) is a reference for manual management. The browser wizard generates a private service credential automatically. Mail data stays in the installation's data directory; changing that directory later requires a deliberate offline migration.
 
-External recipients require a configured SMTP relay. Full antivirus scanning requires a separately installed and maintained ClamAV service. PostPlus does not create DNS records, issue TLS certificates, or install those external services.
+External recipients require a configured SMTP relay. Full antivirus scanning requires a separately installed and maintained ClamAV service. PostPlus can request Let’s Encrypt certificates using HTTP-01. You configure DNS, public port 80 reachability, and any external relay or antivirus service. Automatic certificate renewal is not implemented.
 
 ## Architecture and development
 
@@ -100,6 +104,7 @@ PostPlus uses **C++20**, **standalone Asio**, **OpenSSL 3**, **SQLite**, and **x
 | `postplus-transfer` | Outbound SMTP through a configured relay | Loopback 18084 |
 | `postplus-delivery` | Queue processing, retries, local delivery, quarantine | Loopback 18085, instance lock only |
 | `postplus-ctl` | Command-line administration | None |
+| `postplus-clean-data` | Offline reset of accounts, mail, and queues, with a dry-run option | None |
 
 ### Build and test
 
@@ -129,12 +134,12 @@ tests/                 C++ tests, web checks, and integration suites
 
 ## Current scope
 
-- IMAP provides a single `INBOX` and a [documented command subset](docs/protocols.md). Folders, APPEND, COPY, IDLE, ENVELOPE, and BODYSTRUCTURE are not implemented. POP3 does not yet provide an exclusive maildrop lock.
-- Webmail reads and composes plain text. Attachment upload/download, HTML rendering, and a Sent folder are not implemented.
+- IMAP implements a [documented command subset](docs/protocols.md); full client compatibility, IDLE, ENVELOPE, and BODYSTRUCTURE remain outside the current scope. POP3 does not yet provide an exclusive maildrop lock.
+- Webmail reads and composes plain text across six built-in folders. Attachment upload/download, HTML rendering, and custom folder creation are not implemented. A Sent copy records successful submission to the queue, not proof of final delivery.
 - Outbound delivery uses an SMTP relay. Direct MX delivery, SPF/DKIM/DMARC processing, DSN generation, multiple domains, and multi-host high availability are not implemented.
 - SMTP queues mail transactionally. Local delivery is idempotent; retrying outbound mail after an interrupted acknowledgement can produce a duplicate.
 - Sessions use bounded worker pools, SQLite serializes writes, and delivery uses one worker. Capacity for hundreds or thousands of active users requires representative workload testing and further development.
-- OS service installation, automatic boot integration, certificate issuance, and DNS automation are not bundled.
+- OS service installation, automatic boot integration, automatic certificate renewal, and DNS automation are not bundled.
 
 Protocol compatibility and security are the development priorities. Contributions should include focused verification; [internal RPC contracts](docs/internal-contract.md) describe service integration.
 

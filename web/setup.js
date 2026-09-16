@@ -8,6 +8,7 @@
   let statusKey = "";
   let advancedEditor = null;
   let unlocking = false;
+  let acmeControl = null;
   let saving = false;
   const portLabels = {smtp:"SMTP",pop3:"POP3",imap:"IMAP",web:"Webmail",admin:"Administration",auth:"Authentication",storage:"Mail storage",filter:"Mail filter",transfer:"Mail transfer",delivery_lock:"Delivery lock"};
   for (const [service, label] of Object.entries(portLabels)) {
@@ -55,11 +56,11 @@
     if (!adminEdited) $("setup-admin").value = `admin@${$("setup-domain").value.trim().toLowerCase()}`;
   });
   $("setup-form").addEventListener("input", event => event.target.removeAttribute("aria-invalid"));
-  document.addEventListener("postplus:language", () => {render(); advancedEditor?.translate();});
-  async function request(method, body) {
+  document.addEventListener("postplus:language", () => {render(); advancedEditor?.translate(); acmeControl?.translate();});
+  async function request(method, body, path = "/api/setup") {
     let response;
     try {
-      response = await fetch("/api/setup", {method, headers:{"X-Setup-Token":token, ...(body ? {"Content-Type":"application/json"} : {})}, body:body ? JSON.stringify(body) : undefined, cache:"no-store", credentials:"same-origin", redirect:"error"});
+      response = await fetch(path, {method, headers:{"X-Setup-Token":token, ...(body ? {"Content-Type":"application/json"} : {})}, body:body ? JSON.stringify(body) : undefined, cache:"no-store", credentials:"same-origin", redirect:"error"});
     } catch { throw {key:"Cannot connect to the server. Check your connection and try again."}; }
     let data;
     try { data = await response.json(); } catch { throw {key:"The server returned an unreadable response."}; }
@@ -70,7 +71,7 @@
     event.preventDefault();
     if (saving) return;
     errorData = null;
-    const invalid = [...event.currentTarget.querySelectorAll("input")].filter(input => !input.checkValidity());
+    const invalid = [...event.currentTarget.querySelectorAll("input")].filter(input => !input.closest(".acme-panel") && !input.checkValidity());
     if (invalid.length) {
       invalid.forEach(input => {
         input.setAttribute("aria-invalid", "true");
@@ -102,6 +103,7 @@
     try {
       const data = await request("POST", payload);
       token = "";
+      acmeControl?.dispose();
       $("setup-token").value = "";
       advancedEditor?.clearSecrets();
       $("setup-password").value = "";
@@ -145,6 +147,7 @@
       for (const service of Object.keys(portLabels)) exclude.add(`ports.${service}`);
       exclude.add("delivery_lock_port");
       exclude.add("allow_insecure_auth");
+      acmeControl=PostPlusAcme.create($("setup-acme"),{domain:defaults.domain,prefix:"setup-acme",request:async(path,options={})=>{try{return await request(options.method || "GET",options.body,"/api/setup/acme"+path);}catch(data){throw new Error(data.key ? t(data.key) : PostPlusI18n.error(data));}},onCertificate:paths=>{$("setup-certificate").value=paths.tls_certificate;$("setup-key").value=paths.tls_private_key;}});
       advancedEditor = PostPlusSettings.create($("setup-advanced"),schema,defaults,{prefix:"setup-extra",exclude});
       $("setup-mode").value = defaults.allow_insecure_auth ? "local" : "tls";
       modeChanged();

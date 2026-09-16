@@ -149,7 +149,9 @@ void smtp(Connection& c, const Config& cfg, std::chrono::seconds data_timeout) {
                 }
                 c.set_deadline(std::nullopt);
                 if (too_large) { reset(); reply("552 5.3.4 Message exceeds size limit\r\n"); continue; }
-                auto result = rpc(cfg, "storage", {{"op", "enqueue"}, {"sender", sender}, {"recipients", recipients}, {"raw", raw}});
+                Json submission = {{"op", "enqueue"}, {"sender", sender}, {"recipients", recipients}, {"raw", raw}};
+                if (!username.empty()) submission["sent_username"] = username;
+                auto result = rpc(cfg, "storage", submission);
                 reset();
                 if (result.value("ok", false)) reply("250 2.0.0 Message durably queued\r\n");
                 else reply("451 4.3.0 Unable to queue message\r\n");

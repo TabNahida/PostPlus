@@ -23,5 +23,5 @@ std::string header(const Part& part, std::string_view name);
 // Decodes RFC 2047 B/Q encoded words. Bytes retain the declared character set.
 std::string decode_header(std::string_view value);
 std::string compose(const std::string& from, const std::vector<std::string>& to,
-                    const std::string& subject, const std::string& text);
+                    const std::string& subject, const std::string& text, bool draft = false);
 }

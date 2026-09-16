@@ -25,6 +25,9 @@ target("postplus-core")
         add_cxflags("/utf-8", {tools = {"cl", "clang_cl"}, public = true})
     else
         add_syslinks("pthread", {public = true})
+        if is_plat("macosx") then
+            add_frameworks("Security", "CoreFoundation", {public = true})
+        end
     end
 
 for _, service in ipairs({"auth", "storage", "filter", "smtp", "pop3", "imap", "delivery", "transfer", "web"}) do
@@ -67,6 +70,31 @@ target("postplus-ctl")
     add_files("src/tools/ctl.cpp")
     add_deps("postplus-core")
 
+target("postplus-clean-data")
+    set_kind("binary")
+    add_files("src/tools/clean_data.cpp")
+    add_deps("postplus-core")
+
+task("clean-data")
+    set_menu {
+        usage = "xmake clean-data [--config=PATH] [--dry-run]",
+        description = "Remove PostPlus databases and reopen first-run setup (stop services first).",
+        options = {
+            {nil, "config", "kv", "config/postplus.json", "Configuration selecting the data directory"},
+            {nil, "dry-run", "k", nil, "Show database files without deleting them"}
+        }
+    }
+    on_run(function ()
+        import("core.base.option")
+        import("core.base.task")
+        import("core.project.project")
+        local arguments = {"--config", path.absolute(option.get("config"), os.projectdir())}
+        if option.get("dry-run") then table.insert(arguments, "--dry-run") end
+        task.run("build", {target = "postplus-clean-data"})
+        os.execv(path.absolute(project.target("postplus-clean-data"):targetfile()), arguments)
+    end)
+task_end()
+
 target("postplus-tests")
     set_kind("binary")
     add_files("tests/unit.cpp")
@@ -90,3 +118,9 @@ target("postplus-process-tests")
     add_files("tests/process_test.cpp")
     add_deps("postplus-core")
     add_tests("process")
+
+target("postplus-acme-tests")
+    set_kind("binary")
+    add_files("tests/acme_test.cpp")
+    add_deps("postplus-core")
+    add_tests("acme")

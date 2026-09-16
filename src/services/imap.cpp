@@ -1,6 +1,7 @@
 #include "postplus/core.hpp"
 #include "postplus/mime.hpp"
 #include <algorithm>
+#include <array>
 #include <charconv>
 #include <cctype>
 #include <ctime>
@@ -99,7 +100,12 @@ struct Sequence {
         return false;
     }
 };
-std::string key(const Json& message) { return message.at("id").dump(); }
+std::string key(const Json& message) { return message.at("id").dump() + ":" + message.at("uid").dump(); }
+constexpr std::array<const char*, 6> mailboxes{"INBOX", "Sent", "Trash", "Drafts", "Junk", "Archive"};
+std::string mailbox_name(const std::string& value) {
+    for (const auto* name : mailboxes) if (upper(value) == upper(name)) return name;
+    return {};
+}
 std::pair<std::string, std::string> split_body(const std::string& raw) {
     auto end = raw.find("\r\n\r\n"); std::size_t count = 4;
     if (end == std::string::npos) { end = raw.find("\n\n"); count = 2; }
@@ -197,7 +203,7 @@ bool wildcard(std::string pattern, const std::string& value) {
     return before.back();
 }
 void imap(Connection& c, const Config& cfg) {
-    std::string user; bool selected = false, readonly = false;
+    std::string user, selected_folder = "INBOX"; bool selected = false, readonly = false;
     unsigned auth_failures = 0;
     const auto auth_limit = static_cast<unsigned>(std::clamp(cfg.number("max_auth_attempts", 5), 1, 20));
     std::vector<Json> messages; std::set<std::string> deleted;
@@ -208,8 +214,8 @@ void imap(Connection& c, const Config& cfg) {
         if (user.empty()) { if (allowed()) value += " AUTH=PLAIN"; else value += " LOGINDISABLED"; if (!c.encrypted() && tls()) value += " STARTTLS"; }
         return value;
     };
-    auto list = [&] {
-        auto result = rpc(cfg, "storage", {{"op", "list"}, {"username", user}});
+    auto list = [&](const std::string& target) {
+        auto result = rpc(cfg, "storage", {{"op", "list"}, {"username", user}, {"folder", target}});
         if (!result.value("ok", false)) throw std::runtime_error("Mailbox unavailable");
         return result;
     };
@@ -219,7 +225,7 @@ void imap(Connection& c, const Config& cfg) {
         return out + ')';
     };
     auto refresh = [&] {
-        auto current = list().at("messages").get<std::vector<Json>>();
+        auto current = list(selected_folder).at("messages").get<std::vector<Json>>();
         auto previous_count = messages.size();
         for (std::size_t i = 0; i < messages.size();) {
             auto id = key(messages[i]);
@@ -232,14 +238,19 @@ void imap(Connection& c, const Config& cfg) {
         if (changed) c.write("* " + std::to_string(messages.size()) + " EXISTS\r\n");
     };
     auto raw_message = [&](const Json& message) {
-        auto result = rpc(cfg, "storage", {{"op", "get"}, {"username", user}, {"id", message.at("id")}});
+        auto result = rpc(cfg, "storage", {{"op", "get"}, {"username", user}, {"id", message.at("id")},
+            {"folder", selected_folder}, {"uid", message.at("uid")}});
         if (!result.value("ok", false)) throw std::runtime_error("Message unavailable");
         return result.at("raw").get<std::string>();
     };
     auto expunge = [&](bool announce) {
         if (readonly || deleted.empty()) return;
-        Json ids = Json::array(); for (const auto& message : messages) if (deleted.contains(key(message))) ids.push_back(message.at("id"));
-        auto result = rpc(cfg, "storage", {{"op", "delete"}, {"username", user}, {"ids", ids}});
+        Json ids = Json::array(), expected_uids = Json::object();
+        for (const auto& message : messages) if (deleted.contains(key(message))) {
+            ids.push_back(message.at("id")); expected_uids[message.at("id").get<std::string>()] = message.at("uid");
+        }
+        auto result = rpc(cfg, "storage", {{"op", "delete"}, {"username", user}, {"ids", ids},
+            {"permanent", true}, {"folder", selected_folder}, {"expected_uids", expected_uids}});
         if (!result.value("ok", false)) throw std::runtime_error("Deletion failed");
         for (std::size_t i = 0; i < messages.size();) {
             if (deleted.contains(key(messages[i]))) { if (announce) c.write("* " + std::to_string(i + 1) + " EXPUNGE\r\n"); messages.erase(messages.begin() + static_cast<std::ptrdiff_t>(i)); }
@@ -298,13 +309,15 @@ void imap(Connection& c, const Config& cfg) {
             if (cmd == "LIST" || cmd == "LSUB") {
                 require_count(2);
                 if (args[1].empty()) c.write("* " + cmd + " (\\Noselect) \"/\" \"\"\r\n");
-                else if (wildcard(args[0] + args[1], "INBOX")) c.write("* " + cmd + " () \"/\" \"INBOX\"\r\n");
+                else for (const auto* name : mailboxes)
+                    if (wildcard(args[0] + args[1], upper(name))) c.write("* " + cmd + " () \"/\" " + quote(name) + "\r\n");
                 done(); continue;
             }
             if (cmd == "SELECT" || cmd == "EXAMINE") {
                 require_count(1); selected = false; messages.clear(); deleted.clear();
-                if (upper(args[0]) != "INBOX") { c.write(tag + " NO No such mailbox\r\n"); continue; }
-                auto mailbox = list(); messages = mailbox.at("messages").get<std::vector<Json>>(); selected = true; readonly = cmd == "EXAMINE";
+                selected_folder = mailbox_name(args[0]);
+                if (selected_folder.empty()) { c.write(tag + " NO No such mailbox\r\n"); continue; }
+                auto mailbox = list(selected_folder); messages = mailbox.at("messages").get<std::vector<Json>>(); selected = true; readonly = cmd == "EXAMINE";
                 c.write("* FLAGS (\\Seen \\Deleted)\r\n* " + std::to_string(messages.size()) + " EXISTS\r\n* 0 RECENT\r\n");
                 c.write("* OK [UIDVALIDITY " + std::to_string(mailbox.at("uidvalidity").get<std::uint64_t>()) + "] Stable mailbox identifier\r\n");
                 c.write("* OK [UIDNEXT " + std::to_string(mailbox.at("uidnext").get<std::uint64_t>()) + "] Next UID\r\n");
@@ -314,8 +327,9 @@ void imap(Connection& c, const Config& cfg) {
             }
             if (cmd == "STATUS") {
                 if (args.size() < 4 || args[1] != "(" || args.back() != ")") throw Bad("Invalid STATUS arguments");
-                if (upper(args[0]) != "INBOX") { c.write(tag + " NO No such mailbox\r\n"); continue; }
-                auto mailbox = list(); auto records = mailbox.at("messages"); std::string response = "* STATUS INBOX (";
+                const auto target = mailbox_name(args[0]);
+                if (target.empty()) { c.write(tag + " NO No such mailbox\r\n"); continue; }
+                auto mailbox = list(target); auto records = mailbox.at("messages"); std::string response = "* STATUS " + quote(target) + " (";
                 for (std::size_t i = 2; i + 1 < args.size(); ++i) {
                     auto item = upper(args[i]); std::uint64_t value = 0;
                     if (item == "MESSAGES") value = records.size();
@@ -328,7 +342,7 @@ void imap(Connection& c, const Config& cfg) {
                 }
                 c.write(response + ")\r\n"); done(); continue;
             }
-            if (!selected) { c.write(tag + " NO Select INBOX first\r\n"); continue; }
+            if (!selected) { c.write(tag + " NO Select a mailbox first\r\n"); continue; }
             if (cmd == "CHECK") { require_count(0); done(); continue; }
             if (cmd == "CLOSE") { require_count(0); expunge(false); selected = false; messages.clear(); deleted.clear(); done(); continue; }
             if (cmd == "EXPUNGE") { require_count(0); if (readonly) { c.write(tag + " NO Mailbox is read-only\r\n"); continue; } expunge(true); done(); continue; }
@@ -353,7 +367,7 @@ void imap(Connection& c, const Config& cfg) {
                     auto raw = need_raw ? raw_message(message) : "";
                     bool seen_changed = false;
                     if (!readonly && !message.value("seen", false) && std::any_of(items.begin(), items.end(), [](const FetchItem& item) { return item.mark_seen; })) {
-                        auto result = rpc(cfg, "storage", {{"op", "flags"}, {"username", user}, {"id", message.at("id")}, {"seen", true}});
+                        auto result = rpc(cfg, "storage", {{"op", "flags"}, {"username", user}, {"id", message.at("id")}, {"uid", message.at("uid")}, {"seen", true}});
                         if (!result.value("ok", false)) throw std::runtime_error("Flag update failed");
                         message["seen"] = true; seen_changed = true;
                     }
@@ -408,7 +422,7 @@ void imap(Connection& c, const Config& cfg) {
                     bool new_seen = operation == "FLAGS" ? seen : operation == "+FLAGS" ? old_seen || seen : old_seen && !seen;
                     bool new_deleted = operation == "FLAGS" ? erased : operation == "+FLAGS" ? old_deleted || erased : old_deleted && !erased;
                     if (old_seen != new_seen) {
-                        auto result = rpc(cfg, "storage", {{"op", "flags"}, {"username", user}, {"id", message.at("id")}, {"seen", new_seen}});
+                        auto result = rpc(cfg, "storage", {{"op", "flags"}, {"username", user}, {"id", message.at("id")}, {"uid", message.at("uid")}, {"seen", new_seen}});
                         if (!result.value("ok", false)) throw std::runtime_error("Flag update failed"); message["seen"] = new_seen;
                     }
                     if (new_deleted) deleted.insert(id); else deleted.erase(id);

@@ -20,10 +20,13 @@ It returns `ok`, `username`, `admin`, `csrf`, and `expires_in`, and sets the `pp
 
 | Method and path | Request or response |
 | --- | --- |
-| GET `/api/messages` | The current mailbox. Entries include id, uid, size, seen, and internal_date; up to the newest 100 include optional subject/from/date summaries. |
+| GET `/api/folders` | Six folders with `name`, `messages`, `unseen`, `bytes` (also `total`/`unread` aliases), and the current user's `usage`. |
+| GET `/api/messages?folder=INBOX` | The selected folder (defaults to INBOX). Entries include id, uid, size, seen, and internal_date; up to the newest 100 include optional subject/from/date summaries. |
 | GET `/api/messages/{id}` | `raw` text and decoded `message` fields: subject, from, to, date, text. Marks the message as seen. |
-| DELETE `/api/messages/{id}` | Deletes a message belonging to the current user. |
-| POST `/api/send` | Accepts `to` as an address array, `subject`, and `text`. Returns 202 after queueing. |
+| DELETE `/api/messages/{id}` | Moves the current user's message to Trash. Explicit `?permanent=true` permanently deletes a message already in Trash, with a folder/UID guard. |
+| POST `/api/messages/{id}/move` | `{ "folder": "Archive" }`; moves between supported folders. |
+| POST `/api/drafts` | `to` array, `subject`, `text`, and optional existing draft `id`. Empty recipients and content are allowed. Returns id/uid/folder. |
+| POST `/api/send` | `to` address array, `subject`, `text`, optional `draft_id`. Returns 202 after atomically queueing, storing a Sent copy and consuming the draft. |
 
 Example send body:
 
@@ -40,6 +43,10 @@ These routes require an administrator session. Ordinary users receive 403.
 | Method and path | Request or response |
 | --- | --- |
 | GET `/api/admin/users` | Usernames and administrator flags; no password material. |
+| GET `/api/admin/messages?username=user%40example.com&folder=Sent` | Read-only view of a selected user's folder. |
+| GET `/api/admin/messages/{id}?username=user%40example.com` | Original and decoded message. Does not mark Seen. Inspection is audited without logging message contents. |
+| GET `/api/admin/quota?username=user%40example.com` | `bytes`, `messages`, effective `max_bytes`/`max_messages`, nullable override `quota_bytes`/`quota_messages`. |
+| POST `/api/admin/quota` | `username`, `quota_bytes` (null to inherit, integer 1..2^50 to override); applies immediately. |
 | POST `/api/admin/users` | `username`, `password`, `admin`. The address must use the configured domain. Returns 201. |
 | POST `/api/admin/password` | `username`, `password`. Invalidates that user's existing sessions in both administration and Webmail. |
 | GET `/api/admin/stats` | messages, bytes, queued, queued_bytes, quarantined. |
@@ -47,6 +54,21 @@ These routes require an administrator session. Ordinary users receive 403.
 | GET `/api/admin/logs` | Recent structured events, filtered as described below. |
 | GET `/api/admin/config` | Sanitized settings, editable-field schema, file revision, saved-secret status, and interface URLs. |
 | POST `/api/admin/config` | `revision` and `values`; validates/saves settings and reports that a manual restart is required. |
+
+Folder names are `INBOX`, `Sent`, `Trash`, `Drafts`, `Junk`, and `Archive`. URL-encode query values, especially a username containing `+`. Administrator inspection is read-only; mailbox mutation routes remain exclusive to Webmail and its current user.
+
+### Certificate requests
+
+The following paths use the `/api/admin/acme` prefix in administration, or `/api/setup/acme` during first-run setup. Administration requires its session and CSRF token for mutations; setup requires `X-Setup-Token` on all ACME endpoints and validates Host/Origin. Only predefined Let's Encrypt staging/production directory names are accepted.
+
+| Method and suffix | Contract |
+| --- | --- |
+| GET `/terms?directory=staging` | `ok`, `directory`, `terms_of_service`; read-only authority metadata. |
+| POST `/start` | `domain`, `email`, `directory` (`staging`/`production`), `agree_terms: true`, `terms_of_service` (the exact displayed URL). Returns 202 with job_id/state. |
+| GET `/status?job_id=...` | Current/latest job state and progress; success includes `result.tls_certificate`, `result.tls_private_key`, `result.expires_at`, `result.staging`. |
+| POST `/cancel` | `{ "job_id": "..." }`; requests cancellation. |
+
+Issuance does not save server settings or restart services. On an existing installation, save the returned file paths through the settings API, then manually restart. During first-run setup, include the paths in the setup submission; successful setup starts the services with that configuration. Private keys never leave the server. Terms are checked again before issuance and changed terms require fresh consent. See [certificate deployment prerequisites](configuration.md#lets-encrypt-certificates).
 
 Passwords must contain at least 12 bytes. Both browser services check each authenticated request against the current credential version through authentication RPC. A password change through administration or the CLI invalidates older sessions on their next authenticated request, without requiring a service restart. A change to administrator status likewise invalidates a session whose stored role no longer matches. Credential-version values stay inside the service processes and are not returned to the browser.
 
@@ -132,9 +154,9 @@ Entries are ordered newest first. Reads scan only bounded tails of current and r
 
 ## First-run setup API
 
-The native `postplus` launcher exposes this temporary API while the requested configuration is missing, or while completing an eligible uninitialized configuration without a service-token source or completed-setup marker. It listens on `127.0.0.1`, defaults to port 8081, and checks Host/Origin values. It is separate from normal browser sessions and is unavailable once regular services start.
+The native `postplus` launcher exposes this temporary API while the requested configuration is missing, while completing an eligible uninitialized configuration without a service-token source or completed-setup marker, or when the offline cleanup tool has marked the retained configuration with `setup_required: true`. It listens on `127.0.0.1:8081` by default. The CLI options `--setup-bind`, `--setup-port`, and `--setup-host` select another temporary listener and advertised hostname. A non-loopback listener requires `--setup-tls-certificate` and `--setup-tls-private-key`; a wildcard bind also requires `--setup-host`. Host/Origin validation applies to both HTTP and HTTPS setup. This API is separate from normal browser sessions and is unavailable once regular services start. See the [setup option reference](configuration.md#first-run-command-line-options).
 
-The launcher prints a plain setup URL, normally `http://127.0.0.1:8081/setup`, and a random one-time setup password. Enter it in the browser gate. Browser code keeps it in memory and sends it as `X-Setup-Token` with every setup API request. The password is not a permanent administrator password or the persistent internal service token; it expires when setup completes or the process stops.
+The launcher prints the HTTP or HTTPS setup URL, normally `http://127.0.0.1:8081/setup`, and a random one-time setup password. Enter it in the browser gate. Browser code keeps it in memory and sends it as `X-Setup-Token` with every setup API request. The password is not a permanent administrator password or the persistent internal service token; it expires when setup completes or the process stops.
 
 | Method and path | Request or response |
 | --- | --- |
@@ -161,7 +183,7 @@ POST fields:
 
 Public listening requires TLS with insecure authentication disabled. The auth port must differ from the active setup port because setup temporarily launches auth to provision the administrator. The API uses `ports.delivery_lock`; the saved configuration uses top-level `delivery_lock_port`.
 
-For a new configuration, setup commits without replacing a competing destination. For completion of an eligible existing configuration, it verifies the original contents are unchanged, retains the same data directory, and creates a private backup before replacement. Established configurations do not enter this completion path.
+For a new configuration, setup commits without replacing a competing destination. For completion of an eligible existing configuration, it verifies the original contents are unchanged, retains the same data directory, and creates a private backup before replacement. Established configurations enter this completion path only when marked `setup_required: true` by the offline reset workflow; successful setup clears that marker.
 
 A failed provisioning/commit may leave an administrator in the data directory; retry with the same credentials. Existing users are accepted only after successful password verification and an administrator-role check. Setup errors return `ok: false`, a stable `code`, and an English `error` string; the UI translates known error codes. General configuration changes after setup use `/api/admin/config` on the administrator listener.
 

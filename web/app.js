@@ -2,7 +2,8 @@
 
 const t = (...args) => PostPlusI18n.t(...args);
 const $ = (id) => document.getElementById(id);
-const state = { user: null, messages: [], selected: null, previews: new Map(), view: "inbox", loading: false, readVersion: 0 };
+const state = { user: null, messages: [], selected: null, previews: new Map(), view: "INBOX", loading: false, readVersion: 0, listVersion: 0, folders: [], usage: null, draftId: null, composeDirty: false, composeSaving: false };
+const folderLabels = {INBOX:"Inbox",Sent:"Sent",Drafts:"Drafts",Trash:"Trash",Junk:"Junk",Archive:"Archive"};
 let noticeTimer;
 
 function showNotice(message, error = false) {
@@ -41,13 +42,7 @@ async function api(path, { method = "GET", body, quiet = false } = {}) {
   return data;
 }
 
-function bytes(value) {
-  const size = Number(value || 0);
-  if (size < 1024) return `${size} B`;
-  if (size < 1048576) return `${(size / 1024).toFixed(1)} KB`;
-  if (size < 1073741824) return `${(size / 1048576).toFixed(1)} MB`;
-  return `${(size / 1073741824).toFixed(1)} GB`;
-}
+function bytes(value) { return PostPlusSize.format(value); }
 
 function element(tag, className, text) {
   const result = document.createElement(tag);
@@ -62,6 +57,11 @@ function signedOut() {
   state.previews.clear();
   state.selected = null;
   state.readVersion++;
+  state.listVersion++;
+  state.draftId = null;
+  state.composeDirty = false;
+  state.folders = [];
+  state.usage = null;
   document.querySelectorAll("dialog[open]").forEach((dialog) => dialog.close());
   $("login-screen").hidden = false;
   $("app-screen").hidden = true;
@@ -82,7 +82,7 @@ async function signedIn(user) {
   $("user-name").textContent = user.username.split("@")[0];
   $("user-avatar").textContent = user.username.slice(0, 1);
   $("login-password").value = "";
-  await switchView("inbox");
+  await switchView("INBOX");
 }
 
 async function busy(form, action) {
@@ -109,12 +109,41 @@ $("logout").addEventListener("click", async () => {
   catch (error) { showNotice(error.message, true); }
 });
 
+function renderFolderState() {
+  $("folder-title").textContent = t(folderLabels[state.view]);
+  for (const [name,label] of Object.entries(folderLabels)) {
+    const nav = $(`nav-${name.toLowerCase()}`);
+    nav.classList.toggle("active",name === state.view);
+    if (name === state.view) nav.setAttribute("aria-current","page"); else nav.removeAttribute("aria-current");
+    const count = state.folders.find(folder => folder.name === name);
+    const badge = $(`count-${name.toLowerCase()}`);
+    badge.textContent = String(name === "INBOX" ? count?.unread ?? count?.unseen ?? 0 : count?.total ?? count?.messages ?? 0);
+    badge.hidden = !Number(badge.textContent);
+  }
+  $("message-delete").textContent = t(state.view === "Trash" ? "Delete permanently" : "Move to Trash");
+  $("draft-edit").hidden = state.view !== "Drafts";
+  $("message-archive").hidden = state.view === "Archive" || state.view === "Drafts";
+  const select = $("message-move");
+  const placeholder = element("option","",t("Move to…")); placeholder.value = "";
+  select.replaceChildren(placeholder);
+  for (const [name,label] of Object.entries(folderLabels)) if(name !== state.view) {const option=element("option","",t(label));option.value=name;select.append(option);}
+  if (state.user) document.title = `${t(folderLabels[state.view])} · ${state.user.username} · PostPlus`;
+  $("mailbox-usage").hidden = !state.usage;
+  if (state.usage) {
+    $("usage-progress").value = Math.min(100,100 * state.usage.bytes / state.usage.max_bytes);
+    $("usage-text").textContent = t("{used} of {limit}",{used:bytes(state.usage.bytes),limit:bytes(state.usage.max_bytes)});
+  }
+}
 async function switchView(view) {
-  state.view = "inbox";
-  if (state.user) document.title = `${t("Inbox")} · ${state.user.username} · PostPlus`;
+  if (!Object.hasOwn(folderLabels,view)) return;
+  state.view = view;
+  clearReader();
+  state.messages = [];
+  renderMessages();
+  renderFolderState();
   await loadInbox();
 }
-$("nav-inbox").addEventListener("click", () => switchView("inbox"));
+document.querySelectorAll("[data-folder]").forEach(button => button.addEventListener("click",()=>switchView(button.dataset.folder)));
 $("refresh").addEventListener("click", loadInbox);
 
 function renderMessages() {
@@ -129,11 +158,11 @@ function renderMessages() {
     button.setAttribute("aria-pressed", String(state.selected === id));
     const title = preview?.subject || t("Message #{id}", {id: message.uid});
     button.setAttribute("aria-label", message.seen ? title : t("Unread, {title}", {title}));
-    const avatar = element("span", "avatar", preview?.from?.slice(0, 1) || "✉");
+    const avatar = element("span", "avatar", (state.view === "Sent" || state.view === "Drafts" ? preview?.to : preview?.from)?.slice(0, 1) || "✉");
     avatar.setAttribute("aria-hidden", "true");
     const copy = element("span", "message-row-copy");
     copy.append(element("span", "message-row-title", title));
-    copy.append(element("span", "message-row-subtitle", preview?.from || `${bytes(message.size)} · ${t(message.seen ? "Read" : "Unread")}`));
+    copy.append(element("span", "message-row-subtitle", (state.view === "Sent" || state.view === "Drafts" ? preview?.to : preview?.from) || `${bytes(message.size)} · ${t(message.seen ? "Read" : "Unread")}`));
     const dot = element("span", "message-dot");
     dot.setAttribute("aria-hidden", "true");
     button.append(avatar, copy, dot);
@@ -142,7 +171,6 @@ function renderMessages() {
   });
   $("message-list").replaceChildren(fragment);
   $("message-total").textContent = t(state.messages.length === 1 ? "{count} message" : "{count} messages", {count: state.messages.length});
-  $("inbox-count").textContent = String(state.messages.filter((message) => !message.seen).length);
   $("empty-mail").hidden = state.messages.length !== 0;
 }
 
@@ -155,24 +183,31 @@ function clearReader() {
 }
 
 async function loadInbox() {
-  if (state.loading || !state.user) return;
+  if (!state.user) return;
+  const version = ++state.listVersion;
+  const folder = state.view;
   state.loading = true;
   $("refresh").disabled = true;
   $("message-list").setAttribute("aria-busy", "true");
   $("mail-status").textContent = t("Syncing…");
   const user = state.user;
   try {
-    const data = await api("/api/messages");
-    if (state.user !== user) return;
+    const [data, folders] = await Promise.all([api(`/api/messages?folder=${encodeURIComponent(folder)}`),api("/api/folders")]);
+    if (state.user !== user || version !== state.listVersion) return;
+    state.folders = folders.folders || [];
+    state.usage = folders.usage || null;
+    renderFolderState();
     state.messages = data.messages;
     if (!state.selected || !state.messages.some((message) => String(message.id) === state.selected)) clearReader();
     renderMessages();
     $("mail-status").textContent = t("Updated at {time}", {time: new Date().toLocaleTimeString(PostPlusI18n.language, { hour: "2-digit", minute: "2-digit" })});
-    if (state.view === "inbox") document.title = `${t("Inbox")} · ${user.username} · PostPlus`;
+    document.title = `${t(folderLabels[state.view])} · ${user.username} · PostPlus`;
   } catch (error) {
+    if (version !== state.listVersion) return;
     $("mail-status").textContent = t("Sync failed");
     showNotice(error.message, true);
   } finally {
+    if (version !== state.listVersion) return;
     state.loading = false;
     $("refresh").disabled = false;
     $("message-list").removeAttribute("aria-busy");
@@ -189,7 +224,10 @@ async function openMessage(id) {
     const preview = data.message || {};
     state.previews.set(id, preview);
     const message = state.messages.find((item) => String(item.id) === id);
-    if (message) message.seen = true;
+    if (message && !message.seen) {
+      message.seen=true;const folder=state.folders.find(item=>item.name===state.view);
+      if(folder){folder.unread=Math.max(0,(folder.unread ?? folder.unseen ?? 0)-1);folder.unseen=folder.unread;}
+    }
     $("message-subject").textContent = preview.subject || t("(No subject)");
     $("message-from").textContent = preview.from || "—";
     $("message-to").textContent = preview.to || state.user.username;
@@ -202,6 +240,7 @@ async function openMessage(id) {
     document.querySelector(".mail-workspace").classList.add("reading");
     $("reader").scrollTop = 0;
     renderMessages();
+    renderFolderState();
     $("message-subject").focus({ preventScroll: true });
   } catch (error) { showNotice(error.message, true); }
   finally { if (version === state.readVersion) $("reader").removeAttribute("aria-busy"); }
@@ -212,46 +251,83 @@ $("reader-back").addEventListener("click", () => {
   document.querySelector('.message-row[aria-pressed="true"]')?.focus();
 });
 
-$("compose-open").addEventListener("click", () => {
+function composePayload() {
+  return {to:$("compose-to").value.split(/[,;，；\n]/).map(value=>value.trim()).filter(Boolean),subject:$("compose-subject").value,text:$("compose-text").value};
+}
+function resetCompose() {$("compose-form").reset();state.draftId=null;state.composeDirty=false;$("draft-status").textContent="";}
+function beginCompose(draft = null) {
+  if(state.composeSaving)return;
+  if (state.composeDirty) {$("compose-dialog").showModal();showNotice(t("Save or discard your current changes before opening another draft."));return;}
+  resetCompose();
+  if (draft) {state.draftId=state.selected;$("compose-to").value=draft.to || "";$("compose-subject").value=draft.subject || "";$("compose-text").value=draft.text || "";}
+  $("compose-title").textContent=t(draft ? "Edit draft" : "Compose a message");
   formError("compose-error");
   $("compose-dialog").showModal();
+}
+$("compose-open").addEventListener("click",()=>beginCompose());
+$("draft-edit").addEventListener("click",()=>beginCompose(state.previews.get(state.selected)));
+$("compose-form").addEventListener("input",()=>{state.composeDirty=true;$("draft-status").textContent=t("Unsaved changes");});
+$("compose-dialog").addEventListener("cancel",event=>{if(state.composeSaving)event.preventDefault();});
+$("compose-discard").addEventListener("click",()=>{resetCompose();$("compose-dialog").close();});
+function setComposeBusy(flag) {state.composeSaving=flag;$("compose-form").querySelectorAll("input,textarea,button").forEach(control=>{control.disabled=flag;});}
+$("draft-save").addEventListener("click",async()=>{
+  if(state.composeSaving)return;
+  setComposeBusy(true);
+  formError("compose-error");
+  const user=state.user;
+  try {
+    const payload=composePayload(); if(state.draftId) payload.id=state.draftId;
+    const result=await api("/api/drafts",{method:"POST",body:payload});
+    if(state.user!==user)return;
+    state.draftId=String(result.id);
+    state.previews.delete(state.draftId);
+    state.composeDirty=false;
+    $("draft-status").textContent=t("Draft saved");
+    showNotice(t("Draft saved"));
+    await loadInbox();
+  } catch(error) {formError("compose-error",error.message);}
+  finally {setComposeBusy(false);}
 });
-
-$("compose-form").addEventListener("submit", (event) => {
+$("compose-form").addEventListener("submit",event=>{
   event.preventDefault();
-  busy(event.currentTarget, async () => {
+  if(state.composeSaving)return;
+  busy(event.currentTarget,async()=>{
     formError("compose-error");
-    const recipients = $("compose-to").value.split(/[,;，；\n]/).map((value) => value.trim()).filter(Boolean);
-    if (!recipients.length) { formError("compose-error", t("Enter at least one recipient email address.")); return; }
+    const payload=composePayload();
+    if(!payload.to.length) {formError("compose-error",t("Enter at least one recipient email address."));return;}
+    if(state.draftId) payload.draft_id=state.draftId;
+    setComposeBusy(true);
+    const user=state.user;
     try {
-      await api("/api/send", { method: "POST", body: { to: recipients, subject: $("compose-subject").value, text: $("compose-text").value } });
-      $("compose-dialog").close();
-      $("compose-form").reset();
+      await api("/api/send",{method:"POST",body:payload});
+      if(state.user!==user)return;
+      $("compose-dialog").close();resetCompose();
       showNotice(t("Your message has been queued for delivery."));
       await loadInbox();
-    } catch (error) { formError("compose-error", error.message); }
+    } catch(error) {formError("compose-error",error.message);}
+    finally {setComposeBusy(false);}
   });
 });
-
-$("message-delete").addEventListener("click", () => {
-  if (!state.selected) return;
-  formError("delete-error");
-  $("delete-dialog").showModal();
+async function moveMessage(folder) {
+  if (!state.selected || !Object.hasOwn(folderLabels,folder)) return;
+  try {await api(`/api/messages/${encodeURIComponent(state.selected)}/move`,{method:"POST",body:{folder}});clearReader();showNotice(t("Message moved to {folder}.",{folder:t(folderLabels[folder])}));await loadInbox();}
+  catch(error) {showNotice(error.message,true);}
+  finally {$("message-move").value="";}
+}
+$("message-move").addEventListener("change",()=>moveMessage($("message-move").value));
+$("message-archive").addEventListener("click",()=>moveMessage("Archive"));
+$("message-delete").addEventListener("click",()=>{
+  if(!state.selected) return;
+  if(state.view !== "Trash") {moveMessage("Trash");return;}
+  formError("delete-error");$("delete-dialog").showModal();
 });
-
-$("delete-form").addEventListener("submit", (event) => {
+$("delete-form").addEventListener("submit",event=>{
   event.preventDefault();
-  busy(event.currentTarget, async () => {
-    if (!state.selected) return;
+  busy(event.currentTarget,async()=>{
+    if(!state.selected) return;
     formError("delete-error");
-    try {
-      await api(`/api/messages/${encodeURIComponent(state.selected)}`, { method: "DELETE" });
-      state.previews.delete(state.selected);
-      clearReader();
-      $("delete-dialog").close();
-      showNotice(t("Message deleted."));
-      await loadInbox();
-    } catch (error) { formError("delete-error", error.message); }
+    try {await api(`/api/messages/${encodeURIComponent(state.selected)}?permanent=true`,{method:"DELETE"});state.previews.delete(state.selected);clearReader();$("delete-dialog").close();showNotice(t("Message deleted."));await loadInbox();}
+    catch(error) {formError("delete-error",error.message);}
   });
 });
 
@@ -266,11 +342,14 @@ document.querySelectorAll("[data-close]").forEach((button) => {
 
 
 document.addEventListener("postplus:language", () => {
-  document.title = state.user ? `${t("Inbox")} · ${state.user.username} · PostPlus` : t("PostPlus · Your mail, in order");
+  document.title = state.user ? `${t(folderLabels[state.view])} · ${state.user.username} · PostPlus` : t("PostPlus · Your mail, in order");
   $("notice").hidden = true;
   for (const id of ["login-error", "compose-error", "delete-error"]) formError(id);
   $("mail-status").textContent = t(state.loading ? "Syncing…" : "Ready");
   renderMessages();
+  renderFolderState();
+  $("compose-title").textContent=t(state.draftId ? "Edit draft" : "Compose a message");
+  $("draft-status").textContent=state.composeDirty ? t("Unsaved changes") : state.draftId ? t("Draft saved") : "";
   if (state.selected) {
     const preview = state.previews.get(state.selected) || {};
     $("message-subject").textContent = preview.subject || t("(No subject)");

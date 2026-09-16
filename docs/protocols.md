@@ -35,18 +35,20 @@ Not implemented: APOP, SASL POP authentication, implicit TLS ports, expiry polic
 
 ## IMAP
 
-IMAP exposes one mailbox, `INBOX`. It reports `IMAP4rev1` for client protocol negotiation, but currently implements only the subset below. The project does **not** claim complete IMAP4rev1 conformance. Applications requiring folders, APPEND, COPY, ENVELOPE, BODYSTRUCTURE, full SEARCH, or IDLE cannot use this release as a complete IMAP replacement.
+IMAP exposes six fixed mailboxes: `INBOX`, `Sent`, `Drafts`, `Trash`, `Junk`, and `Archive`. It reports `IMAP4rev1` for client protocol negotiation, but currently implements only the subset below. The project does **not** claim complete IMAP4rev1 conformance. Applications requiring custom folders, APPEND, COPY, MOVE, ENVELOPE, BODYSTRUCTURE, full SEARCH, or IDLE cannot use this release as a complete IMAP replacement. Webmail can save drafts and move messages through its HTTP API.
 
 Implemented commands:
 
 - `CAPABILITY`, `STARTTLS`, `LOGIN`, `AUTHENTICATE PLAIN`, `NOOP`, `LOGOUT`.
-- `LIST`, `LSUB` (INBOX is the fixed subscribed mailbox), `SELECT`, `EXAMINE`, `STATUS`, `CHECK`, `CLOSE`, `EXPUNGE`.
+- `LIST`, `LSUB` (the six fixed subscribed mailboxes), `SELECT`, `EXAMINE`, `STATUS`, `CHECK`, `CLOSE`, `EXPUNGE`.
 - `FETCH` and `UID FETCH`: `FLAGS`, `UID`, `INTERNALDATE`, `RFC822.SIZE`, `RFC822`, `RFC822.HEADER`, `RFC822.TEXT`, `FAST`, `BODY[]`, `BODY[HEADER]`, `BODY[TEXT]`, `BODY[HEADER.FIELDS (...)]`, and `BODY[HEADER.FIELDS.NOT (...)]`. BODY.PEEK variants and `<offset.count>` partial reads are supported. MIME numeric part sections and the ALL/FULL macros are rejected.
 - `STORE` and `UID STORE`: FLAGS, +FLAGS, -FLAGS and their .SILENT variants, for `\Seen` and `\Deleted`. Seen is persisted; Deleted is session-local, as stated by the PERMANENTFLAGS response. EXPUNGE/CLOSE commit marked deletions atomically. EXAMINE prevents changes and CLOSE on an examined mailbox simply deselects it.
 - `SEARCH` and `UID SEARCH`: sequence sets, UID sets, ALL, SEEN, UNSEEN, DELETED, UNDELETED, HEADER, FROM, TO, CC, BCC, SUBJECT, BODY, TEXT, LARGER, SMALLER, NOT, OR, and parenthesized AND groups. US-ASCII and UTF-8 charset labels are accepted. String matching folds ASCII case; general Unicode case folding and charset conversion are not implemented. MIME body searches inspect decoded leaf content. All messages currently have no Recent flag: OLD matches all, RECENT/NEW match none.
 - `STATUS`: MESSAGES, RECENT, UIDNEXT, UIDVALIDITY, UNSEEN.
 
 UIDs and UIDVALIDITY persist across service restarts. Message numbers remain fixed during FETCH/STORE/SEARCH; NOOP refreshes the selected mailbox and announces additions/removals. Reads of message bodies mark Seen unless PEEK or EXAMINE applies. Synchronizing command literals are accepted up to 16 KiB each, with at most 8 literals and 64 KiB per command. Invalid framing closes the connection to prevent command desynchronization. LITERAL+ is not advertised or accepted. Unsupported operations return tagged BAD/NO.
+
+POP3 reads only `INBOX`; its QUIT deletions and IMAP EXPUNGE/CLOSE permanently remove messages as required by those protocols. Webmail's Delete action moves mail to Trash and permanently deletes it only when already in Trash. Messages moved between folders receive fresh IMAP UIDs; draft content replacements do too. Protocol deletions check the selected folder and snapshotted UID so a concurrent move cannot accidentally delete a message from its new location. Authenticated SMTP submissions and Webmail sends store a Sent copy atomically with queue acceptance; inbound unauthenticated SMTP does not create a Sent copy. SMTP Sent ownership follows the authenticated account.
 
 ## MIME
 

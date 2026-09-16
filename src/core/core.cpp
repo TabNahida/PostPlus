@@ -1,5 +1,6 @@
 #include <postplus/core.hpp>
 #include <postplus/process.hpp>
+#include <postplus/trust.hpp>
 #include <asio/ssl.hpp>
 #include <openssl/crypto.h>
 #include <openssl/evp.h>
@@ -17,6 +18,10 @@
 #include <optional>
 #include <sstream>
 #include <stdexcept>
+#ifdef _WIN32
+#include <windows.h>
+#include <wincrypt.h>
+#endif
 
 namespace postplus {
 std::string lower(std::string value) {
@@ -276,6 +281,7 @@ void Connection::start_tls_client(const std::string& hostname) {
     impl_->tls_context = std::make_unique<asio::ssl::context>(asio::ssl::context::tls_client);
     SSL_CTX_set_min_proto_version(impl_->tls_context->native_handle(), TLS1_2_VERSION);
     impl_->tls_context->set_default_verify_paths();
+    add_platform_trust_roots(SSL_CTX_get_cert_store(impl_->tls_context->native_handle()));
     impl_->tls_context->set_verify_mode(asio::ssl::verify_peer);
     impl_->tls = std::make_unique<asio::ssl::stream<tcp::socket&>>(impl_->socket, *impl_->tls_context);
     impl_->tls->set_verify_callback(asio::ssl::host_name_verification(hostname));
@@ -454,7 +460,7 @@ void serve_http(const Config& config, const std::string& service, HttpHandler ha
             }
             std::size_t limit = rpc_limit(config);
             if (!internal) {
-                limit = request.path == "/api/send" ? static_cast<std::size_t>(config.number("max_message_bytes",10485760)) * 2 + 16384 : 16384;
+                limit = (request.path == "/api/send" || request.path == "/api/drafts") ? static_cast<std::size_t>(config.number("max_message_bytes",10485760)) * 2 + 16384 : 16384;
                 if (service == "admin" && request.path == "/api/admin/config") limit = 1024 * 1024;
                 if (service == "web" && request.path == "/api/setup") limit = 1024 * 1024;
                 if (request.method == "GET" || request.method == "DELETE") limit = 0;

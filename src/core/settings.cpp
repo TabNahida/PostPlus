@@ -25,9 +25,11 @@ namespace fs = std::filesystem;
 Json fields() {
     Json result = Json::array();
     auto add = [&](std::string key, std::string group, std::string type, Json value,
-                   std::string label, std::string help = "", int minimum = 0, int maximum = 0) {
+                   std::string label, std::string help = "", std::int64_t minimum = 0, std::int64_t maximum = 0) {
         Json entry = {{"key",key},{"group",group},{"type",type},{"default",value},{"label",label},{"help",help}};
-        if (type == "number") { entry["min"] = minimum; entry["max"] = maximum; }
+        if (type == "number") { entry["min"] = minimum; entry["max"] = maximum;
+            if (key.ends_with("_bytes")) entry["unit"] = "bytes";
+        }
         result.push_back(std::move(entry));
     };
     add("domain","general","text","localhost","Mail domain","Domain used for local recipient addresses; changing it does not rename existing accounts.");
@@ -50,9 +52,9 @@ Json fields() {
     add("smtp_data_timeout_seconds","limits","number",120,"SMTP message upload timeout (seconds)","Total time allowed to upload one message.",1,3600);
     add("max_message_bytes","limits","number",10485760,"Maximum message bytes","10 MiB by default.",1024,104857600);
     add("max_recipients","limits","number",100,"Maximum recipients per message","",1,100);
-    add("max_mailbox_bytes","storage","number",1073741824,"Maximum bytes per mailbox","",1024,2147483647);
+    add("max_mailbox_bytes","storage","number",1073741824,"Maximum bytes per mailbox","",1024,INT64_C(1125899906842624));
     add("max_mailbox_messages","storage","number",10000,"Maximum messages per mailbox","",1,100000);
-    add("max_queue_bytes","storage","number",1073741824,"Maximum queued message bytes","",1024,2147483647);
+    add("max_queue_bytes","storage","number",1073741824,"Maximum queued message bytes","",1024,INT64_C(1125899906842624));
     add("max_queue_messages","storage","number",100000,"Maximum queued messages","",1,1000000);
     add("smarthost_host","delivery","text","","Outgoing relay host","Leave blank for local mail only. Use your provider's SMTP relay hostname.");
     add("smarthost_port","delivery","number",587,"Outgoing relay port","",1,65535);
@@ -313,7 +315,7 @@ Config validate_settings(const Config& existing,const Json& patch) {
     if(env.empty() || (env.front()>='0' && env.front()<='9') || env.find_first_not_of("ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789_")!=std::string::npos) throw SettingsError("smarthost_password_env","Use a valid environment variable name for the relay password.");
     if(result.text("smarthost_tls")=="none" && !result.text("smarthost_username").empty()) throw SettingsError("smarthost_tls","An authenticated relay requires TLS.");
     for(const auto* key:{"max_mailbox_bytes","max_queue_bytes"})
-        if(result.number(key,1073741824)<result.number("max_message_bytes",10485760)) throw SettingsError(key,"Storage byte limits must be at least the maximum message size.");
+        if(result.values.value(key,INT64_C(1073741824))<result.number("max_message_bytes",10485760)) throw SettingsError(key,"Storage byte limits must be at least the maximum message size.");
     return result;
 }
 
@@ -369,7 +371,11 @@ Json save_settings(const Config& config,const Json& request) {
         tcp::acceptor probe(context);
         std::error_code error;
         probe.open(address.is_v6()?tcp::v6():tcp::v4(),error);
+#ifndef _WIN32
+        if(!error) probe.set_option(tcp::acceptor::reuse_address(true),error);
+#endif
         if(!error) probe.bind({address,static_cast<unsigned short>(port)},error);
+        if(!error) probe.listen(asio::socket_base::max_listen_connections,error);
         if(error) throw SettingsError(name=="delivery" ? "delivery_lock_port" : "ports."+name,"The requested service port is unavailable. Choose another port or check listening permissions.");
     }
     RemoveOnExit secret_cleanup;

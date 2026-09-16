@@ -52,7 +52,7 @@ xmake run postplus --config "config/trial.json" --setup-port 8082
 
 ### A remote Linux or Windows server
 
-`127.0.0.1` always means the computer where the browser runs. Setup deliberately listens only on the server's loopback address. If the server has no browser, use SSH port forwarding from your own computer:
+`127.0.0.1` always means the computer where the browser runs. Setup listens on the server’s loopback address by default. If the server has no browser, use SSH port forwarding from your own computer:
 
 ```sh
 ssh -N -L 8081:127.0.0.1:8081 server-user@server-address
@@ -61,6 +61,16 @@ ssh -N -L 8081:127.0.0.1:8081 server-user@server-address
 Keep the SSH session open, then visit `http://127.0.0.1:8081/` locally. Use the setup password from the **server's PostPlus terminal**. If you chose another setup port, use that port on both sides of the forwarding command. The setup Host/Origin checks expect the selected setup port, so keep the local and remote port numbers the same.
 
 No public firewall rule is needed for setup over this tunnel. The tunnel can also reach the normal admin interface when `admin_bind` remains `127.0.0.1`. After enabling TLS, the normal interface uses HTTPS and the browser must access a hostname covered by the certificate; the tunnel does not remove certificate verification.
+
+### Direct HTTPS setup on a remote server
+
+SSH forwarding remains the simplest way to configure a fresh remote installation. If you already have a certificate for a reachable setup hostname, you can expose the temporary wizard explicitly:
+
+```sh
+xmake run postplus --setup-bind 0.0.0.0 --setup-host setup.example.com --setup-port 8081 --setup-tls-certificate /srv/tls/setup/fullchain.pem --setup-tls-private-key /srv/tls/setup/privkey.pem
+```
+
+Use the HTTPS URL printed by PostPlus and the separate one-time password. Replace the hostname and paths with your own; the browser must trust the certificate and its hostname. A wildcard bind requires `--setup-host`, and any non-loopback setup listener requires both TLS files. Restrict the setup port to your administration network in your firewall. These flags control only the temporary wizard; configure the permanent administration and Webmail listeners in the form. If you do not yet have a certificate, use the SSH tunnel first, then request a certificate as described below.
 
 ## 3. Complete the first-run form
 
@@ -94,8 +104,26 @@ The generated internal service token lives in a private file referenced by `serv
 
 Webmail has no registration page. Every account must be created by an administrator. Usernames are full email addresses, not just the part before `@`. The administrator can also use Webmail by signing in separately.
 
-Use **Delivery queue** to inspect delayed or quarantined mail and **Service logs** to see errors. No Sent folder is implemented yet; the sending account should not expect an automatic saved copy.
+Use **Delivery queue** to inspect delayed or quarantined mail and **Service logs** to see errors. Sent copies appear when Webmail submits mail successfully; final delivery can happen later.
 
+### Organize mail and resume drafts
+
+| Folder | How to use it |
+| --- | --- |
+| Inbox | Mail delivered to your account. |
+| Sent | Copies saved when you successfully submit mail from Webmail. Check the delivery queue if delivery is delayed. |
+| Drafts | Click **Save draft** while composing. Open a saved draft, choose **Edit draft**, and save again or send it. |
+| Trash | **Move to Trash** keeps a message recoverable. Use **Move to…** to restore it. **Delete permanently** in Trash removes it after confirmation. |
+| Junk | Keep unwanted mail separate. Moving mail here does not train the spam filter. |
+| Archive | Keep mail without leaving it in Inbox. |
+
+Use **Move to…** in the message reader to choose a destination. Drafts share your mailbox quota, and sending a saved draft turns it into a Sent copy. **Discard changes** closes the editor without saving unsaved edits; it does not delete an existing saved draft. To remove a saved draft, move it to Trash from its folder.
+
+### Inspect an account and set its storage quota
+
+In **Administration → User accounts**, choose **Inspect mail** beside an account. Select received mail, sent mail, another folder, or **All folders**, then open a message. This view is read-only and does not mark the account’s mail as read. The administrator’s inspection is recorded in service logs.
+
+Choose **Storage quota** beside the account to see its current usage. Keep **Use the server’s default storage quota** selected to inherit the global limit, or clear it and enter an individual limit. Choose a size unit such as MiB or GiB; 1 GiB is 1,073,741,824 bytes. Save to apply the override immediately, without restarting other services. All folders count toward the account’s usage. Lowering a limit does not delete existing mail; new mail and drafts need available capacity.
 ### Connect a mail client
 
 For the local trial, use this manual account configuration:
@@ -111,11 +139,11 @@ For the local trial, use this manual account configuration:
 | TLS installation encryption | STARTTLS for SMTP and IMAP; STLS/STARTTLS for POP3 |
 | SMTP authentication | Enabled, with the full address and password |
 
-Use the real server hostname and configured ports after deployment. Implicit TLS ports such as SMTP 465, IMAP 993, and POP3 995 are not implemented for incoming client connections. Merely changing the port number does not change this. The [protocol matrix](protocols.md) lists the supported IMAP commands; clients requiring folders, IDLE, or other unsupported extensions may need additional development.
+Use the real server hostname and configured ports after deployment. Implicit TLS ports such as SMTP 465, IMAP 993, and POP3 995 are not implemented for incoming client connections. Merely changing the port number does not change this. The [protocol matrix](protocols.md) lists the supported IMAP commands; clients requiring IDLE or other unsupported extensions may need additional development.
 
 ## 5. Change settings in administration
 
-Open **Server settings** for domain, network, TLS, outgoing mail, filtering, limits, sessions, and logs. The form explains fields and checks types, ranges, and conflicting ports before saving.
+Open **Server settings** for domain, network, TLS, outgoing mail, filtering, limits, sessions, and logs. The form explains fields and checks types, ranges, and conflicting ports before saving. Size fields have unit selectors; for example, enter 10 MiB instead of 10485760 bytes. Changing only the displayed unit preserves the exact byte count, and the config file always stores integer bytes.
 
 Saving writes and backs up the configuration. **It does not restart the server.** The existing service group and browser sessions continue with the current settings until you choose to apply the change:
 
@@ -137,12 +165,26 @@ Suppose you control `example.com` and want addresses such as `alice@example.com`
 1. **Choose the mailbox domain.** Set PostPlus's domain to `example.com`. This is the part after `@`; it need not equal the machine's hostname. PostPlus currently supports one mailbox domain.
 2. **Prepare DNS.** Point an A record for `mail.example.com` at the server's public IPv4 address. Add AAAA only if IPv6 actually reaches the configured listener. For direct inbound internet mail, point `example.com`'s MX record at `mail.example.com`. MX records name a host, not an IP address, URL, or custom port.
 3. **Arrange inbound SMTP.** Other mail servers deliver to TCP port 25. The local default `2525` is for testing: configure an appropriate port 25 listener or a controlled forwarding arrangement. Confirm the hosting provider and firewall permit inbound SMTP. A port value in the page does not create firewall/NAT rules or give the process permission to bind privileged ports.
-4. **Obtain a certificate.** Use your certificate provider or ACME client to obtain a PEM certificate chain and its matching, unencrypted PEM private key for `mail.example.com`. Put both on the server where the service account can read them. Protect the private key. PostPlus does not request or renew certificates.
+4. **Obtain a certificate.** Request one through PostPlus’s Let’s Encrypt panel (below), or use another provider. The certificate must cover `mail.example.com`; its PEM chain and matching unencrypted private key must be readable by the service account.
 5. **Configure TLS and listening.** In Server settings, enter those paths, disable local plaintext authentication, and choose a reachable bind address. `0.0.0.0` means all IPv4 interfaces; `127.0.0.1` means local access only. Keep the administration bind on loopback if you manage it through a tunnel. All configured ports must differ, including admin and Webmail.
 6. **Access the correct name.** Use `https://mail.example.com:8080/` for Webmail if that is the configured port and certificate name. Accessing by an IP or another domain can cause a certificate-name error. PostPlus uses one configured certificate/key pair for its TLS listeners.
 7. **Configure an outbound relay.** Follow the next section, then create addresses in the real domain and test a local message before testing an external recipient.
 
 You can run the administration port on a separate network address without making it publicly accessible. DNS, TLS, firewall rules, and relay permission must all agree with the names and ports you actually use. The setup form validates local settings but does not prove external reachability or email deliverability.
+
+### Request a Let’s Encrypt certificate
+
+The certificate panel is available in **Server settings** and in first-run setup after choosing TLS mode. It uses HTTP-01 domain validation:
+
+1. Point the certificate hostname’s public A record at this server. If you publish AAAA, make IPv6 work too. Use the hostname clients will connect to, such as `mail.example.com`.
+2. Make public TCP port **80** reach PostPlus. Stop any conflicting HTTP listener or configure forwarding to the challenge listener. PostPlus must have OS permission to bind its challenge port. The web administration port (normally 8081) is separate from port 80.
+3. Expand **Get a certificate from Let’s Encrypt**. Enter the certificate domain and contact email. Select **Staging · test certificate** first.
+4. Click **Load certificate authority terms**, read the linked terms, and check the agreement box if you accept them. Click **Request certificate**. Follow the status; you can cancel an in-progress request.
+5. After the staging request succeeds, select **Production · trusted certificate**, load and accept its terms, and request again. Staging certificates are not trusted by normal browsers or mail clients.
+6. When the production certificate is issued, click **Use these certificate paths**. This fills the certificate and private-key fields. Review the listening addresses and disable plaintext authentication for network access, then save the configuration.
+7. For an existing installation, stop PostPlus with **Ctrl+C** and run the same launch command to load the certificate. The first-run wizard starts services when its configuration is saved.
+
+Certificates and account credentials are saved privately on the server. PostPlus does not configure DNS or your firewall, and successful local setup is not proof of public reachability. Automatic renewal is not implemented: track certificate expiry and request a replacement before it expires, then save and manually restart. You can still use a certificate obtained through another provider by entering its PEM paths directly.
 
 ### Outbound SMTP relay
 
@@ -178,13 +220,32 @@ xmake run postplus-ctl password admin@example.com --config config/postplus.json
 
 The command prompts for the new password; do not put it in command-line arguments. The CLI requires access to the installation's service credential. Existing sessions in both browser services become invalid on their next authenticated request.
 
+### Reset a disposable installation while keeping its configuration
+
+This operation permanently removes **all user accounts, mail in every folder, stored drafts, and delivery queues** from the selected installation. It is for starting over, not for routine password recovery. Make an offline backup first if any data matters.
+
+Stop PostPlus, then preview the exact files to be removed:
+
+```sh
+xmake run postplus-clean-data --config config/postplus.json --dry-run
+```
+
+After reviewing that the printed data directory is the intended installation, run the same command without `--dry-run`:
+
+```sh
+xmake run postplus-clean-data --config config/postplus.json
+xmake run postplus --config config/postplus.json
+```
+
+The utility removes only the known authentication/mail SQLite database files and their `-wal`, `-shm`, and `-journal` companions. Configuration, service secrets, logs, certificates, and unrelated files are retained. It marks the configuration with `setup_required: true`, so the next launch prints a new one-time setup password and lets you recreate the administrator while keeping server settings. It refuses to run while the data directory is in use.
+
 ## Troubleshooting
 
 | Symptom | What to check |
 | --- | --- |
 | No first-run prompt | Check the configuration path printed/used by the launcher. An initialized installation starts normally; use its admin address. Use a separate config and data directory for a fresh trial. |
 | Setup password rejected | Use the password from the currently running launcher. Restarting setup generates a new one. Paste it without added spaces. |
-| Setup works on the server but not another PC | Setup is loopback-only. Use the SSH forwarding instructions; `127.0.0.1` in your browser refers to your PC. |
+| Setup works on the server but not another PC | Setup is loopback-only by default. Use SSH forwarding or explicitly configure its HTTPS listener; `127.0.0.1` in your browser refers to your PC. |
 | Port unavailable / address already in use | Another program or PostPlus instance may be using the port. Stop that instance or choose a free port. Admin and Webmail must have distinct ports. |
 | `setup web asset is missing` | Build again, keep the bundled `web` folder beside the executables, or pass `--web-root` pointing at this repository's `web` folder. |
 | Service token missing or invalid | A configured token-file path must be readable and contain the installation's token. A nonempty token environment variable overrides the file. Restore the correct secret; do not replace an established data directory to resolve this. |

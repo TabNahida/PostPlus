@@ -22,6 +22,44 @@ A missing file opens setup. A regular JSON configuration without an active servi
 
 Setup prints its temporary password only in the terminal and listens on `127.0.0.1:8081` by default. `--setup-port` changes that temporary listener. The final administration port is the separate `ports.admin` setting; Webmail uses `ports.web`. Setup completion preserves the selected data directory of an existing configuration and saves a private backup before replacing it.
 
+### First-run command-line options
+
+Setup listener options apply only while the wizard is open. They are not configuration-file or web settings:
+
+| Option | Meaning |
+| --- | --- |
+| `--setup-bind IP` | IPv4/IPv6 listening address; default `127.0.0.1`. |
+| `--setup-port PORT` | Temporary listening port, 1–65535; default 8081. |
+| `--setup-host HOST` | Advertised hostname/IP without scheme or port. Required with `0.0.0.0` or `::`. Host/Origin checks accept this host. |
+| `--setup-tls-certificate PATH` | PEM chain for the wizard's HTTPS listener. |
+| `--setup-tls-private-key PATH` | Matching unencrypted PEM key. Both TLS options must be supplied together. |
+
+```sh
+xmake run postplus --setup-bind 127.0.0.1 --setup-port 9081
+```
+
+For remote setup with an existing certificate:
+
+```sh
+postplus --setup-bind 0.0.0.0 --setup-port 9443 --setup-host mail.example.com \
+  --setup-tls-certificate /srv/certs/fullchain.pem --setup-tls-private-key /srv/certs/privkey.pem
+```
+
+Remote setup requires HTTPS to protect the temporary setup password and administrator credentials. Without an existing certificate, keep the loopback listener and use an SSH tunnel (`ssh -L 8081:127.0.0.1:8081 user@server`), then open the printed local URL. You can request a certificate inside that setup session. Configure the permanent service addresses separately in the wizard.
+
+### Reset mail data
+
+Stop PostPlus before running:
+
+```sh
+xmake clean-data --config=config/postplus.json --dry-run
+xmake clean-data --config=config/postplus.json
+```
+
+The native cleanup tool removes `auth.sqlite3`, `storage.sqlite3`, and their SQLite `-wal`, `-shm`, and `-journal` files from the configured data directory. This deletes accounts, mail, drafts, folder state, user quotas, delivery queues, and quarantine. It preserves the configuration, logs, certificate files, and unrelated files. It refuses symlink targets and data directories held by running authentication/storage processes.
+
+The retained configuration is marked `setup_required: true`; the next normal launch prints a fresh setup password and lets you create an administrator while keeping saved settings. The wizard clears that marker after successful provisioning. Review `--dry-run` and back up anything you need before resetting. `xmake clean` still cleans build output only.
+
 ### Browser saves
 
 The settings page reads the current values and a revision of the file. A save:
@@ -90,13 +128,23 @@ Changing a port does not enable another protocol mode. The server's SMTP/POP3/IM
 
 Browser setup/settings require a valid matching certificate/key pair when either the mail/Webmail bind or admin bind is non-loopback, and require insecure authentication to be disabled. For a certificate-free local trial, both binds must be loopback and local plaintext authentication must be explicitly enabled.
 
-One certificate/key pair is shared across the TLS listeners. Access the server through a hostname covered by the certificate. The generated link is a convenience based on configured addresses; if a wildcard bind or separate mailbox domain produces a different name, use the actual certificate hostname. Certificate issuance, renewal, DNS, and firewall changes are administered outside PostPlus. Replace renewed files and restart the service group.
+One certificate/key pair is shared across the TLS listeners. Access the server through a hostname covered by the certificate. The generated link is based on configured addresses; if a wildcard bind or mailbox domain produces a different name, use the actual certificate hostname.
+
+### Let's Encrypt certificates
+
+Setup and **Administration → Server settings** include an ACME HTTP-01 certificate request panel. Enter a public DNS hostname and contact email, load/read the authority's terms, and explicitly accept them before requesting a certificate. Start with **Staging** to verify DNS and reachability, then select **Production** and accept its terms for a trusted certificate. Staging certificates are not trusted by mail clients or browsers.
+
+The hostname's public A/AAAA records must reach this server and public **TCP port 80** must reach the temporary PostPlus challenge listener. Open/forward that port and stop any conflicting HTTP server before applying. HTTP-01 does not issue wildcard certificates. Domain/DNS records, firewall rules, privileged-port permissions, and NAT forwarding remain administrator responsibilities. On Linux/macOS, the process account needs permission to bind port 80.
+
+ACME account credentials and issued PEM files are stored privately under `certificates/` beside the configuration file. Private-key contents are never returned through the API. After production issuance, use the returned file paths and save your settings. First-run setup starts the services with those paths; an existing installation needs a manual restart to apply them. A failed request leaves the active certificate unchanged. Request a replacement before expiry, save the new paths and restart; scheduled automatic renewal is not implemented. Use separate parent directories for independent installations' certificate stores.
 
 Administration and Webmail have separate processes, ports, session stores, and cookie names (`pp_admin_session` and `pp_session`). Cookies are HttpOnly and SameSite=Strict, and Secure over HTTPS. A browser still scopes cookies by hostname rather than port; avoid hosting untrusted applications on the same hostname and treat separate ports as routing separation, not a complete browser security boundary.
 
 ## Message, connection, and storage limits
 
-Sizes are bytes, not decimal megabytes. **1 MiB = 1048576 bytes**; **1 GiB = 1073741824 bytes**. These limits do not reserve disk space or establish a supported user count.
+The web form provides B, KiB, MiB, GiB, and TiB selectors. Configuration files and API payloads store integer bytes. **1 MiB = 1048576 bytes**; **1 GiB = 1073741824 bytes**. Switching display units preserves the exact byte count. Fractional amounts must convert to a whole number of bytes. These limits do not reserve disk space or establish a supported user count.
+
+**Administration → User accounts → Storage quota** supports independent user quotas. An inherited quota follows `max_mailbox_bytes`; a custom quota (1–1125899906842624 bytes) overrides it immediately and is stored in SQLite. All six folders, including Trash and Sent, count toward usage. Moving mail does not free space; permanently deleting it from Trash does. Lowering a quota below existing usage preserves mail and blocks further growth. Saving global defaults requires a restart as usual.
 
 | Field | Default | Browser-validated range | Meaning |
 | --- | --- | --- | --- |
@@ -105,9 +153,9 @@ Sizes are bytes, not decimal megabytes. **1 MiB = 1048576 bytes**; **1 GiB = 107
 | `max_connections` | `32` | 1–1024 | Concurrent sessions per listening service; each active connection consumes a worker. Excess sessions are closed. |
 | `timeout_seconds` | `30` | 1–300 | General network timeout, in seconds. |
 | `smtp_data_timeout_seconds` | `120` | 1–3600 | Total SMTP DATA upload deadline, in seconds. |
-| `max_mailbox_bytes` | `1073741824` (1 GiB) | 1024–2147483647 | Byte limit per mailbox; must be at least `max_message_bytes`. |
+| `max_mailbox_bytes` | `1073741824` (1 GiB) | 1024–1125899906842624 | Default byte limit per user across all folders; must be at least `max_message_bytes`. |
 | `max_mailbox_messages` | `10000` | 1–100000 | Message-count limit per mailbox. |
-| `max_queue_bytes` | `1073741824` (1 GiB) | 1024–2147483647 | Queue byte limit; must be at least `max_message_bytes`. A separate recipient job accounts for its own copy. |
+| `max_queue_bytes` | `1073741824` (1 GiB) | 1024–1125899906842624 | Queue byte limit; must be at least `max_message_bytes`. A separate recipient job accounts for its own copy. |
 | `max_queue_messages` | `100000` | 1–1000000 | Maximum queued recipient jobs. |
 
 Lowering a limit does not remove existing mail or shrink databases. New writes can fail once a mailbox or queue reaches its limit. Monitor queue age, free disk space, authentication latency, and memory before raising concurrency substantially. The current implementation has a single delivery worker and serialized SQLite writes.

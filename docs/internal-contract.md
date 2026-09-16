@@ -19,16 +19,21 @@ Config is JSON. `Config::load` accepts `--config PATH` (default config/postplus.
 
 SQLite owned exclusively by storage process; auth owns a separate auth SQLite DB.
 
-- enqueue: sender, recipients:[full email], raw -> ok,id (queue submission ID). Persist each recipient as a separate job before accepting SMTP DATA.
+- enqueue: sender, recipients:[full email], raw, sent_username(optional authenticated account), draft_id(optional), submission_id(optional retry key) -> ok,id,sent_id(optional). Persists recipients, Sent copy, and removal of a consumed draft in one transaction. Retry keys require identical raw bytes and envelope and remain deduplicated after queue completion.
 - queue_list: limit optional -> ok,jobs:[{id,sender,recipient,raw,attempts}] (only due jobs; delivery is single worker).
 - queue_finish: id -> ok (remove job).
 - queue_retry: id,delay(seconds),error -> ok (increment attempts, set next due; no automatic dropping).
 - queue_reject: id,error -> ok (persistent quarantined state, excluded from queue_list).
 - queue_inspect: limit (max 1000),offset -> ok,jobs (pending and quarantined metadata including last_error; no raw).
 - deliver: username,raw,delivery_id -> ok,id (idempotent by delivery_id+username).
-- list: username,include_envelope(optional bool) -> ok,messages:[{id,uid,size,seen,internal_date}], uidvalidity (stable positive int), uidnext. Ordered by uid; internal_date is Unix seconds. Optional envelope adds subject/from/date to latest 100 messages from their first 16 KiB, each field at most 1024 bytes, without changing Seen.
-- get: username,id -> ok,raw.
-- delete: username,ids:[id] -> ok (atomic batch).
+- list: username,folder(default INBOX),include_envelope(optional bool) -> ok,messages:[{id,uid,size,seen,internal_date}], uidvalidity (stable positive int), uidnext. Ordered by uid; internal_date is Unix seconds. Optional envelope adds subject/from/date to latest 100 messages from their first 16 KiB, each field at most 1024 bytes, without changing Seen.
+- get: username,id,folder(optional),uid(optional) -> ok,raw,folder,uid,seen. Read-only.
+- folders: username -> ok,folders:[{name,messages,bytes,unseen}],usage.
+- move: username,ids:[id],folder -> ok. Stable IDs, fresh UIDs in the destination.
+- delete: username,ids:[id],permanent(default false),folder(optional),expected_uids(optional snapshot) -> ok (atomic batch). Default moves to Trash; permanent removes records. Protocols use permanent with folder/UID guards.
+- draft_save: username,raw,id(optional existing draft),uid(optional revision) -> ok,id,uid,folder:Drafts. A rewrite gets a fresh UID.
+- quota_get: username -> ok,bytes,messages,max_bytes,max_messages,quota_bytes,quota_messages.
+- quota_set: username,max_bytes(optional null or 1..2^50),max_messages(optional null or 1..100000) -> updated quota_get result. Null inherits the global limit. All folders share the same user quota.
 - flags: username,id,seen:bool -> ok.
 - stats -> ok,messages,queued,bytes,queued_bytes,quarantined.
 

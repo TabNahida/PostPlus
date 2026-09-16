@@ -1,5 +1,6 @@
 #include <postplus/setup.hpp>
 #include <postplus/settings.hpp>
+#include <postplus/acme.hpp>
 #include <asio/ssl.hpp>
 #include <openssl/ssl.h>
 #include <algorithm>
@@ -158,7 +159,7 @@ Json setup_defaults(const SetupOptions& options) {
         {"allow_insecure_auth", true}, {"admin_username", "admin@localhost"},
         {"tls_certificate", ""}, {"tls_private_key", ""},
         {"ports", {{"auth", 18081}, {"storage", 18082}, {"filter", 18083}, {"transfer", 18084},
-            {"smtp", 2525}, {"pop3", 1110}, {"imap", 1143}, {"web", 8080}, {"admin", options.port}, {"delivery_lock", 18085}}},
+            {"smtp", 2525}, {"pop3", 1110}, {"imap", 1143}, {"web", 8080}, {"admin", options.port==8080?8081:options.port}, {"delivery_lock", 18085}}},
         {"smarthost_host", ""}, {"smarthost_port", 587}, {"smarthost_tls", "starttls"},
         {"smarthost_username", ""}, {"smarthost_password_env", "POSTPLUS_SMARTHOST_PASSWORD"},
         {"clamav_host", ""}, {"clamav_port", 3310}};
@@ -263,7 +264,11 @@ Config validate_input(const Json& input, const Json& defaults, const SetupOption
         const tcp::endpoint endpoint(internal ? asio::ip::address(asio::ip::address_v4::loopback()) : listen_address,
             static_cast<unsigned short>(port));
         probe.open(endpoint.protocol(), port_error);
+#ifndef _WIN32
+        if (!port_error) probe.set_option(tcp::acceptor::reuse_address(true), port_error);
+#endif
         if (!port_error) probe.bind(endpoint, port_error);
+        if (!port_error) probe.listen(asio::socket_base::max_listen_connections, port_error);
         if (port_error) throw SetupError("port_unavailable", "The " + service + " port is unavailable. Choose another port or check listening permissions.");
     }
     for (const auto* field : {"smarthost_host", "smarthost_username", "smarthost_password_env", "clamav_host"})
@@ -309,15 +314,31 @@ bool run_setup(const SetupOptions& options, SetupProvision provision) {
     }
     const auto defaults = setup_defaults(options);
     const auto token = random_hex(32);
-    const auto authority = "127.0.0.1:" + std::to_string(options.port);
-    const auto localhost_authority = "localhost:" + std::to_string(options.port);
-    const std::set<std::string> hosts = options.port == 80
-        ? std::set<std::string>{authority, localhost_authority, "127.0.0.1", "localhost"}
-        : std::set<std::string>{authority, localhost_authority};
+    const auto address = asio::ip::make_address(options.bind);
+    const bool local=address.is_loopback(), https=!options.tls_certificate.empty();
+    if(https!=!options.tls_private_key.empty()) throw std::invalid_argument("provide both setup TLS certificate and private key");
+    if(!local && !https) throw std::invalid_argument("remote setup requires --setup-tls-certificate and --setup-tls-private-key; use a loopback SSH tunnel for first-time certificate setup");
+    if(address.is_unspecified() && options.host.empty()) throw std::invalid_argument("--setup-host is required with a wildcard --setup-bind");
+    std::string host=options.host.empty()?address.to_string():lower(options.host);
+    std::error_code host_error;
+    const auto host_address=asio::ip::make_address(host,host_error);
+    if(host_error && (host.size()>253 || !valid_address("postmaster@"+host))) throw std::invalid_argument("invalid --setup-host; provide a hostname without a scheme, port, or path");
+    if(!host_error && host_address.is_unspecified()) throw std::invalid_argument("--setup-host must identify a reachable address");
+    if(!host_error && host_address.is_v6()) host="["+host+"]";
+    const std::string scheme=https?"https://":"http://";
+    const auto authority=host+":"+std::to_string(options.port);
+    std::set<std::string> hosts{authority};
+    if(options.port==(https?443:80)) hosts.insert(host);
+    if(local && options.host.empty()) {
+        hosts.insert("localhost:"+std::to_string(options.port));
+        if(options.port==(https?443:80)) hosts.insert("localhost");
+    }
+    AcmeManager acme(AcmeOptions{destination.parent_path()/"certificates"});
     std::map<std::string, HttpResponse> assets;
     for (const auto& [filename, type] : std::map<std::string, std::string>{
         {"setup.html", "text/html; charset=utf-8"}, {"setup.js", "application/javascript; charset=utf-8"},
         {"i18n.js", "application/javascript; charset=utf-8"}, {"settings.js", "application/javascript; charset=utf-8"},
+        {"size.js", "application/javascript; charset=utf-8"}, {"acme.js", "application/javascript; charset=utf-8"},
         {"favicon.svg", "image/svg+xml"}, {"style.css", "text/css; charset=utf-8"}}) {
         std::ifstream file(fs::absolute(options.web_root) / filename, std::ios::binary);
         if (!file) throw std::runtime_error("setup web asset is missing: " + filename);
@@ -330,21 +351,51 @@ bool run_setup(const SetupOptions& options, SetupProvision provision) {
     std::atomic<bool> completed = false;
     std::atomic<std::int64_t> stop_after = 0;
     Config listener;
-    listener.values = {{"bind", "127.0.0.1"}, {"ports", {{"web", options.port}}},
+    listener.values = {{"bind", options.bind}, {"ports", {{"web", options.port}}},
         {"max_connections", 8}, {"timeout_seconds", 15}};
+    if(https) {
+        listener.values["tls_certificate"]=options.tls_certificate.string();
+        listener.values["tls_private_key"]=options.tls_private_key.string();
+        asio::ssl::context tls(asio::ssl::context::tls_server);
+        tls.use_certificate_chain_file(options.tls_certificate.string());
+        tls.use_private_key_file(options.tls_private_key.string(),asio::ssl::context::pem);
+        if(SSL_CTX_check_private_key(tls.native_handle())!=1) throw std::invalid_argument("setup TLS private key does not match the certificate");
+    }
     auto preflight = [&](const HttpRequest& request) -> std::optional<HttpResponse> {
         const auto host = lower(header(request, "host"));
-        if (!request.peer_loopback || !hosts.contains(host))
+        if ((local && !request.peer_loopback) || !hosts.contains(host))
             return error_response("local_access_required", "Setup is available only through its local URL.", 403);
         const auto origin = header(request, "origin");
-        if (!origin.empty() && (!origin.starts_with("http://") || !hosts.contains(origin.substr(7))))
+        if (!origin.empty() && (!origin.starts_with(scheme) || !hosts.contains(origin.substr(scheme.size()))))
             return error_response("invalid_origin", "Open the setup URL printed by the server.", 403);
-        if (request.path == "/api/setup" && !secure_equal(header(request, "x-setup-token"), token))
+        if ((request.path == "/api/setup" || request.path.starts_with("/api/setup/acme/")) && !secure_equal(header(request, "x-setup-token"), token))
             return error_response("invalid_setup_token", "Enter the one-time setup password printed in the PostPlus terminal.", 403);
         return std::nullopt;
     };
     auto handler = [&](const HttpRequest& request) -> HttpResponse {
         try {
+            if(request.path.starts_with("/api/setup/acme/")) {
+                std::lock_guard lock(provisioning);
+                if(completed) return error_response("already_configured","A configuration already exists. Restart PostPlus to use it.",409);
+                const auto question=request.path.find('?');
+                const auto path=request.path.substr(0,question);
+                const auto query=question==std::string::npos?std::string{}:request.path.substr(question+1);
+                if(request.method=="GET" && path=="/api/setup/acme/terms") {
+                    if(query!="directory=staging" && query!="directory=production" && !query.empty()) throw SetupError("invalid_field","Invalid certificate directory.");
+                    return protected_response(json_response(acme.terms(query=="directory=production"?"production":"staging")));
+                }
+                if(request.method=="GET" && path=="/api/setup/acme/status") {
+                    if(!query.empty() && (!query.starts_with("job_id=") || query.size()>135 || query.find_first_not_of("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-_=.")!=std::string::npos)) throw SetupError("invalid_field","Invalid certificate job.");
+                    return protected_response(json_response(acme.status(query.empty()?"":query.substr(7))));
+                }
+                if(request.method=="POST") {
+                    if(!lower(header(request,"content-type")).starts_with("application/json")) return error_response("invalid_content_type","Use application/json for setup.",415);
+                    auto input=Json::parse(request.body);
+                    if(path=="/api/setup/acme/start") return protected_response(json_response(acme.start(input),202));
+                    if(path=="/api/setup/acme/cancel") return protected_response(json_response(acme.cancel(text_field(input,"job_id","",128))));
+                }
+                return error_response("not_found","Not found.",404);
+            }
             if (request.path != "/api/setup") {
                 const auto asset = assets.find(request.path);
                 if (request.method == "GET" && asset != assets.end()) return asset->second;
@@ -378,6 +429,7 @@ bool run_setup(const SetupOptions& options, SetupProvision provision) {
             owned.paths.push_back(secret);
             config.values["service_token_file"] = secret.string();
             config.values["setup_complete"] = true;
+            config.values.erase("setup_required");
             if (input.contains("smarthost_password") && !input.at("smarthost_password").get<std::string>().empty()) {
                 const auto relay=destination.parent_path()/(destination.filename().string()+".relay-password-"+suffix);
                 private_write(relay,input.at("smarthost_password").get<std::string>());
@@ -401,6 +453,8 @@ bool run_setup(const SetupOptions& options, SetupProvision provision) {
             log("setup", "initial configuration and administrator created");
             return protected_response(json_response({{"ok", true}, {"web_url", settings_url(config,"web")},
                 {"admin_url",settings_url(config,"admin")}}));
+        } catch (const AcmeError& error) {
+            return error_response(error.code,error.what(),error.status);
         } catch (const SettingsError& error) {
             auto response=json_response({{"ok",false},{"code","invalid_configuration"},{"field",error.field},{"error",error.what()}},error.status);
             return protected_response(std::move(response));
@@ -416,10 +470,11 @@ bool run_setup(const SetupOptions& options, SetupProvision provision) {
     };
     // Never send this credential to the persistent logger or an HTTP query.
     std::cout << "\nPostPlus setup is required before mail services can start.\n"
-              << "Open this configuration page: http://" << authority << "/setup\n"
+              << "Open this configuration page: " << scheme << authority << "/setup\n"
               << "One-time setup password: " << token << "\n"
               << "Use this password to unlock setup, then choose your administrator account and password.\n"
-              << "Setup is available only on this computer. This password expires after setup or server shutdown.\n" << std::endl;
+              << (local ? "Setup is available only on this computer. " : "Remote HTTPS setup is enabled. ")
+              << "This password expires after setup or server shutdown.\n" << std::endl;
     serve_http(listener, "web", handler, false, preflight, [&] {
         const auto deadline = stop_after.load();
         return deadline != 0 && monotonic_milliseconds() >= deadline;

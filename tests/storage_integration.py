@@ -184,7 +184,7 @@ def check_storage(services):
     assert rpc("list", username="alice@localhost")["messages"][0]["seen"]
     assert not rpc("delete", username="alice@localhost", ids=[first["id"], "invalid id"])["ok"]
     assert len(rpc("list", username="alice@localhost")["messages"]) == 1
-    assert rpc("delete", username="alice@localhost", ids=[first["id"]])["ok"]
+    assert rpc("delete", username="alice@localhost", ids=[first["id"]], permanent=True)["ok"]
     assert rpc("deliver", username="alice@localhost", raw=raw, delivery_id="stable-job")["id"] == first["id"]
     assert not rpc("list", username="alice@localhost")["messages"]
     services.stop("storage")

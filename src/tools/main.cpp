@@ -2,6 +2,7 @@
 #include <postplus/process.hpp>
 #include <postplus/setup.hpp>
 #include <postplus/settings.hpp>
+#include <postplus/data_lock.hpp>
 
 #include <algorithm>
 #include <charconv>
@@ -56,6 +57,8 @@ struct Options {
     std::filesystem::path config = "config/postplus.json";
     std::filesystem::path web_root;
     int setup_port = 8081;
+    std::string setup_bind = "127.0.0.1", setup_host;
+    std::filesystem::path setup_certificate, setup_key;
     bool help = false;
 };
 
@@ -64,11 +67,15 @@ Options parse_options(int argc, char** argv) {
     for (int i = 1; i < argc; ++i) {
         const std::string_view argument(argv[i]);
         if (argument == "--help" || argument == "-h") { options.help = true; continue; }
-        if (argument != "--config" && argument != "--web-root" && argument != "--setup-port")
+        if (argument != "--config" && argument != "--web-root" && argument != "--setup-port" && argument != "--setup-bind" && argument != "--setup-host" && argument != "--setup-tls-certificate" && argument != "--setup-tls-private-key")
             throw std::invalid_argument("unknown option: " + std::string(argument) + "; use --help");
         if (++i >= argc) throw std::invalid_argument(std::string(argument) + " requires a value");
         if (argument == "--config") options.config = std::filesystem::path(argv[i]);
         else if (argument == "--web-root") options.web_root = std::filesystem::path(argv[i]);
+        else if (argument == "--setup-bind") options.setup_bind = argv[i];
+        else if (argument == "--setup-host") options.setup_host = argv[i];
+        else if (argument == "--setup-tls-certificate") options.setup_certificate = std::filesystem::absolute(argv[i]);
+        else if (argument == "--setup-tls-private-key") options.setup_key = std::filesystem::absolute(argv[i]);
         else {
             const std::string_view input(argv[i]);
             const auto [end, error] = std::from_chars(input.data(), input.data() + input.size(), options.setup_port);
@@ -108,7 +115,13 @@ void port_available(const Config& config, const std::string& service) {
     tcp::acceptor test(context);
     std::error_code error;
     test.open(address.is_v6() ? tcp::v6() : tcp::v4(), error);
+#ifndef _WIN32
+    // Match Asio's listener policy so a stopped service's TIME_WAIT sockets
+    // do not prevent immediate startup (notably after administrator setup).
+    if (!error) test.set_option(tcp::acceptor::reuse_address(true), error);
+#endif
     if (!error) test.bind({address, static_cast<unsigned short>(port)}, error);
+    if (!error) test.listen(asio::socket_base::max_listen_connections, error);
     if (error) throw std::runtime_error(service + " cannot bind " + address.to_string() + ":" + std::to_string(port));
 }
 
@@ -235,14 +248,19 @@ int run(int argc, char** argv) {
     auto options = parse_options(argc, argv);
     if (options.help) {
         std::cout << "PostPlus mail server\n"
-                     "Usage: postplus [--config PATH] [--web-root PATH] [--setup-port PORT]\n\n"
+                     "Usage: postplus [--config PATH] [--web-root PATH] [setup options]\n\n"
                      "  --config PATH       Configuration file (default: config/postplus.json)\n"
                      "  --web-root PATH     Web assets for first-run setup (default: executable/web, then ./web)\n"
-                     "  --setup-port PORT   Loopback-only setup page port (default: 8081)\n"
+                     "  --setup-port PORT   Setup page port (default: 8081)\n"
+                     "  --setup-bind IP     Setup listening IP (default: 127.0.0.1)\n"
+                     "  --setup-host HOST   Setup URL hostname; required for a wildcard bind\n"
+                     "  --setup-tls-certificate PATH  Setup HTTPS certificate chain (PEM)\n"
+                     "  --setup-tls-private-key PATH  Setup HTTPS private key (PEM)\n"
                      "  --help              Show this help\n\n"
                      "A missing or uninitialized configuration opens browser setup and prints\n"
                      "its URL and one-time password. An initialized configuration starts all\n"
-                     "services. Restart manually to apply saved settings. Ctrl+C stops them.\n";
+                     "services. Restart manually to apply saved settings. Ctrl+C stops them.\n"
+                     "Setup listener options are command-line only; remote setup requires HTTPS.\n";
         return 0;
     }
     std::signal(SIGINT, stop_signal);
@@ -271,21 +289,31 @@ int run(int argc, char** argv) {
         if (!value.is_object()) throw std::invalid_argument("config must be a JSON object");
         const auto environment = value.value("service_token_env",std::string("POSTPLUS_SERVICE_TOKEN"));
         const auto* token = std::getenv(environment.c_str());
-        if ((!token || !*token) && value.value("service_token_file",std::string{}).empty() && !value.value("setup_complete",false)) {
+        if (value.value("setup_required",false) || ((!token || !*token) && value.value("service_token_file",std::string{}).empty() && !value.value("setup_complete",false))) {
             needs_setup = true;
             incomplete_configuration = std::move(bytes);
         }
     }
     if (needs_setup) {
-        if (!run_setup({options.config, options.web_root, options.setup_port, incomplete_configuration},
+        if (!run_setup({options.config, options.web_root, options.setup_port, incomplete_configuration,
+                       options.setup_bind,options.setup_host,options.setup_certificate,options.setup_key},
                        [&](const Config& staged, const std::string& username, const std::string& password) {
                            provision_admin(binaries, staged, username, password);
                        })) return 0;
     } else if (status_error) {
         throw std::runtime_error("cannot inspect configuration file: " + options.config.string());
     }
+    // The setup listener temporarily owns SIGINT/SIGTERM through Asio. Its
+    // destruction can restore the default POSIX dispositions, so reinstall the
+    // supervisor handlers before any long-lived children are started.
+    std::signal(SIGINT, stop_signal);
+    std::signal(SIGTERM, stop_signal);
     if (stop_requested()) return 0;
     auto config = Config::from_file(options.config);
+    const std::filesystem::path data_directory(config.text("data_dir"));
+    require_plain_path(data_directory);
+    std::filesystem::create_directories(data_directory);
+    DataDirectoryLock data_lease(data_directory);
     configure_logging(config, "postplus");
     const std::vector<std::string> services{"auth", "storage", "filter", "transfer", "delivery", "smtp", "pop3", "imap", "web", "admin"};
     // Validate the complete installation before creating any child process.

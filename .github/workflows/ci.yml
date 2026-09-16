@@ -37,7 +37,7 @@ jobs:
         run: xmake test -v
       - name: Web language and asset checks
         run: node tests/web_test.js
-      - name: Protocol, setup and supervisor integration
+      - name: Mailbox, protocol, setup, maintenance and supervisor integration
         run: python tests/integration.py --build-dir build --mode ${{ matrix.mode }}
       - name: Upload diagnostic logs
         if: failure()

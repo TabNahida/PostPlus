@@ -1,4 +1,5 @@
 #include <postplus/core.hpp>
+#include <postplus/data_lock.hpp>
 #include <openssl/evp.h>
 #include <openssl/rand.h>
 #include <sqlite3.h>
@@ -95,6 +96,7 @@ public:
             std::filesystem::permissions(directory, std::filesystem::perms::owner_all);
 #endif
         }
+        data_lock_ = std::make_unique<DataDirectoryLock>(directory);
         const auto path = (directory / "auth.sqlite3").u8string();
         if (sqlite3_open_v2(reinterpret_cast<const char*>(path.c_str()), &db_,
                             SQLITE_OPEN_READWRITE | SQLITE_OPEN_CREATE | SQLITE_OPEN_FULLMUTEX, nullptr) != SQLITE_OK) {
@@ -245,6 +247,7 @@ private:
             throw std::runtime_error("authentication database initialization failed");
     }
     sqlite3* db_ = nullptr;
+    std::unique_ptr<DataDirectoryLock> data_lock_;
     int rounds_, max_password_;
     std::string dummy_salt_;
     std::mutex mutex_;

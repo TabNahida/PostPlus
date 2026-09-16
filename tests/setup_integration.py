@@ -173,7 +173,7 @@ def http(port, method, path, body=None, headers=None, context=None):
 
 
 class NativeServer:
-    def __init__(self, binaries, config, port, directory, label, web_root=None):
+    def __init__(self, binaries, config, port, directory, label, web_root=None, extra_args=None):
         self.token = None
         self.setup_ready = threading.Event()
         self.services_ready = threading.Event()
@@ -185,6 +185,7 @@ class NativeServer:
         arguments = [str(binary), "--config", str(config), "--setup-port", str(port)]
         if web_root is not None:
             arguments.extend(["--web-root", str(web_root)])
+        arguments.extend(extra_args or [])
         self.process = subprocess.Popen(
             arguments,
             cwd=directory, env=env, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,

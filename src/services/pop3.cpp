@@ -39,8 +39,13 @@ void pop3(Connection& c, const Config& cfg) {
         try {
             if (cmd == "quit") {
                 if (!user.empty() && !deleted.empty()) {
-                    Json ids = Json::array(); for (auto index : deleted) ids.push_back(messages[index].at("id"));
-                    auto result = rpc(cfg, "storage", {{"op", "delete"}, {"username", user}, {"ids", ids}});
+                    Json ids = Json::array(), expected_uids = Json::object();
+                    for (auto index : deleted) {
+                        ids.push_back(messages[index].at("id"));
+                        expected_uids[messages[index].at("id").get<std::string>()] = messages[index].at("uid");
+                    }
+                    auto result = rpc(cfg, "storage", {{"op", "delete"}, {"username", user}, {"ids", ids},
+                        {"permanent", true}, {"folder", "INBOX"}, {"expected_uids", expected_uids}});
                     if (!result.value("ok", false)) { c.write("-ERR Unable to commit deletions\r\n"); return; }
                 }
                 c.write("+OK Goodbye\r\n"); return;
@@ -73,7 +78,7 @@ void pop3(Connection& c, const Config& cfg) {
                     if (++auth_failures >= auth_limit) { c.write("-ERR [LOGIN-DELAY] Too many failed authentication attempts\r\n"); return; }
                     c.write("-ERR [AUTH] Invalid credentials\r\n"); continue;
                 }
-                auto mailbox = rpc(cfg, "storage", {{"op", "list"}, {"username", candidate}});
+                auto mailbox = rpc(cfg, "storage", {{"op", "list"}, {"username", candidate}, {"folder", "INBOX"}});
                 if (!mailbox.value("ok", false)) { c.write("-ERR Mailbox unavailable\r\n"); continue; }
                 messages = mailbox.at("messages").get<std::vector<Json>>(); user = candidate;
                 c.write("+OK Mailbox ready\r\n"); continue;
@@ -105,7 +110,8 @@ void pop3(Connection& c, const Config& cfg) {
             if (cmd == "list" || cmd == "uidl") {
                 c.write("+OK " + std::to_string(index + 1) + " " + std::to_string(messages[index].at(cmd == "list" ? "size" : "uid").get<std::uint64_t>()) + "\r\n"); continue;
             }
-            auto result = rpc(cfg, "storage", {{"op", "get"}, {"username", user}, {"id", messages[index].at("id")}});
+            auto result = rpc(cfg, "storage", {{"op", "get"}, {"username", user}, {"id", messages[index].at("id")},
+                {"folder", "INBOX"}, {"uid", messages[index].at("uid")}});
             if (!result.value("ok", false)) { c.write("-ERR Message unavailable\r\n"); continue; }
             auto raw = result.at("raw").get<std::string>();
             if (cmd == "top") {
