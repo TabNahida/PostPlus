@@ -1,10 +1,13 @@
 #include <postplus/core.hpp>
 #include <postplus/process.hpp>
 #include <postplus/setup.hpp>
+#include <postplus/settings.hpp>
 
 #include <algorithm>
 #include <charconv>
 #include <csignal>
+#include <cstdlib>
+#include <fstream>
 #include <iostream>
 #include <set>
 #include <stdexcept>
@@ -52,7 +55,7 @@ std::filesystem::path service_executable(const std::filesystem::path& directory,
 struct Options {
     std::filesystem::path config = "config/postplus.json";
     std::filesystem::path web_root;
-    int setup_port = 8080;
+    int setup_port = 8081;
     bool help = false;
 };
 
@@ -82,8 +85,8 @@ void ensure_alive(ProcessGroup& children) {
                                  "; stopping the service group");
 }
 
-std::string public_probe_host(const Config& config) {
-    const auto address = asio::ip::make_address(config.text("bind", "127.0.0.1"));
+std::string public_probe_host(const Config& config, const std::string& service) {
+    const auto address = asio::ip::make_address(config.text(service == "admin" ? "admin_bind" : "bind", "127.0.0.1"));
     if (address.is_unspecified()) return address.is_v6() ? "::1" : "127.0.0.1";
     return address.to_string();
 }
@@ -100,7 +103,7 @@ bool internal_service(const std::string& service) {
 void port_available(const Config& config, const std::string& service) {
     const int port = service_port(config, service);
     if (port < 1 || port > 65535) throw std::invalid_argument("invalid " + service + " port");
-    const auto address = asio::ip::make_address(internal_service(service) ? "127.0.0.1" : config.text("bind", "127.0.0.1"));
+    const auto address = asio::ip::make_address(internal_service(service) ? "127.0.0.1" : config.text(service == "admin" ? "admin_bind" : "bind", "127.0.0.1"));
     asio::io_context context;
     tcp::acceptor test(context);
     std::error_code error;
@@ -163,7 +166,7 @@ void wait_ready(ProcessGroup& children, const Config& config, const std::string&
             } else {
                 Connection connection(std::chrono::seconds(1));
                 connection.set_deadline(std::min(deadline, std::chrono::steady_clock::now() + std::chrono::seconds(1)));
-                connection.connect(internal_service(service) ? "127.0.0.1" : public_probe_host(config), service_port(config, service));
+                connection.connect(internal_service(service) ? "127.0.0.1" : public_probe_host(config,service), service_port(config, service));
                 if (service == "smtp" && !connection.line().starts_with("220 "))
                     throw std::runtime_error("SMTP readiness probe failed");
                 if (service == "pop3" && !connection.line().starts_with("+OK"))
@@ -173,7 +176,7 @@ void wait_ready(ProcessGroup& children, const Config& config, const std::string&
                 // HTTPS may use a private certificate whose hostname differs
                 // from this local probe. Listener readiness plus child liveness
                 // is sufficient in that case; client trust policy stays strict.
-                if (service == "web" && config.text("tls_certificate").empty()) {
+                if ((service == "web" || service == "admin") && config.text("tls_certificate").empty()) {
                     connection.write("GET /health HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n");
                     if (!connection.line().starts_with("HTTP/1.1 200 "))
                         throw std::runtime_error("web readiness probe failed");
@@ -215,6 +218,19 @@ void provision_admin(const std::filesystem::path& binaries, const Config& staged
     temporary.stop();
 }
 
+std::string configuration_bytes(const std::filesystem::path& path) {
+    std::ifstream file(path,std::ios::binary);
+    if (!file) throw std::runtime_error("cannot read configuration");
+    file.seekg(0,std::ios::end);
+    const auto size = file.tellg();
+    if (size < 0 || size > 1024 * 1024) throw std::runtime_error("invalid configuration size");
+    file.seekg(0);
+    std::string bytes(static_cast<std::size_t>(size),'\0');
+    if (!bytes.empty() && !file.read(bytes.data(),static_cast<std::streamsize>(bytes.size())))
+        throw std::runtime_error("cannot read configuration");
+    return bytes;
+}
+
 int run(int argc, char** argv) {
     auto options = parse_options(argc, argv);
     if (options.help) {
@@ -222,10 +238,11 @@ int run(int argc, char** argv) {
                      "Usage: postplus [--config PATH] [--web-root PATH] [--setup-port PORT]\n\n"
                      "  --config PATH       Configuration file (default: config/postplus.json)\n"
                      "  --web-root PATH     Web assets for first-run setup (default: executable/web, then ./web)\n"
-                     "  --setup-port PORT   Loopback-only setup page port (default: 8080)\n"
+                     "  --setup-port PORT   Loopback-only setup page port (default: 8081)\n"
                      "  --help              Show this help\n\n"
-                     "A missing configuration starts the browser setup wizard. An existing\n"
-                     "configuration starts all service processes. Press Ctrl+C to stop them.\n";
+                     "A missing or uninitialized configuration opens browser setup and prints\n"
+                     "its URL and one-time password. An initialized configuration starts all\n"
+                     "services. Restart manually to apply saved settings. Ctrl+C stops them.\n";
         return 0;
     }
     std::signal(SIGINT, stop_signal);
@@ -243,11 +260,24 @@ int run(int argc, char** argv) {
     options.web_root = std::filesystem::absolute(options.web_root).lexically_normal();
     std::error_code status_error;
     const auto status = std::filesystem::symlink_status(options.config, status_error);
-    // A malformed, unreadable, dangling-symlink, or directory config must fail
-    // normally; only a genuinely absent path is eligible for setup.
-    if (status.type() == std::filesystem::file_type::not_found &&
-        (!status_error || status_error == std::errc::no_such_file_or_directory)) {
-        if (!run_setup({options.config, options.web_root, options.setup_port},
+    // Malformed, unreadable, symlink, and directory configs fail normally.
+    // A valid, uninitialized example can be completed with a private backup.
+    bool needs_setup = status.type() == std::filesystem::file_type::not_found &&
+        (!status_error || status_error == std::errc::no_such_file_or_directory);
+    std::optional<std::string> incomplete_configuration;
+    if (!needs_setup && !status_error && std::filesystem::is_regular_file(status)) {
+        auto bytes = configuration_bytes(options.config);
+        const auto value = Json::parse(bytes);
+        if (!value.is_object()) throw std::invalid_argument("config must be a JSON object");
+        const auto environment = value.value("service_token_env",std::string("POSTPLUS_SERVICE_TOKEN"));
+        const auto* token = std::getenv(environment.c_str());
+        if ((!token || !*token) && value.value("service_token_file",std::string{}).empty() && !value.value("setup_complete",false)) {
+            needs_setup = true;
+            incomplete_configuration = std::move(bytes);
+        }
+    }
+    if (needs_setup) {
+        if (!run_setup({options.config, options.web_root, options.setup_port, incomplete_configuration},
                        [&](const Config& staged, const std::string& username, const std::string& password) {
                            provision_admin(binaries, staged, username, password);
                        })) return 0;
@@ -255,9 +285,9 @@ int run(int argc, char** argv) {
         throw std::runtime_error("cannot inspect configuration file: " + options.config.string());
     }
     if (stop_requested()) return 0;
-    const auto config = Config::from_file(options.config);
+    auto config = Config::from_file(options.config);
     configure_logging(config, "postplus");
-    const std::vector<std::string> services{"auth", "storage", "filter", "transfer", "delivery", "smtp", "pop3", "imap", "web"};
+    const std::vector<std::string> services{"auth", "storage", "filter", "transfer", "delivery", "smtp", "pop3", "imap", "web", "admin"};
     // Validate the complete installation before creating any child process.
     std::set<int> ports;
     for (const auto& service : services) {
@@ -276,6 +306,8 @@ int run(int argc, char** argv) {
         log("postplus", service + " is ready");
     }
     if (!stop_requested()) log("postplus", "all services are ready");
+    std::cout << "Administration: " << settings_url(config,"admin") << '\n'
+              << "Webmail:        " << settings_url(config,"web") << '\n' << std::flush;
     while (!stop_requested()) {
         ensure_alive(children);
         std::this_thread::sleep_for(std::chrono::milliseconds(100));

@@ -24,6 +24,7 @@ struct Config {
     bool flag(const std::string& key, bool fallback = false) const;
     int port(const std::string& service) const;
     std::string token() const;
+    std::string relay_password() const;
 };
 std::string lower(std::string text);
 std::string trim(std::string text);

@@ -9,4 +9,8 @@ config/*.pem
 __pycache__/
 compile_commands.json
 *.service-token-*
+*.relay-password-*
+*.backup-*
+*.save-*.tmp
+*.settings-lock
 *.setup-*.tmp

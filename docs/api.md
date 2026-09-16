@@ -1,6 +1,8 @@
 # Web and administration API
 
-The JSON API shares an origin with Webmail. Requests with JSON bodies use `Content-Type: application/json`. A configured certificate enables HTTPS for the entire normal web listener. There is no public registration endpoint.
+The mailbox JSON API shares an origin with Webmail, normally port 8080. The administration API shares a separate origin with the dedicated administration service, normally port 8081. Requests with JSON bodies use `Content-Type: application/json`. A configured certificate enables HTTPS on both listeners. There is no public registration endpoint.
+
+`postplus-web` exposes mailbox routes and rejects `/api/admin/*`. `postplus-admin` exposes administration routes and rejects mailbox/send routes. Both services provide their own login/session/logout routes. Only administrator accounts may log in to the administration service.
 
 ## Sessions
 
@@ -10,7 +12,7 @@ The JSON API shares an origin with Webmail. Requests with JSON bodies use `Conte
 {"username":"user@localhost","password":"your-password"}
 ```
 
-It returns `ok`, `username`, `admin`, `csrf`, and `expires_in`, and sets the `pp_session` cookie. Send that cookie on subsequent requests. All state-changing requests except login also require `X-CSRF-Token: <csrf>`.
+It returns `ok`, `username`, `admin`, `csrf`, and `expires_in`, and sets the `pp_session` cookie for Webmail or `pp_admin_session` for administration. Send the appropriate cookie on subsequent requests. Sessions and CSRF tokens are held independently by each process. All state-changing requests except login also require `X-CSRF-Token: <csrf>`.
 
 `GET /api/session` returns the current account and CSRF token. `POST /api/logout` revokes the session and clears its cookie. Cookies are HttpOnly and SameSite=Strict, with Secure added over HTTPS. Sessions are kept in web-process memory, last one hour by default, and expire on restart.
 
@@ -39,12 +41,55 @@ These routes require an administrator session. Ordinary users receive 403.
 | --- | --- |
 | GET `/api/admin/users` | Usernames and administrator flags; no password material. |
 | POST `/api/admin/users` | `username`, `password`, `admin`. The address must use the configured domain. Returns 201. |
-| POST `/api/admin/password` | `username`, `password`. Revokes that user's in-memory Web sessions. |
+| POST `/api/admin/password` | `username`, `password`. Invalidates that user's existing sessions in both administration and Webmail. |
 | GET `/api/admin/stats` | messages, bytes, queued, queued_bytes, quarantined. |
 | GET `/api/admin/queue` | Up to 100 jobs with state and errors; no message bodies. |
 | GET `/api/admin/logs` | Recent structured events, filtered as described below. |
+| GET `/api/admin/config` | Sanitized settings, editable-field schema, file revision, saved-secret status, and interface URLs. |
+| POST `/api/admin/config` | `revision` and `values`; validates/saves settings and reports that a manual restart is required. |
 
-Passwords must contain at least 12 bytes. A password change through the CLI does not notify the web process to revoke sessions; those sessions expire normally, or all can be revoked by restarting the web service.
+Passwords must contain at least 12 bytes. Both browser services check each authenticated request against the current credential version through authentication RPC. A password change through administration or the CLI invalidates older sessions on their next authenticated request, without requiring a service restart. A change to administrator status likewise invalidates a session whose stored role no longer matches. Credential-version values stay inside the service processes and are not returned to the browser.
+
+### Server settings
+
+`GET /api/admin/config` returns:
+
+```json
+{
+  "ok": true,
+  "values": {
+    "domain": "localhost",
+    "bind": "127.0.0.1",
+    "admin_bind": "127.0.0.1",
+    "ports": {"admin": 8081, "web": 8080},
+    "smarthost_password": ""
+  },
+  "revision": "opaque-file-revision",
+  "schema": [],
+  "secret_status": {"smarthost_password": false},
+  "admin_url": "http://127.0.0.1:8081/",
+  "web_url": "http://127.0.0.1:8080/"
+}
+```
+
+This is an abbreviated example. The actual `values` includes all supported settings. Each `schema` entry has `key`, `group`, `type`, `default`, `label`, and `help`, plus `min`/`max` for numbers, `options` for selections, or `readonly` for immutable paths. A dotted schema key such as `ports.admin` maps to the nested `values.ports.admin` JSON property. Types are `text`, `number`, `boolean`, `select`, `password`, `lines`, and `json`; `lines` and `json` values are arrays on the wire.
+
+Save with `POST /api/admin/config`, the administration cookie, and its CSRF token:
+
+```json
+{
+  "revision": "revision-returned-by-GET",
+  "values": {"log_level": "warn", "ports": {"admin": 8082}}
+}
+```
+
+`values` may contain a supported subset. Omit read-only fields, even when unchanged. `data_dir`, `web_root`, and `log_dir` are view-only after setup. Service-token paths/settings and the raw relay-password file path cannot be changed through this API. Unsupported fields are rejected. The [configuration reference](configuration.md) lists fields, defaults, ranges, and cross-field constraints.
+
+Send a nonempty `smarthost_password` to save a new relay password in a private file; omission or an empty string keeps the previous secret. Send `clear_smarthost_password: true` inside `values` to remove the active saved-password reference. Clearing and setting a new password in the same request is rejected. The old file is retained so configuration backups remain usable. An environment-provided password still takes precedence and is not cleared by this operation. Secrets are never returned. `secret_status.smarthost_password` indicates a configured saved-secret file, not the validity of that credential or whether an environment override exists.
+
+Successful saves create a private backup, atomically replace the configuration, and return `ok`, `restart_required: true`, `admin_url`, and `web_url`. Saving does not restart any service or clear current sessions. The returned URLs describe the saved configuration and may not be reachable until the operator stops the launcher and runs it again with the same configuration path. After that manual restart, clients must sign in again. Individually launched services also require manual restart. A startup failure is reported by the launcher; automatic rollback is not provided.
+
+Revision conflicts return 409. Validation failures return 400 with a field identifier and error; filesystem failures can return 503. Fetch fresh values before retrying a conflict. Do not repeatedly overwrite a concurrent administrator's changes.
 
 ### Service logs
 
@@ -58,7 +103,7 @@ Optional query parameters:
 
 | Parameter | Accepted values | Default |
 | --- | --- | --- |
-| `service` | `postplus`, `setup`, `auth`, `storage`, `filter`, `transfer`, `delivery`, `smtp`, `pop3`, `imap`, `web` | All services |
+| `service` | `postplus`, `setup`, `auth`, `storage`, `filter`, `transfer`, `delivery`, `smtp`, `pop3`, `imap`, `web`, `admin` | All services |
 | `level` | `debug`, `info`, `warn`, `error` | All levels |
 | `limit` | Integer from 1 to 500 | 100 |
 
@@ -78,7 +123,7 @@ Example response:
       "message": "authentication failed"
     }
   ],
-  "services": ["postplus", "setup", "auth", "storage", "filter", "transfer", "delivery", "smtp", "pop3", "imap", "web"],
+  "services": ["postplus", "setup", "auth", "storage", "filter", "transfer", "delivery", "smtp", "pop3", "imap", "web", "admin"],
   "truncated": false
 }
 ```
@@ -87,14 +132,14 @@ Entries are ordered newest first. Reads scan only bounded tails of current and r
 
 ## First-run setup API
 
-The native `postplus` launcher exposes this temporary API only while the requested configuration is missing. It listens on `127.0.0.1`, defaults to port 8080, and checks Host/Origin values. It is separate from normal Webmail sessions and is unavailable once regular services start.
+The native `postplus` launcher exposes this temporary API while the requested configuration is missing, or while completing an eligible uninitialized configuration without a service-token source or completed-setup marker. It listens on `127.0.0.1`, defaults to port 8081, and checks Host/Origin values. It is separate from normal browser sessions and is unavailable once regular services start.
 
-Open the complete setup URL printed by the launcher. Its fragment contains a random token; browser code removes the fragment and sends `X-Setup-Token` with every setup API request. The token is not a user password or the persistent internal service token.
+The launcher prints a plain setup URL, normally `http://127.0.0.1:8081/setup`, and a random one-time setup password. Enter it in the browser gate. Browser code keeps it in memory and sends it as `X-Setup-Token` with every setup API request. The password is not a permanent administrator password or the persistent internal service token; it expires when setup completes or the process stops.
 
 | Method and path | Request or response |
 | --- | --- |
-| GET `/api/setup` | Returns `ok` and `defaults` for the setup form. Requires `X-Setup-Token`. |
-| POST `/api/setup` | Validates configuration, creates the administrator, and commits configuration. Requires `X-Setup-Token`; returns `ok` and `web_url` on success. |
+| GET `/api/setup` | Returns `ok`, `defaults`, `schema`, and `completing_existing` for the form. Requires `X-Setup-Token`. |
+| POST `/api/setup` | Validates configuration, creates the administrator, and commits configuration. Requires `X-Setup-Token`; returns `ok`, `admin_url`, and `web_url` on success. |
 
 POST fields:
 
@@ -103,22 +148,25 @@ POST fields:
 | `domain` | A valid ASCII mail domain. |
 | `admin_username`, `admin_password` | Administrator email in that domain and password of at least 12 bytes. |
 | `bind` | IPv4 or IPv6 listener address; defaults to loopback. |
+| `admin_bind` | Separate administration listener address; defaults to loopback. |
 | `data_dir` | Mail data directory; relative paths resolve beside the configuration. |
 | `allow_insecure_auth` | Required boolean: explicitly select loopback development mode or TLS. |
 | `tls_certificate`, `tls_private_key` | Matching readable PEM files; the private key must be unencrypted. Required for public listeners. |
-| `ports` | Object containing auth, storage, filter, transfer, smtp, pop3, imap, web, and delivery_lock. Values are distinct integers in 1..65535. |
+| `ports` | Object containing auth, storage, filter, transfer, smtp, pop3, imap, web, admin, and delivery_lock. Values are distinct integers in 1..65535. |
 | `smarthost_host`, `smarthost_port`, `smarthost_tls` | Optional SMTP relay. TLS mode is starttls, implicit, or none. |
-| `smarthost_username`, `smarthost_password_env` | Optional relay account and the environment variable supplying its password. No relay password is saved by the form. |
+| `smarthost_username`, `smarthost_password_env` | Optional relay account and the environment variable overriding its saved password. |
+| `smarthost_password` | Optional new relay password, saved in a private file; never retained as a JSON config value. |
 | `clamav_host`, `clamav_port` | Optional separately deployed ClamAV service. |
+| Advanced schema fields | Supported resource, session, filtering, and logging settings; use the returned schema and [configuration reference](configuration.md). |
 
 Public listening requires TLS with insecure authentication disabled. The auth port must differ from the active setup port because setup temporarily launches auth to provision the administrator. The API uses `ports.delivery_lock`; the saved configuration uses top-level `delivery_lock_port`.
 
-Setup never replaces an existing configuration. A failed provisioning/commit may leave an administrator in the data directory; retry with the same credentials. Existing users are accepted only after successful password verification and an administrator-role check. Setup errors return `ok: false`, a stable `code`, and an English `error` string; the UI translates known error codes.
+For a new configuration, setup commits without replacing a competing destination. For completion of an eligible existing configuration, it verifies the original contents are unchanged, retains the same data directory, and creates a private backup before replacement. Established configurations do not enter this completion path.
 
-There is no API for changing the general configuration of an existing installation. Stop the service group, edit its configuration, and restart it.
+A failed provisioning/commit may leave an administrator in the data directory; retry with the same credentials. Existing users are accepted only after successful password verification and an administrator-role check. Setup errors return `ok: false`, a stable `code`, and an English `error` string; the UI translates known error codes. General configuration changes after setup use `/api/admin/config` on the administrator listener.
 
 ## Status codes and health
 
 Common status codes are 400 for invalid input, 401 for authentication/session failure, 403 for role/CSRF/transport restrictions, 404 for missing resources, 409 for conflicts, 413 for oversized requests, 415 for unsupported setup content type, 429 for rate limits, and 503 for unavailable dependencies or setup provisioning failure.
 
-`GET /health` indicates that the normal web process is responding. It does not establish the health of the other services, the SMTP relay, or ClamAV. UI language selection does not change JSON field names or API semantics.
+`GET /health` indicates that the selected browser service is responding. It does not establish the health of the other services, the SMTP relay, or ClamAV. UI language selection does not change JSON field names or API semantics.

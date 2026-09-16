@@ -162,6 +162,17 @@ public:
             if (code != SQLITE_ROW && code != SQLITE_DONE) throw std::runtime_error("cannot check user");
             return {{"ok", true}, {"exists", code == SQLITE_ROW}};
         }
+        if (operation == "session_check") {
+            const auto username = username_from(request);
+            const auto version = required_string(request, "credential_version", 128);
+            std::lock_guard guard(mutex_);
+            Statement query(db_, "SELECT salt,admin FROM users WHERE username=?");
+            query.text(1, username);
+            const auto code = query.step();
+            if (code != SQLITE_ROW && code != SQLITE_DONE) throw std::runtime_error("cannot check account session");
+            return {{"ok", true}, {"valid", code == SQLITE_ROW && secure_equal(version, base64_encode(query.string(0)))},
+                    {"admin", code == SQLITE_ROW && query.integer(1) != 0}};
+        }
         if (operation == "list") {
             std::lock_guard guard(mutex_);
             Statement query(db_, "SELECT username,admin FROM users ORDER BY username");
@@ -220,8 +231,14 @@ private:
             Statement update(db_, "UPDATE users SET salt=?,password_hash=?,iterations=? WHERE username=? AND password_hash=?");
             update.bytes(1, new_salt); update.bytes(2, new_hash); update.integer(3, rounds_);
             update.text(4, username); update.bytes(5, expected); update.done();
+            if (sqlite3_changes(db_) == 1) salt_value = std::move(new_salt);
         }
-        return {{"ok", true}, {"username", username}, {"admin", admin}};
+        Json result = {{"ok", true}, {"username", username}, {"admin", admin}};
+        // This version stays inside authenticated RPC and the web process.
+        // Changing a password replaces the salt and revokes both web services'
+        // sessions, including changes made through the command-line tool.
+        if (request.value("session", false)) result["credential_version"] = base64_encode(salt_value);
+        return result;
     }
     void execute(const char* sql) {
         if (sqlite3_exec(db_, sql, nullptr, nullptr, nullptr) != SQLITE_OK)

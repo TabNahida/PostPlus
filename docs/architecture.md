@@ -2,20 +2,25 @@
 
 ## Process boundaries
 
-PostPlus is a single-host, multi-process mail server. SMTP, POP3, and IMAP own their client sessions and share authentication and storage RPC contracts. `postplus-auth` owns `auth.sqlite3`; `postplus-storage` owns `storage.sqlite3`. MIME parsing is a shared C++ library. Spam rules and the ClamAV client run in the filter service. Webmail and administrator APIs share the web service, with server-side role checks.
+PostPlus is a single-host, multi-process mail server. SMTP, POP3, and IMAP own their client sessions and share authentication and storage RPC contracts. `postplus-auth` owns `auth.sqlite3`; `postplus-storage` owns `storage.sqlite3`. MIME parsing is a shared C++ library. Spam rules and the ClamAV client run in the filter service. Webmail and administration run in separate processes and on distinct ports. Only the administration service exposes account management, queues, logs, and settings APIs; administrator role checks also apply to its login.
 
 ```mermaid
 flowchart LR
-    Launcher[Native supervisor] -. manages .-> Services[Nine service processes]
+    Launcher[Native supervisor] -. manages .-> Services[Ten service processes]
     Clients[Mail clients] --> SMTP[SMTP]
     Clients --> Access[POP3 / IMAP]
-    Browser[Browser] --> Web[Webmail / administration / API]
+    Browser[Browser] --> Web[Webmail / mailbox API :8080]
+    Browser --> Admin[Administration / settings API :8081]
     SMTP --> Auth[Authentication]
     Access --> Auth
     Web --> Auth
+    Admin --> Auth
     SMTP --> Storage[Mailbox and queue storage]
     Access --> Storage
     Web --> Storage
+    Admin --> Storage
+    Admin --> Config[Validated configuration / logs]
+    Operator[Operator] -. restart to apply .-> Launcher
     Delivery[Delivery worker] --> Storage
     Delivery --> Filter[Spam rules / ClamAV]
     Delivery --> Transfer[SMTP transfer]
@@ -32,27 +37,41 @@ Run the services under a dedicated, trusted account. Newly created Unix data dir
 
 Ctrl+C or SIGTERM requests group shutdown. Children receive a graceful stop request and share a 35-second shutdown budget; remaining children are terminated and reaped. Windows children have no visible console windows, use stop events, and belong to a Job Object configured to terminate them when the launcher closes. Unix children use process groups and SIGTERM followed by SIGKILL when necessary. Linux additionally requests termination when the parent process dies.
 
-The launcher can be run from a terminal or supervised by an OS service manager. Service installation, automatic restart policies, configuration reload, and boot integration are not bundled. Keep all service executables beside the launcher and retain access to the configured web assets.
+The launcher can be run from a terminal or supervised by an OS service manager. Service installation, automatic crash-restart policies, and boot integration are not bundled. Keep all service executables beside the launcher and retain access to the configured web assets.
+
+Configuration is loaded when services start. Saving in administration does not restart the group: the operator chooses when to apply changes by stopping the launcher and running it again with the same configuration path. There is no configuration watcher or automatic rollback. On startup, invalid settings or a service failure produce an explicit error; correct the file or restore a saved backup and run again. Children inherit the launcher's environment, so changing environment credentials also requires starting the launcher in the updated environment.
 
 ## First-run configuration
 
-Only a missing configuration file starts setup. Invalid JSON, unreadable existing files, and other existing configuration paths fail without being overwritten.
+A missing configuration file starts setup. A valid, regular configuration can also enter completion when it has no active service-token environment value, no service-token file path, and no completed-setup marker. This handles a copied sample that has not yet been initialized. Invalid JSON, unreadable files, and broken credential references in an initialized installation fail explicitly instead of being discarded.
 
-The native launcher serves a temporary setup page on IPv4 loopback, normally port 8080. A random per-run token is printed in a URL fragment; the page removes the fragment from the address bar and sends the token in `X-Setup-Token` headers. Setup checks loopback peers, allowed Host values, and supplied Origin headers. The normal web server does not expose setup routes.
+The native launcher serves a temporary setup page on IPv4 loopback, normally port 8081. It prints a clear setup-required notice, a plain browser URL, and a random one-time setup password. The page asks for the password and sends it in `X-Setup-Token` headers from browser memory; it is separate from the permanent administrator password. Setup checks loopback peers, allowed Host values, and supplied Origin headers. Neither normal browser service exposes setup routes. Remote operators can reach setup through an SSH tunnel with matching local and remote port numbers; see the [beginner guide](getting-started.md#2-open-and-unlock-setup).
 
-The form configures a single domain, the first administrator, storage, all service ports, TLS, the SMTP relay, and ClamAV. Local development mode permits unencrypted authentication only from loopback. Public listening addresses require a valid, matching TLS certificate/key pair and disabled insecure authentication. Certificate generation, DNS changes, relay connectivity, and ClamAV installation are outside the wizard.
+The form configures a single domain, the first administrator, storage, separate mail/Webmail and administration addresses, all service ports, TLS, the SMTP relay, ClamAV, and advanced resource/filter/logging settings. Local development mode permits unencrypted authentication only from loopback. Public listening addresses require a valid, matching TLS certificate/key pair and disabled insecure authentication. Certificate generation, DNS changes, relay connectivity, and ClamAV installation are outside the wizard.
 
 On submission, setup:
 
 1. Validates field types, domain/account consistency, TLS files, and distinct available ports.
 2. Writes a private random token file and an exclusive staging configuration beside the requested destination.
 3. Starts an isolated authentication process and provisions the administrator through authenticated RPC. An existing account is accepted only when its password matches and it already has administrator privileges.
-4. Stops the temporary authentication process and atomically commits the configuration without replacing an existing destination.
+4. Stops the temporary authentication process and atomically commits the configuration. A new installation never replaces a competing destination; completion of an eligible existing configuration verifies its original bytes, retains the data directory, and creates a private backup before replacement.
 5. Closes the setup listener and starts the normal service group.
 
 The plaintext administrator password is not written to configuration or log files. If provisioning or commit fails, temporary configuration and token files are cleaned up; the authentication database can retain a provisioned account. Retrying with the same administrator credentials handles that case without resetting an existing account.
 
-`service_token_env` takes precedence when its environment variable is nonempty. Otherwise, `service_token_file` supplies the shared token. The wizard generates the latter so a new installation does not require manual environment setup. Relative paths in manually maintained configurations resolve from the configuration directory. Configuration changes require a restart; the setup API is not a general configuration editor.
+`service_token_env` takes precedence when its environment variable is nonempty. Otherwise, `service_token_file` supplies the shared token. The wizard generates the latter so a new installation does not require manual environment setup. A submitted relay password is likewise stored in a private file; only its path enters the configuration. Relative paths in manually maintained configurations resolve from the configuration directory.
+
+## Administration and settings
+
+`postplus-admin` uses `admin_bind` (loopback by default) and `ports.admin` (8081). `postplus-web` uses the mail-facing `bind` address and `ports.web` (8080). Both provide login/session/logout, but the admin process accepts administrator accounts only, rejects mailbox routes, and exposes management APIs. Webmail rejects administration routes. Separate cookie names and in-memory session stores prevent one service from treating the other's session as its own. Ports do not establish separate cookie host scopes in browsers; use trusted applications on the shared hostname.
+
+The admin settings API returns a typed schema, sanitized values, a file revision, secret-presence metadata, and resulting interface URLs. It validates submitted fields against the schema and checks listener/TLS/resource relationships. A stale revision fails with a conflict. A successful write creates a private `<config filename>.backup-<random suffix>` file and atomically replaces the selected configuration. The current group keeps running; the response tells the operator to restart manually. Web sessions are cleared when the operator stops and starts the group.
+
+An entered relay password is stored in a new private file; blank input preserves the prior secret. A nonempty relay-password environment value takes precedence. Secrets are never returned by the API. Old configuration backups and superseded relay-secret files remain available for recovery and need a deliberate retention policy.
+
+Both browser services validate the session's credential version and administrator role through authentication RPC on authenticated requests. Password changes, including CLI changes, invalidate existing sessions on their next request across both processes. This check avoids repeating password hashing for every request, but means authenticated browser operations require the auth service to remain available.
+
+Data, web-root, and log-directory paths are displayed read-only after installation. Service-token configuration is not exposed for Web editing. Offline data migration must preserve accounts, mailboxes, queue state, and permissions together. Changing a mail domain does not rename accounts or migrate their mail. Detailed field behavior is in the [configuration reference](configuration.md).
 
 ## Receiving and delivering mail
 

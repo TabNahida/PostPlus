@@ -5,9 +5,11 @@
   let token = new URLSearchParams(location.hash.slice(1)).get("token") || "";
   history.replaceState(null, "", location.pathname + location.search);
   let errorData = null;
-  let statusKey = "Loading setup…";
+  let statusKey = "";
+  let advancedEditor = null;
+  let unlocking = false;
   let saving = false;
-  const portLabels = {smtp:"SMTP",pop3:"POP3",imap:"IMAP",web:"Webmail and administration",auth:"Authentication",storage:"Mail storage",filter:"Mail filter",transfer:"Mail transfer",delivery_lock:"Delivery lock"};
+  const portLabels = {smtp:"SMTP",pop3:"POP3",imap:"IMAP",web:"Webmail",admin:"Administration",auth:"Authentication",storage:"Mail storage",filter:"Mail filter",transfer:"Mail transfer",delivery_lock:"Delivery lock"};
   for (const [service, label] of Object.entries(portLabels)) {
     const group = document.createElement("div");
     const text = document.createElement("label");
@@ -34,6 +36,7 @@
     errorData = data;
     render();
     $("setup-error").scrollIntoView({block:"center", behavior:"auto"});
+    if (data?.field) advancedEditor?.highlight(data.field);
   }
   function modeChanged(userChange = false) {
     const secure = $("setup-mode").value === "tls";
@@ -52,7 +55,7 @@
     if (!adminEdited) $("setup-admin").value = `admin@${$("setup-domain").value.trim().toLowerCase()}`;
   });
   $("setup-form").addEventListener("input", event => event.target.removeAttribute("aria-invalid"));
-  document.addEventListener("postplus:language", render);
+  document.addEventListener("postplus:language", () => {render(); advancedEditor?.translate();});
   async function request(method, body) {
     let response;
     try {
@@ -69,7 +72,10 @@
     errorData = null;
     const invalid = [...event.currentTarget.querySelectorAll("input")].filter(input => !input.checkValidity());
     if (invalid.length) {
-      invalid.forEach(input => { input.setAttribute("aria-invalid", "true"); input.closest("details")?.setAttribute("open", ""); });
+      invalid.forEach(input => {
+        input.setAttribute("aria-invalid", "true");
+        for (let section=input.closest("details"); section; section=section.parentElement?.closest("details")) section.open=true;
+      });
       invalid[0].focus();
       fail({key:invalid.some(input => input.type === "password") ? "Choose a password with at least 12 characters." : "Check the highlighted fields and try again."});
       return;
@@ -79,7 +85,9 @@
       fail({key:"Passwords do not match."});
       return;
     }
-    const payload = {};
+    let payload;
+    try { payload = advancedEditor?.read({changedOnly:false}) || {}; }
+    catch { fail({key:"Check the highlighted fields and try again."}); return; }
     for (const control of event.currentTarget.querySelectorAll("[name]")) {
       payload[control.name] = control.type === "number" ? Number(control.value) : (control.type === "password" ? control.value : control.value.trim());
     }
@@ -94,11 +102,16 @@
     try {
       const data = await request("POST", payload);
       token = "";
+      $("setup-token").value = "";
+      advancedEditor?.clearSecrets();
       $("setup-password").value = "";
       $("setup-password-confirm").value = "";
       const destination = new URL(data.web_url);
       if (!["http:", "https:"].includes(destination.protocol) || destination.username || destination.password) throw {key:"The server returned an unreadable response."};
       $("setup-open").href = destination.href;
+      const adminDestination = new URL(data.admin_url);
+      if (!["http:","https:"].includes(adminDestination.protocol) || adminDestination.username || adminDestination.password) throw {key:"The server returned an unreadable response."};
+      $("setup-open-admin").href = adminDestination.href;
       $("setup-form").hidden = true;
       $("setup-success").hidden = false;
       $("setup-success").scrollIntoView({block:"center", behavior:"auto"});
@@ -106,26 +119,50 @@
     } catch (data) { statusKey = ""; fail(data); }
     finally {
       payload.admin_password = "";
+      if (payload.smarthost_password) payload.smarthost_password = "";
       saving = false;
       $("setup-submit").disabled = false;
       $("setup-form").removeAttribute("aria-busy");
       render();
     }
   });
-  render();
-  (async () => {
-    if (!token) { statusKey = ""; fail({key:"Setup link required. Open the complete setup URL printed by the PostPlus launcher."}); return; }
+  async function unlock() {
+    if (unlocking) return;
+    unlocking = true;
+    errorData = null;
+    statusKey = "Loading setup…";
+    $("setup-unlock-submit").disabled = true;
+    render();
     try {
-      const {defaults} = await request("GET");
+      const {defaults,schema = [],completing_existing = false} = await request("GET");
       for (const control of $("setup-form").querySelectorAll("[name]")) {
-        if (control.name !== "admin_password" && Object.hasOwn(defaults, control.name)) control.value = defaults[control.name];
+        if (control.name !== "admin_password" && Object.hasOwn(defaults,control.name)) control.value = defaults[control.name];
       }
       for (const service of Object.keys(portLabels)) $(`setup-port-${service}`).value = defaults.ports[service];
+      $("setup-data-dir").readOnly = completing_existing;
+      const exclude = new Set([...$("setup-form").querySelectorAll("[name]")].map(control => control.name));
+      for (const field of schema) if (field.readonly) exclude.add(field.key);
+      for (const service of Object.keys(portLabels)) exclude.add(`ports.${service}`);
+      exclude.add("delivery_lock_port");
+      exclude.add("allow_insecure_auth");
+      advancedEditor = PostPlusSettings.create($("setup-advanced"),schema,defaults,{prefix:"setup-extra",exclude});
       $("setup-mode").value = defaults.allow_insecure_auth ? "local" : "tls";
       modeChanged();
+      $("setup-unlock").hidden = true;
+      $("setup-token").value = "";
       $("setup-form").hidden = false;
       statusKey = "";
       render();
-    } catch (data) { statusKey = ""; fail(data); }
-  })();
+      $("setup-domain").focus();
+    } catch (data) { statusKey = ""; token = ""; fail(data); }
+    finally { unlocking = false; $("setup-unlock-submit").disabled = false; }
+  }
+  $("setup-unlock").addEventListener("submit",event => {
+    event.preventDefault();
+    token = $("setup-token").value.trim();
+    if (token) unlock();
+  });
+  render();
+  if (token) unlock();
+  else $("setup-token").focus();
 })();

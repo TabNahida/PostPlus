@@ -1,4 +1,5 @@
 #include <postplus/setup.hpp>
+#include <postplus/settings.hpp>
 #include <asio/ssl.hpp>
 #include <openssl/ssl.h>
 #include <algorithm>
@@ -152,21 +153,41 @@ fs::path absolute_field(const std::string& value, const fs::path& parent) {
 
 Json setup_defaults(const SetupOptions& options) {
     const auto parent = fs::absolute(options.config_path).parent_path();
-    return {{"domain", "localhost"}, {"bind", "127.0.0.1"},
+    Json result = {{"domain", "localhost"}, {"bind", "127.0.0.1"}, {"admin_bind", "127.0.0.1"},
         {"data_dir", (parent / "../data").lexically_normal().string()},
         {"allow_insecure_auth", true}, {"admin_username", "admin@localhost"},
         {"tls_certificate", ""}, {"tls_private_key", ""},
         {"ports", {{"auth", 18081}, {"storage", 18082}, {"filter", 18083}, {"transfer", 18084},
-            {"smtp", 2525}, {"pop3", 1110}, {"imap", 1143}, {"web", options.port}, {"delivery_lock", 18085}}},
+            {"smtp", 2525}, {"pop3", 1110}, {"imap", 1143}, {"web", 8080}, {"admin", options.port}, {"delivery_lock", 18085}}},
         {"smarthost_host", ""}, {"smarthost_port", 587}, {"smarthost_tls", "starttls"},
         {"smarthost_username", ""}, {"smarthost_password_env", "POSTPLUS_SMARTHOST_PASSWORD"},
         {"clamav_host", ""}, {"clamav_port", 3310}};
+    Config base;
+    base.values = Json::object();
+    if (options.existing_config) base.values = Json::parse(*options.existing_config);
+    for (const auto& entry : settings_schema(base)) {
+        const auto key=entry.at("key").get<std::string>();
+        if (key.find('.')!=std::string::npos || key=="data_dir" || entry.value("readonly",false) || entry.at("type")=="password") continue;
+        if (base.values.contains(key)) result[key]=base.values.at(key);
+        else if (!result.contains(key)) result[key]=entry.at("default");
+    }
+    if (base.values.contains("ports") && base.values.at("ports").is_object())
+        for (const auto& entry : base.values.at("ports").items())
+            if (result["ports"].contains(entry.key())) result["ports"][entry.key()]=entry.value();
+    if (base.values.contains("delivery_lock_port")) result["ports"]["delivery_lock"]=base.values.at("delivery_lock_port");
+    if (!base.text("data_dir").empty()) result["data_dir"]=absolute_field(base.text("data_dir"),parent).string();
+    for (const auto* key : {"tls_certificate","tls_private_key"})
+        if (!result.at(key).get<std::string>().empty()) result[key]=absolute_field(result.at(key).get<std::string>(),parent).string();
+    result["admin_username"]="admin@"+result.at("domain").get<std::string>();
+    return result;
 }
 
 Config validate_input(const Json& input, const Json& defaults, const SetupOptions& options,
                       std::string& username, std::string& password) {
     const auto parent = fs::absolute(options.config_path).parent_path();
     Config config;
+    config.source=fs::absolute(options.config_path).lexically_normal();
+    if (options.existing_config) config.values=Json::parse(*options.existing_config);
     auto& values = config.values;
     const auto domain = lower(trim(text_field(input, "domain", "", 253)));
     if (!valid_address("postmaster@" + domain)) throw SetupError("invalid_domain", "Enter a valid ASCII mail domain, such as example.com.");
@@ -181,6 +202,7 @@ Config validate_input(const Json& input, const Json& defaults, const SetupOption
     const auto address = asio::ip::make_address(bind, address_error);
     if (address_error) throw SetupError("invalid_bind", "The listening address must be an IPv4 or IPv6 address.");
     values["bind"] = bind;
+    values["admin_bind"] = trim(text_field(input,"admin_bind",defaults.value("admin_bind",std::string("127.0.0.1")),128));
     if (!input.contains("allow_insecure_auth") || !input.at("allow_insecure_auth").is_boolean())
         throw SetupError("transport_selection_required", "Choose TLS or explicitly enable local development mode.");
     const auto insecure = input.at("allow_insecure_auth").get<bool>();
@@ -205,9 +227,12 @@ Config validate_input(const Json& input, const Json& defaults, const SetupOption
     }
     const auto data = trim(text_field(input, "data_dir", defaults.at("data_dir").get<std::string>()));
     if (data.empty()) throw SetupError("invalid_data_dir", "Choose a mail data directory.");
+    if (options.existing_config && absolute_field(data,parent)!=absolute_field(defaults.at("data_dir").get<std::string>(),parent))
+        throw SetupError("invalid_data_dir","Keep the existing data directory when completing an existing configuration.");
     values["data_dir"] = absolute_field(data, parent).string();
     values["web_root"] = fs::absolute(options.web_root).lexically_normal().string();
-    values["log_dir"] = (fs::path(config.text("data_dir")) / "logs").string();
+    if (config.text("log_dir").empty()) values["log_dir"] = (fs::path(config.text("data_dir")) / "logs").string();
+    else values["log_dir"] = absolute_field(config.text("log_dir"),parent).string();
     const auto ports = input.value("ports", Json::object());
     if (!ports.is_object()) throw SetupError("invalid_port", "Service ports must be a JSON object.");
     std::set<int> assigned;
@@ -230,7 +255,12 @@ Config validate_input(const Json& input, const Json& defaults, const SetupOption
         const bool internal = service == "auth" || service == "storage" || service == "filter" || service == "transfer" || service == "delivery_lock";
         std::error_code port_error;
         tcp::acceptor probe(probe_io);
-        const tcp::endpoint endpoint(internal ? asio::ip::address(asio::ip::address_v4::loopback()) : address,
+        auto listen_address=address;
+        if (service=="admin") {
+            listen_address=asio::ip::make_address(config.text("admin_bind"),port_error);
+            if (port_error) throw SetupError("invalid_bind","The administration listening address must be an IPv4 or IPv6 address.");
+        }
+        const tcp::endpoint endpoint(internal ? asio::ip::address(asio::ip::address_v4::loopback()) : listen_address,
             static_cast<unsigned short>(port));
         probe.open(endpoint.protocol(), port_error);
         if (!port_error) probe.bind(endpoint, port_error);
@@ -252,15 +282,13 @@ Config validate_input(const Json& input, const Json& defaults, const SetupOption
         throw SetupError("invalid_smarthost_tls", "An authenticated relay requires TLS.");
     values["smarthost_tls"] = relay_tls;
     values["service_token_env"] = "POSTPLUS_SERVICE_TOKEN";
-    return config;
-}
-
-std::string web_url(const Config& config) {
-    const bool tls = !config.text("tls_certificate").empty();
-    auto host = tls ? config.text("domain") : config.text("bind", "127.0.0.1");
-    if (host == "0.0.0.0" || host == "::") host = "127.0.0.1";
-    if (host.find(':') != std::string::npos) host = "[" + host + "]";
-    return std::string(tls ? "https://" : "http://") + host + ":" + std::to_string(config.port("web")) + "/";
+    auto settings=input;
+    for (const auto* field : {"admin_username","admin_password","data_dir"}) settings.erase(field);
+    if (settings.contains("ports") && settings["ports"].contains("delivery_lock")) {
+        settings["delivery_lock_port"]=settings["ports"]["delivery_lock"];
+        settings["ports"].erase("delivery_lock");
+    }
+    return validate_settings(config,settings);
 }
 
 std::int64_t monotonic_milliseconds() {
@@ -272,7 +300,13 @@ bool run_setup(const SetupOptions& options, SetupProvision provision) {
     if (!provision) throw std::invalid_argument("setup requires an administrator provisioning callback");
     if (options.port < 1 || options.port > 65535) throw std::invalid_argument("invalid setup port");
     const auto destination = fs::absolute(options.config_path).lexically_normal();
-    if (path_present(destination)) throw std::runtime_error("setup refuses to replace an existing configuration");
+    if (path_present(destination) && !options.existing_config) throw std::runtime_error("setup refuses to replace an existing configuration");
+    if (options.existing_config) {
+        if (!fs::is_regular_file(fs::symlink_status(destination))) throw std::runtime_error("setup requires a regular existing configuration file");
+        std::ifstream file(destination,std::ios::binary);
+        const std::string contents{std::istreambuf_iterator<char>(file),std::istreambuf_iterator<char>()};
+        if (!file || contents!=*options.existing_config) throw std::runtime_error("existing configuration changed before setup");
+    }
     const auto defaults = setup_defaults(options);
     const auto token = random_hex(32);
     const auto authority = "127.0.0.1:" + std::to_string(options.port);
@@ -283,7 +317,8 @@ bool run_setup(const SetupOptions& options, SetupProvision provision) {
     std::map<std::string, HttpResponse> assets;
     for (const auto& [filename, type] : std::map<std::string, std::string>{
         {"setup.html", "text/html; charset=utf-8"}, {"setup.js", "application/javascript; charset=utf-8"},
-        {"i18n.js", "application/javascript; charset=utf-8"}, {"style.css", "text/css; charset=utf-8"}}) {
+        {"i18n.js", "application/javascript; charset=utf-8"}, {"settings.js", "application/javascript; charset=utf-8"},
+        {"favicon.svg", "image/svg+xml"}, {"style.css", "text/css; charset=utf-8"}}) {
         std::ifstream file(fs::absolute(options.web_root) / filename, std::ios::binary);
         if (!file) throw std::runtime_error("setup web asset is missing: " + filename);
         std::ostringstream contents; contents << file.rdbuf();
@@ -305,7 +340,7 @@ bool run_setup(const SetupOptions& options, SetupProvision provision) {
         if (!origin.empty() && (!origin.starts_with("http://") || !hosts.contains(origin.substr(7))))
             return error_response("invalid_origin", "Open the setup URL printed by the server.", 403);
         if (request.path == "/api/setup" && !secure_equal(header(request, "x-setup-token"), token))
-            return error_response("invalid_setup_token", "Open the full setup URL printed by the server, including its security token.", 403);
+            return error_response("invalid_setup_token", "Enter the one-time setup password printed in the PostPlus terminal.", 403);
         return std::nullopt;
     };
     auto handler = [&](const HttpRequest& request) -> HttpResponse {
@@ -315,13 +350,14 @@ bool run_setup(const SetupOptions& options, SetupProvision provision) {
                 if (request.method == "GET" && asset != assets.end()) return asset->second;
                 return error_response("not_found", "Not found.", 404);
             }
-            if (request.method == "GET") return protected_response(json_response({{"ok", true}, {"defaults", defaults}}));
+            if (request.method == "GET") return protected_response(json_response({{"ok", true}, {"defaults", defaults},
+                {"schema",settings_schema(Config{})},{"completing_existing",options.existing_config.has_value()}}));
             if (request.method != "POST") return error_response("method_not_allowed", "Use GET or POST.", 405);
             if (trim(lower(header(request, "content-type")).substr(0, header(request, "content-type").find(';'))) != "application/json")
                 return error_response("invalid_content_type", "Use application/json for setup.", 415);
             std::unique_lock lock(provisioning, std::try_to_lock);
             if (!lock.owns_lock()) return error_response("setup_busy", "Setup is already running. Wait before retrying.", 409);
-            if (completed.load() || path_present(destination))
+            if (completed.load() || (path_present(destination) && !options.existing_config))
                 return error_response("already_configured", "A configuration already exists. Restart PostPlus to use it.", 409);
             auto input = Json::parse(request.body, nullptr, false);
             if (input.is_discarded() || !input.is_object()) throw SetupError("invalid_json", "A JSON object is required.");
@@ -341,6 +377,14 @@ bool run_setup(const SetupOptions& options, SetupProvision provision) {
             private_write(secret, random_hex(32) + "\n");
             owned.paths.push_back(secret);
             config.values["service_token_file"] = secret.string();
+            config.values["setup_complete"] = true;
+            if (input.contains("smarthost_password") && !input.at("smarthost_password").get<std::string>().empty()) {
+                const auto relay=destination.parent_path()/(destination.filename().string()+".relay-password-"+suffix);
+                private_write(relay,input.at("smarthost_password").get<std::string>());
+                owned.paths.push_back(relay);
+                config.values["smarthost_password_file"]=relay.string();
+            }
+            input.erase("smarthost_password");
             private_write(staged, config.values.dump(2) + "\n");
             owned.paths.push_back(staged);
             config = Config::from_file(staged);
@@ -348,13 +392,18 @@ bool run_setup(const SetupOptions& options, SetupProvision provision) {
             try { provision(config, username, password); }
             catch (const std::exception&) { throw SetupError("provision_failed", "Administrator provisioning failed. Check the server console, data directory, and authentication service port, then retry with the same account and password.", 503); }
             std::fill(password.begin(), password.end(), '\0');
-            commit_without_replacing(staged, destination);
-            owned.paths.erase(owned.paths.begin()); // Keep the committed secret, clean any staging residue.
+            if (options.existing_config) replace_config_file(destination,*options.existing_config,config.values.dump(2)+"\n");
+            else commit_without_replacing(staged, destination);
+            owned.paths={staged}; // Keep committed secrets, clean any staging residue.
             completed = true;
             // Let the successful response finish before stopping the listener.
             stop_after = monotonic_milliseconds() + 500;
             log("setup", "initial configuration and administrator created");
-            return protected_response(json_response({{"ok", true}, {"web_url", web_url(config)}}));
+            return protected_response(json_response({{"ok", true}, {"web_url", settings_url(config,"web")},
+                {"admin_url",settings_url(config,"admin")}}));
+        } catch (const SettingsError& error) {
+            auto response=json_response({{"ok",false},{"code","invalid_configuration"},{"field",error.field},{"error",error.what()}},error.status);
+            return protected_response(std::move(response));
         } catch (const SetupError& error) {
             if (error.status >= 500) log("setup", "initial setup failed: " + error.code, "error");
             return error_response(error.code, error.what(), error.status);
@@ -366,7 +415,11 @@ bool run_setup(const SetupOptions& options, SetupProvision provision) {
         }
     };
     // Never send this credential to the persistent logger or an HTTP query.
-    std::cout << "PostPlus initial setup: http://" << authority << "/setup#token=" << token << std::endl;
+    std::cout << "\nPostPlus setup is required before mail services can start.\n"
+              << "Open this configuration page: http://" << authority << "/setup\n"
+              << "One-time setup password: " << token << "\n"
+              << "Use this password to unlock setup, then choose your administrator account and password.\n"
+              << "Setup is available only on this computer. This password expires after setup or server shutdown.\n" << std::endl;
     serve_http(listener, "web", handler, false, preflight, [&] {
         const auto deadline = stop_after.load();
         return deadline != 0 && monotonic_milliseconds() >= deadline;

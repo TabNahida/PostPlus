@@ -173,7 +173,7 @@ def http(port, method, path, body=None, headers=None, context=None):
 
 
 class NativeServer:
-    def __init__(self, binaries, config, port, directory, label):
+    def __init__(self, binaries, config, port, directory, label, web_root=None):
         self.token = None
         self.setup_ready = threading.Event()
         self.services_ready = threading.Event()
@@ -182,9 +182,12 @@ class NativeServer:
         env = dict(os.environ)
         env.pop("POSTPLUS_SERVICE_TOKEN", None)  # Exercise the generated token file.
         binary = binaries / ("postplus.exe" if os.name == "nt" else "postplus")
+        arguments = [str(binary), "--config", str(config), "--setup-port", str(port)]
+        if web_root is not None:
+            arguments.extend(["--web-root", str(web_root)])
         self.process = subprocess.Popen(
-            [str(binary), "--config", str(config), "--web-root", str(ROOT / "web"), "--setup-port", str(port)],
-            cwd=ROOT, env=env, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+            arguments,
+            cwd=directory, env=env, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
             text=True, encoding="utf-8", errors="replace",
             creationflags=subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0)
         self.reader = threading.Thread(target=self.read_output, daemon=True)
@@ -193,7 +196,7 @@ class NativeServer:
     def read_output(self):
         with self.log_path.open("w", encoding="utf-8") as output:
             for line in self.process.stdout:
-                match = re.search(r"/setup#token=([0-9a-f]{64})", line)
+                match = re.search(r"One-time setup password: ([0-9a-f]{64})", line)
                 if match:
                     self.token = match.group(1)
                     line = line.replace(self.token, "[REDACTED]")
@@ -232,7 +235,7 @@ class NativeServer:
 
 
 def reserve_ports():
-    names = ("auth", "storage", "filter", "transfer", "delivery_lock", "smtp", "pop3", "imap", "web")
+    names = ("auth", "storage", "filter", "transfer", "delivery_lock", "smtp", "pop3", "imap", "web", "admin")
     reservations = [socket.socket() for _ in names]
     try:
         for item in reservations:
@@ -263,8 +266,8 @@ def assert_ports_closed(ports):
 def verify_services(server, ports, token, admin, tls=None):
     server.wait(server.services_ready)
     children = child_processes(server.process.pid)
-    expected = {"postplus-" + name for name in ("auth", "storage", "filter", "transfer", "delivery", "smtp", "pop3", "imap", "web")}
-    assert set(children) == expected, ("native supervisor did not own all nine services", children)
+    expected = {"postplus-" + name for name in ("auth", "storage", "filter", "transfer", "delivery", "smtp", "pop3", "imap", "web", "admin")}
+    assert set(children) == expected, ("native supervisor did not own all ten services", children)
     authorization = {"Authorization": "Bearer " + token}
     for service, body in (("auth", {"op": "exists", "username": admin}), ("storage", {"op": "stats"}),
                           ("filter", {"op": "health"}), ("transfer", {"op": "health"})):
@@ -274,20 +277,231 @@ def verify_services(server, ports, token, admin, tls=None):
         with socket.create_connection(("127.0.0.1", ports[service]), timeout=5) as sock:
             assert sock.recv(1024).startswith(greeting), f"missing {service} greeting"
     assert http(ports["web"], "GET", "/health", context=tls)[2] == {"ok": True, "service": "web"}
-    status, headers, login = http(ports["web"], "POST", "/api/login", {"username": admin, "password": PASSWORD}, context=tls)
+    assert http(ports["admin"], "GET", "/health", context=tls)[2] == {"ok": True, "service": "admin"}
+    status, headers, login = http(ports["admin"], "POST", "/api/login", {"username": admin, "password": PASSWORD}, context=tls)
     assert status == 200, ("provisioned admin cannot sign in", status)
     cookie = {"Cookie": headers["Set-Cookie"].split(";", 1)[0]}
-    status, _, accounts = http(ports["web"], "GET", "/api/admin/users", headers=cookie, context=tls)
+    status, _, accounts = http(ports["admin"], "GET", "/api/admin/users", headers=cookie, context=tls)
     assert status == 200 and accounts["users"] == [{"username": admin, "admin": True}], "provisioned account lacks administrator access"
     assert http(ports["web"], "GET", "/api/setup", context=tls)[0] != 200, "first-run API remains enabled after setup"
+    assert http(ports["admin"], "GET", "/api/setup", context=tls)[0] != 200, "first-run API remains enabled after setup"
+    status, web_headers, _ = http(ports["web"], "POST", "/api/login", {"username": admin, "password": PASSWORD}, context=tls)
+    assert status == 200
+    assert http(ports["web"], "GET", "/api/admin/users", headers={"Cookie": web_headers["Set-Cookie"].split(";",1)[0]}, context=tls)[0] == 404
     return children
 
 
+def settings_roundtrip(server, ports, config_path, token, admin):
+    original = config_path.read_bytes()
+    status, headers, session = http(ports["admin"], "POST", "/api/login", {"username": admin, "password": PASSWORD})
+    assert status == 200
+    cookie = {"Cookie": headers["Set-Cookie"].split(";", 1)[0]}
+    authorized = {**cookie, "X-CSRF-Token": session["csrf"]}
+    assert http(ports["admin"], "GET", "/api/admin/config")[0] == 401
+    status, _, settings = http(ports["admin"], "GET", "/api/admin/config", headers=cookie)
+    assert status == 200 and settings["ok"] and re.fullmatch("[0-9a-f]{64}", settings["revision"])
+    schema = {entry["key"]: entry for entry in settings["schema"]}
+    assert schema["data_dir"]["readonly"] and schema["ports.admin"]["default"] == 8081
+    assert schema["allow_insecure_auth"]["default"] is False
+    assert schema["web_session_seconds"]["min"] == 60
+    assert "service_token_file" not in settings["values"] and "service_token_env" not in settings["values"]
+    assert token not in json.dumps(settings) and settings["values"]["smarthost_password"] == ""
+    request = {"revision": settings["revision"], "values": {"log_level": "debug"}}
+    assert http(ports["admin"], "POST", "/api/admin/config", request, cookie)[0] == 403
+    assert http(ports["admin"], "POST", "/api/admin/config", {**request,"revision":"stale"}, authorized)[0] == 409
+    cases = [
+        {"data_dir": str(config_path.parent / "moved-mail")},
+        {"service_token_file": "new-token"}, {"unknown_option": True},
+        {"ports": {"admin": ports["web"]}}, {"ports": {"admin": 65536}},
+        {"admin_bind": "0.0.0.0"}, {"allow_insecure_auth": False},
+        {"max_connections": "32"}, {"max_mailbox_bytes": 1024},
+        {"log_level": "verbose"}, {"blocked_terms": [""]},
+        {"spam_rules": [{"term": "term", "weight": -1}]},
+        {"smarthost_username": "relay-user", "smarthost_tls": "none"},
+        {"clear_smarthost_password": "yes"},
+        {"tls_certificate": "absent.pem", "tls_private_key": "absent.key"},
+    ]
+    for values in cases:
+        status, _, result = http(ports["admin"], "POST", "/api/admin/config", {"revision":settings["revision"],"values":values}, authorized)
+        assert status == 400 and result.get("code") == "invalid_configuration", (values, status, result)
+        assert config_path.read_bytes() == original, "invalid settings modified the configuration"
+    with socket.socket() as occupied:
+        occupied.bind(("127.0.0.1", 0))
+        occupied.listen()
+        status, _, result = http(ports["admin"], "POST", "/api/admin/config", {
+            "revision":settings["revision"], "values":{"ports":{"admin":occupied.getsockname()[1]}}}, authorized)
+        assert status == 400 and result["field"] == "ports.admin"
+    # Ordinary mail users cannot authenticate to the administration service.
+    user = "reader@" + admin.split("@", 1)[1]
+    assert http(ports["auth"], "POST", "/rpc", {"op":"create","username":user,"password":PASSWORD,"admin":False}, {"Authorization":"Bearer "+token})[2]["ok"]
+    assert http(ports["admin"], "POST", "/api/login", {"username":user,"password":PASSWORD})[0] == 403
+
+    new_admin = reserve_ports()["admin"]
+    while new_admin in ports.values():
+        new_admin = reserve_ports()["admin"]
+    old_admin = ports["admin"]
+    old_children = child_processes(server.process.pid)
+    secret_value = "relay-test-password-" + secrets.token_hex(12)
+    values = {"ports":{"admin":new_admin}, "log_level":"debug", "smarthost_password":secret_value,
+              "blocked_terms":["test blocked phrase"], "web_session_seconds":7200}
+    status, _, saved = http(old_admin, "POST", "/api/admin/config", {"revision":settings["revision"],"values":values}, authorized)
+    assert status == 200 and saved["restart_required"] and saved["admin_url"] == f"http://127.0.0.1:{new_admin}/", (status,saved)
+    assert http(old_admin, "POST", "/api/admin/config", request, authorized)[0] == 409, "stale form silently overwrote settings"
+    new_config = json.loads(config_path.read_text())
+    assert secret_value not in config_path.read_text() and "smarthost_password" not in new_config
+    secret_file = Path(new_config["smarthost_password_file"])
+    assert secret_file.read_text() == secret_value
+    assert_private(secret_file)
+    assert_private(config_path)
+    backups = list(config_path.parent.glob(config_path.name + ".backup-*"))
+    assert backups and any(path.read_bytes() == original for path in backups)
+    for backup in backups:
+        assert_private(backup)
+    # Saved settings are pending until the operator explicitly restarts.
+    time.sleep(3)
+    assert child_processes(server.process.pid) == old_children, "saving settings unexpectedly restarted services"
+    pending = http(old_admin,"GET","/api/admin/config",headers=cookie)
+    assert pending[0] == 200 and pending[2]["restart_required"], "saved settings were not marked pending"
+    revision = pending[2]["revision"]
+    assert http(old_admin,"POST","/api/admin/config",{"revision":revision,"values":{"smarthost_password":""}},authorized)[0]==200
+    assert json.loads(config_path.read_text())["smarthost_password_file"]==str(secret_file), "blank relay password replaced the stored credential"
+    revision = http(old_admin,"GET","/api/admin/config",headers=cookie)[2]["revision"]
+    assert http(old_admin,"POST","/api/admin/config",{"revision":revision,"values":{"clear_smarthost_password":True,"smarthost_password":"conflict"}},authorized)[0]==400
+    assert http(old_admin,"POST","/api/admin/config",{"revision":revision,"values":{"clear_smarthost_password":True}},authorized)[0]==200
+    cleared = http(old_admin,"GET","/api/admin/config",headers=cookie)[2]
+    assert not cleared["secret_status"]["smarthost_password"] and "smarthost_password_file" not in json.loads(config_path.read_text())
+    assert secret_file.is_file(), "password removal broke a configuration backup"
+    assert http(old_admin,"POST","/api/admin/config",{"revision":cleared["revision"],"values":{"smarthost_password":secret_value}},authorized)[0]==200
+    new_config=json.loads(config_path.read_text())
+    assert_ports_closed({"pending_admin":new_admin})
+    request_stop(server.process.pid)
+    assert server.process.wait(timeout=45)==0
+    assert_ports_closed(ports)
+    server.close()
+    ports["admin"] = new_admin
+    server = NativeServer(
+        Path(server.process.args[0]).parent,config_path,new_admin,server.log_path.parent,"settings-manual-restart")
+    try:
+        server.wait(server.services_ready)
+        children = child_processes(server.process.pid)
+        assert len(children) == 10 and all(children[name] != pid for name,pid in old_children.items()), "manual restart did not launch all services"
+        assert_ports_closed({"old_admin":old_admin})
+        status, headers, _ = http(new_admin, "POST", "/api/login", {"username":admin,"password":PASSWORD})
+        assert status == 200
+        cookie = {"Cookie":headers["Set-Cookie"].split(";",1)[0]}
+        current = http(new_admin,"GET","/api/admin/config",headers=cookie)[2]
+        assert current["values"]["ports"]["admin"] == new_admin and current["values"]["web_session_seconds"] == 7200
+        assert current["restart_required"] is False
+        assert current["values"]["smarthost_password"] == "" and current["secret_status"]["smarthost_password"]
+        assert secret_value not in json.dumps(current) and token not in json.dumps(current)
+        for logfile in Path(new_config["log_dir"]).glob("*.jsonl*"):
+            contents = logfile.read_text(encoding="utf-8")
+            assert secret_value not in contents and token not in contents
+            if server.token:
+                assert server.token not in contents
+        print("PASS admin settings authorization, CSRF, validation, revisions, private backups/secrets and explicit manual restart", flush=True)
+        return server, children
+    except BaseException:
+        server.close()
+        raise
+
+
+def legacy_setup(binaries, directory):
+    ports = reserve_ports()
+    path = directory / "legacy" / "postplus.json"
+    path.parent.mkdir()
+    values = {"domain":"legacy.example", "bind":"127.0.0.1", "allow_insecure_auth":True,
+              "data_dir":"../legacy-mail", "web_root":str(ROOT / "web"),
+              "service_token_env":"POSTPLUS_SERVICE_TOKEN", "log_level":"warn",
+              "max_recipients":12, "delivery_lock_port":ports["delivery_lock"],
+              "ports":{key:value for key,value in ports.items() if key != "delivery_lock"}}
+    original = (json.dumps(values,indent=2)+"\n").encode()
+    path.write_bytes(original)
+    server = NativeServer(binaries,path,ports["admin"],directory,"legacy-setup")
+    try:
+        server.wait(server.setup_ready)
+        headers = {"X-Setup-Token":server.token}
+        deadline = time.monotonic()+10
+        while True:
+            try:
+                status, _, data = http(ports["admin"],"GET","/api/setup",headers=headers)
+                break
+            except ConnectionRefusedError:
+                assert time.monotonic()<deadline
+                time.sleep(0.05)
+        assert status==200 and data["completing_existing"] is True
+        assert data["defaults"]["domain"]=="legacy.example" and data["defaults"]["max_recipients"]==12
+        assert path.read_bytes()==original, "opening legacy setup rewrote its configuration"
+        payload = {**data["defaults"],"admin_username":"admin@legacy.example","admin_password":PASSWORD}
+        bad = {**payload,"data_dir":str(directory / "unsafe-new-mail-location")}
+        assert http(ports["admin"],"POST","/api/setup",bad,headers)[0]==400
+        assert path.read_bytes()==original
+        status, _, result = http(ports["admin"],"POST","/api/setup",payload,headers)
+        assert status==200 and result["ok"], (status,result)
+        saved = json.loads(path.read_text())
+        assert saved["max_recipients"]==12 and saved["log_level"]=="warn" and saved["setup_complete"] is True
+        assert Path(saved["data_dir"])==(directory / "legacy-mail")
+        backups = list(path.parent.glob(path.name+".backup-*"))
+        assert len(backups)==1 and backups[0].read_bytes()==original
+        assert_private(backups[0])
+        assert_private(path)
+        token = Path(saved["service_token_file"]).read_text().strip()
+        # Existing log level warn intentionally suppresses service readiness info.
+        deadline = time.monotonic()+40
+        while True:
+            try:
+                if http(ports["admin"],"GET","/health")[0]==200:
+                    break
+            except OSError:
+                pass
+            assert server.process.poll() is None and time.monotonic()<deadline, "legacy setup did not start services"
+            time.sleep(0.05)
+        server.services_ready.set()
+        verify_services(server,ports,token,"admin@legacy.example")
+        request_stop(server.process.pid)
+        assert server.process.wait(timeout=45)==0
+        assert_ports_closed(ports)
+        print("PASS incomplete legacy configuration completes through setup, preserves values and data, and creates private backup",flush=True)
+    finally:
+        server.close()
+
+    # A configured secret-file path that is broken must fail visibly; never
+    # silently treat an installed server as a fresh setup instance.
+    saved["service_token_file"]=str(path.parent / "absent-token-file")
+    path.write_text(json.dumps(saved),encoding="utf-8")
+    broken = NativeServer(binaries,path,ports["admin"],directory,"broken-token")
+    try:
+        assert broken.process.wait(timeout=10)!=0
+        assert not broken.setup_ready.is_set()
+        assert_ports_closed(ports)
+    finally:
+        broken.close()
+
+
 def run(binaries, directory):
+    # Resolve relative --config from the project directory through the actual
+    # xmake command. A deliberately absent web root makes the wrong-CWD path
+    # fail immediately instead of leaving a setup server running on failure.
+    malformed_relative = directory / "relative-config.json"
+    malformed_relative.write_text("[]", encoding="utf-8")
+    launch = subprocess.run(
+        ["xmake", "run", "postplus", "--config", os.path.relpath(malformed_relative, ROOT),
+         "--web-root", str(directory / "absent-web")],
+        cwd=ROOT, capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=30,
+        creationflags=subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0)
+    assert launch.returncode != 0 and "config must be a JSON object" in launch.stdout + launch.stderr, (launch.stdout, launch.stderr)
+    assert malformed_relative.read_text() == "[]"
+    print("PASS xmake run resolves relative configuration from the repository root", flush=True)
+
+    # The native launcher must discover a complete build-side web bundle from
+    # an unrelated working directory, without an explicit --web-root override.
+    for asset in (ROOT / "web").iterdir():
+        if asset.is_file():
+            assert (binaries / "web" / asset.name).read_bytes() == asset.read_bytes(), f"missing or stale bundled asset: {asset.name}"
     ports = reserve_ports()
     config_path = directory / "first run" / "config" / "postplus.json"
     config_path.parent.mkdir(parents=True)
-    server = NativeServer(binaries, config_path, ports["web"], directory, "setup")
+    server = NativeServer(binaries, config_path, ports["admin"], directory, "setup")
     try:
         server.wait(server.setup_ready)
         headers = {"X-Setup-Token": server.token}
@@ -295,22 +509,25 @@ def run(binaries, directory):
         deadline = time.monotonic() + 10
         while True:
             try:
-                status, _, defaults = http(ports["web"], "GET", "/api/setup", headers=headers)
+                status, _, defaults = http(ports["admin"], "GET", "/api/setup", headers=headers)
                 break
             except OSError:
                 assert time.monotonic() < deadline, "setup listener did not start"
                 time.sleep(0.05)
         assert status == 200 and defaults["ok"] is True
-        assert http(ports["web"], "GET", "/api/setup")[0] == 403
-        assert http(ports["web"], "POST", "/api/setup", {}, {"X-Setup-Token": "wrong"})[0] == 403
-        assert http(ports["web"], "GET", "/api/setup", headers={**headers, "Host": "evil.example"})[0] == 403
-        assert http(ports["web"], "POST", "/api/setup", {}, {**headers, "Origin": "https://evil.example"})[0] == 403
-        assert http(ports["web"], "GET", "/api/setup?token=" + server.token)[0] == 404
-        for path in ("/setup", "/setup.js", "/i18n.js", "/style.css"):
-            status, policy, body = http(ports["web"], "GET", path)
+        assert any("setup is required" in line for line in server.lines)
+        assert any(f"http://127.0.0.1:{ports['admin']}/setup" in line for line in server.lines)
+        assert not any("/setup#token=" in line for line in server.lines)
+        assert http(ports["admin"], "GET", "/api/setup")[0] == 403
+        assert http(ports["admin"], "POST", "/api/setup", {}, {"X-Setup-Token": "wrong"})[0] == 403
+        assert http(ports["admin"], "GET", "/api/setup", headers={**headers, "Host": "evil.example"})[0] == 403
+        assert http(ports["admin"], "POST", "/api/setup", {}, {**headers, "Origin": "https://evil.example"})[0] == 403
+        assert http(ports["admin"], "GET", "/api/setup?token=" + server.token)[0] == 404
+        for path in ("/setup", "/setup.js", "/i18n.js", "/settings.js", "/favicon.svg", "/style.css"):
+            status, policy, body = http(ports["admin"], "GET", path)
             assert status == 200 and body
             assert policy["Cache-Control"] == "no-store" and "frame-ancestors 'none'" in policy["Content-Security-Policy"]
-        assert http(ports["web"], "GET", "/../config/postplus.json")[0] == 404
+        assert http(ports["admin"], "GET", "/../config/postplus.json")[0] == 404
         payload = defaults["defaults"]
         payload.update(domain="setup.example", admin_username="admin@setup.example", admin_password=PASSWORD,
                        data_dir=str(directory / "mail data"), ports=ports, allow_insecure_auth=True)
@@ -324,34 +541,36 @@ def run(binaries, directory):
             ({"tls_certificate": str(directory / "absent.pem"), "tls_private_key": str(directory / "absent.key")}, "invalid_tls"),
             ({"ports": {**ports, "smtp": ports["pop3"]}}, "duplicate_port"),
             ({"ports": {**ports, "smtp": 65536}}, "invalid_port"),
-            ({"ports": {**ports, "auth": ports["web"], "web": ports["auth"]}}, "setup_port_conflict"),
+            ({"ports": {**ports, "auth": ports["admin"], "admin": ports["auth"]}}, "setup_port_conflict"),
         )
         for changes, code in cases:
             invalid = copy.deepcopy(payload)
             invalid.update(changes)
-            status, _, error = http(ports["web"], "POST", "/api/setup", invalid, headers)
+            status, _, error = http(ports["admin"], "POST", "/api/setup", invalid, headers)
             assert status == 400 and error.get("code") == code, (code, status, error)
             assert not config_path.exists(), "invalid setup created a configuration"
         with socket.socket() as occupied:
             occupied.bind(("127.0.0.1", 0))
             occupied.listen()
             invalid = {**payload, "ports": {**ports, "smtp": occupied.getsockname()[1]}}
-            assert http(ports["web"], "POST", "/api/setup", invalid, headers)[2]["code"] == "port_unavailable"
+            assert http(ports["admin"], "POST", "/api/setup", invalid, headers)[2]["code"] == "port_unavailable"
         sentinel = b'{"test_owned_sentinel":true}\n'
         config_path.write_bytes(sentinel)
-        assert http(ports["web"], "POST", "/api/setup", payload, headers)[0] == 409
+        assert http(ports["admin"], "POST", "/api/setup", payload, headers)[0] == 409
         assert config_path.read_bytes() == sentinel, "setup replaced an existing configuration"
         config_path.unlink()  # Only this exact test-created sentinel is removed.
         print("PASS setup token/Origin/Host, asset policy, field/TLS/port validation and no-overwrite protection", flush=True)
 
-        status, _, result = http(ports["web"], "POST", "/api/setup", payload, headers)
+        status, _, result = http(ports["admin"], "POST", "/api/setup", payload, headers)
         assert status == 200 and result["ok"] is True, (status, result)
         assert result["web_url"] == f"http://127.0.0.1:{ports['web']}/"
+        assert result["admin_url"] == f"http://127.0.0.1:{ports['admin']}/"
         saved_bytes = config_path.read_bytes()
         config = json.loads(saved_bytes)
         assert b"admin_password" not in saved_bytes and PASSWORD.encode() not in saved_bytes
         assert "service_token" not in config and Path(config["data_dir"]).is_absolute()
         assert Path(config["web_root"]).is_absolute() and config["delivery_lock_port"] == ports["delivery_lock"]
+        assert Path(config["web_root"]) == binaries / "web", "setup failed to discover bundled web assets"
         secret = Path(config["service_token_file"])
         token = secret.read_text().strip()
         assert re.fullmatch("[0-9a-f]{64}", token) and token.encode() not in saved_bytes
@@ -371,15 +590,24 @@ def run(binaries, directory):
         request_stop(server.process.pid)
         assert server.process.wait(timeout=45) == 0, "supervisor shutdown was not graceful"
         assert_ports_closed(ports)
-        print("PASS first-run provisioning, private token/config, nine native child services, admin login and graceful shutdown", flush=True)
+        print("PASS first-run provisioning, private token/config, ten native child services, admin login and graceful shutdown", flush=True)
     finally:
         server.close()
 
-    restarted = NativeServer(binaries, config_path, ports["web"], directory, "restart")
+    restarted = NativeServer(binaries, config_path, ports["admin"], directory, "restart")
     try:
         children = verify_services(restarted, ports, token, payload["admin_username"])
         assert not restarted.setup_ready.is_set(), "existing configuration reopened setup"
         assert config_path.read_bytes() == saved_bytes, "restart rewrote the configuration"
+        restarted, children = settings_roundtrip(restarted, ports, config_path, token, payload["admin_username"])
+        active_bytes = config_path.read_bytes()
+        start = len(restarted.lines)
+        config_path.write_bytes(b'{invalid manual edit "secret-that-must-not-be-logged"\n')
+        time.sleep(3)
+        assert child_processes(restarted.process.pid)==children, "invalid manual edit restarted or stopped services"
+        assert http(ports["admin"],"GET","/health")[0]==200
+        assert not any("secret-that-must-not-be-logged" in line for line in restarted.lines[start:])
+        config_path.write_bytes(active_bytes)
         # Inject a real child crash. The supervisor must fail and stop its peers.
         kill_test_child(children["postplus-smtp"])
         assert restarted.process.wait(timeout=45) != 0, "child failure was not surfaced by the supervisor"
@@ -388,9 +616,27 @@ def run(binaries, directory):
     finally:
         restarted.close()
 
+    before = config_path.read_bytes()
+    with socket.socket() as occupied:
+        occupied.bind(("127.0.0.1",0))
+        occupied.listen()
+        changed = json.loads(before)
+        changed["ports"]["admin"] = occupied.getsockname()[1]
+        config_path.write_text(json.dumps(changed),encoding="utf-8")
+        conflict = NativeServer(binaries,config_path,ports["admin"],directory,"startup-port-conflict")
+        try:
+            assert conflict.process.wait(timeout=45)!=0, "startup port conflict did not report failure"
+            assert_ports_closed(ports)
+        finally:
+            conflict.close()
+            config_path.write_bytes(before)
+    print("PASS manual file edits stay pending; unavailable port at explicit restart fails without leaving child services",flush=True)
+
+    legacy_setup(binaries,directory)
+
     malformed = directory / "malformed.json"
     malformed.write_bytes(b"{broken configuration\n")
-    refused = NativeServer(binaries, malformed, ports["web"], directory, "malformed")
+    refused = NativeServer(binaries, malformed, ports["admin"], directory, "malformed")
     try:
         assert refused.process.wait(timeout=10) != 0
         assert not refused.setup_ready.is_set(), "malformed config incorrectly opened setup"
@@ -404,7 +650,7 @@ def run(binaries, directory):
     # works without relaxing the supervisor's or client's public trust policy.
     tls_ports = reserve_ports()
     tls_path = directory / "tls" / "postplus.json"
-    secure = NativeServer(binaries, tls_path, tls_ports["web"], directory, "tls-setup")
+    secure = NativeServer(binaries, tls_path, tls_ports["admin"], directory, "tls-setup", web_root=ROOT / "web")
     try:
         secure.wait(secure.setup_ready)
         certificate = ROOT / "tests/fixtures/localhost-test-only.crt"
@@ -415,7 +661,7 @@ def run(binaries, directory):
         deadline = time.monotonic() + 10
         while True:
             try:
-                status, _, result = http(tls_ports["web"], "POST", "/api/setup", tls_payload, {"X-Setup-Token": secure.token})
+                status, _, result = http(tls_ports["admin"], "POST", "/api/setup", tls_payload, {"X-Setup-Token": secure.token})
                 break
             except ConnectionRefusedError:
                 assert time.monotonic() < deadline

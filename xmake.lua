@@ -3,6 +3,8 @@ set_version("0.1.0")
 set_xmakever("2.9.8")
 set_languages("c++20")
 set_warnings("allextra")
+-- Keep relative configuration paths consistent with the repository quick start.
+set_rundir("$(projectdir)")
 add_rules("mode.debug", "mode.release")
 
 add_requires("asio 1.34.2")
@@ -35,13 +37,30 @@ for _, service in ipairs({"auth", "storage", "filter", "smtp", "pop3", "imap", "
         end
 end
 
+target("postplus-admin")
+    set_kind("binary")
+    add_files("src/services/web.cpp")
+    add_defines("POSTPLUS_ADMIN")
+    add_deps("postplus-core")
+
 target("postplus")
     set_kind("binary")
     add_files("src/tools/main.cpp")
-    add_deps("postplus-core")
+    add_deps("postplus-core", "postplus-admin")
     for _, service in ipairs({"auth", "storage", "filter", "smtp", "pop3", "imap", "delivery", "transfer", "web"}) do
         add_deps("postplus-" .. service, {inherit = false})
     end
+    after_build(function (target)
+        local destination = path.join(target:targetdir(), "web")
+        os.mkdir(destination)
+        os.cp(path.join(os.projectdir(), "web", "*"), destination)
+    end)
+    before_run(function (target)
+        -- Refresh assets even when only HTML, CSS, or JavaScript has changed.
+        local destination = path.join(target:targetdir(), "web")
+        os.mkdir(destination)
+        os.cp(path.join(os.projectdir(), "web", "*"), destination)
+    end)
 
 target("postplus-ctl")
     set_kind("binary")

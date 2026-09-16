@@ -47,7 +47,7 @@ class Suite:
         self.files = []
         self.token = secrets.token_hex(32)
         self.env = dict(os.environ, POSTPLUS_SERVICE_TOKEN=self.token)
-        names = ["auth", "storage", "filter", "transfer", "smtp", "pop3", "imap", "web", "delivery"]
+        names = ["auth", "storage", "filter", "transfer", "smtp", "pop3", "imap", "web", "admin", "delivery"]
         # Reserve all simultaneously so ports are unique within this test instance.
         reservations = [socket.socket() for _ in names]
         for item in reservations:
@@ -130,7 +130,7 @@ class Suite:
 
 
 def run(s):
-    for service in ("auth", "storage", "filter", "transfer", "smtp", "pop3", "imap", "web"):
+    for service in ("auth", "storage", "filter", "transfer", "smtp", "pop3", "imap", "web", "admin"):
         s.start(service)
     alice, bob = "alice@localhost", "bob@localhost"
     for user in (alice, bob):
@@ -206,29 +206,52 @@ def run(s):
     assert status == 200, login
     cookies = {"Cookie": headers["Set-Cookie"].split(";", 1)[0]}
     csrf = {**cookies, "X-CSRF-Token": login["csrf"]}
-    assert s.http("web", "GET", "/api/admin/users", headers=cookies)[0] == 403
-    assert s.http("web", "GET", "/api/admin/logs", headers=cookies)[0] == 403
-    assert s.http("web", "GET", "/api/admin/logs")[0] == 401
+    assert s.http("web", "GET", "/api/admin/users", headers=cookies)[0] == 404
+    assert s.http("web", "GET", "/api/admin/logs", headers=cookies)[0] == 404
+    assert s.http("web", "GET", "/api/admin/logs")[0] == 404
+    assert s.http("admin", "GET", "/api/admin/logs")[0] == 401
+    assert s.http("admin", "GET", "/api/admin/users", headers=cookies)[0] == 401
+    assert s.http("admin", "POST", "/api/login", {"username": bob, "password": PASSWORD})[0] == 403
+    for service in ("web", "admin"):
+        assert s.http(service, "GET", "/favicon.svg")[0] == 200
+    assert s.http("admin", "GET", "/")[0] == 200
+    assert s.http("admin", "GET", "/api/messages")[0] == 404
+    assert s.http("admin", "POST", "/api/send", {})[0] == 404
     assert s.http("web", "GET", "/i18n.js")[0] == 200
     payload = {"to": [alice], "subject": "Webmail test", "text": "Hello from Webmail"}
     assert s.http("web", "POST", "/api/send", payload, cookies)[0] == 403
     assert s.http("web", "POST", "/api/send", payload, csrf)[0] in (200, 202)
     s.wait_mail(alice, 1)
-    status, headers, admin = s.http("web", "POST", "/api/login", {"username": alice, "password": PASSWORD})
+    status, headers, admin = s.http("admin", "POST", "/api/login", {"username": alice, "password": PASSWORD})
     assert status == 200
     admin_headers = {"Cookie": headers["Set-Cookie"].split(";", 1)[0], "X-CSRF-Token": admin["csrf"]}
-    assert s.http("web", "GET", "/api/admin/users", headers=admin_headers)[0] == 200
-    assert s.http("web", "GET", "/api/admin/stats", headers=admin_headers)[0] == 200
-    status, _, logs = s.http("web", "GET", "/api/admin/logs?service=web&level=info&limit=2", headers=admin_headers)
+    assert admin_headers["Cookie"].startswith("pp_admin_session=") and cookies["Cookie"].startswith("pp_session=")
+    assert s.http("web", "GET", "/api/session", headers=admin_headers)[0] == 401
+    # Browsers send both host cookies to both ports. Each service must select
+    # its own cookie, regardless of their order, without changing the other login.
+    combined = {"Cookie": admin_headers["Cookie"] + "; " + cookies["Cookie"]}
+    assert s.http("web", "GET", "/api/session", headers=combined)[2]["username"] == bob
+    assert s.http("admin", "GET", "/api/session", headers=combined)[2]["username"] == alice
+    assert s.http("admin", "GET", "/api/admin/users", headers=admin_headers)[0] == 200
+    assert s.http("admin", "GET", "/api/admin/stats", headers=admin_headers)[0] == 200
+    status, _, logs = s.http("admin", "GET", "/api/admin/logs?service=admin&level=info&limit=2", headers=admin_headers)
     assert status == 200 and 0 < len(logs["entries"]) <= 2, logs
-    assert all(entry["service"] == "web" and entry["level"] == "info" for entry in logs["entries"]), logs
+    assert all(entry["service"] == "admin" and entry["level"] == "info" for entry in logs["entries"]), logs
     assert PASSWORD not in json.dumps(logs) and s.token not in json.dumps(logs), "secrets in admin logs"
     for query in ("service=../auth", "service=%2e%2e", "level=critical", "limit=0", "limit=501", "limit=-1", "limit=2&limit=3", "path=config"):
-        assert s.http("web", "GET", "/api/admin/logs?" + query, headers=admin_headers)[0] == 400, query
+        assert s.http("admin", "GET", "/api/admin/logs?" + query, headers=admin_headers)[0] == 400, query
     alice_id = s.rpc("storage", op="list", username=alice)["messages"][0]["id"]
     assert s.http("web", "GET", f"/api/messages/{alice_id}", headers=cookies)[0] in (403, 404)
     assert s.http("web", "POST", "/api/logout", {}, csrf)[0] in (200, 204)
     assert s.http("web", "GET", "/api/messages", headers=cookies)[0] == 401
+    assert s.http("admin", "GET", "/api/session", headers=admin_headers)[0] == 200
+    status, reset_headers, reset_session = s.http("web", "POST", "/api/login", {"username": alice, "password": PASSWORD})
+    assert status == 200
+    reset_cookie = {"Cookie": reset_headers["Set-Cookie"].split(";", 1)[0]}
+    assert "credential_version" not in reset_session
+    assert s.http("admin", "POST", "/api/admin/password", {"username": alice, "password": PASSWORD}, admin_headers)[0] == 200
+    assert s.http("web", "GET", "/api/session", headers=reset_cookie)[0] == 401
+    assert s.http("admin", "GET", "/api/session", headers=admin_headers)[0] == 401
     print("PASS Webmail/API session, CSRF, account isolation, admin authorization and compose", flush=True)
 
     # Signature composed at runtime to avoid storing antivirus test signatures as source artifacts.
@@ -279,6 +302,7 @@ def main():
     suite = Suite(binaries, directory)
     try:
         run(suite)
+        suite.close()
         subprocess.run([os.sys.executable, str(ROOT / "tests/storage_integration.py"),
                         "--bin-dir", str(binaries)], check=True)
         subprocess.run([os.sys.executable, str(ROOT / "tests/tls_transfer_integration.py"),

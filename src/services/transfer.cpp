@@ -47,9 +47,8 @@ void send(const Config& config, const Json& input) {
     const auto username = config.text("smarthost_username");
     if (!username.empty()) {
         if (!peer.encrypted()) throw std::runtime_error("upstream authentication requires TLS");
-        const auto env = config.text("smarthost_password_env", "POSTPLUS_SMARTHOST_PASSWORD");
-        const char* password = std::getenv(env.c_str());
-        if (!password || !*password) throw std::runtime_error("smarthost password not configured");
+        const auto password = config.relay_password();
+        if (password.empty()) throw std::runtime_error("smarthost password not configured");
         if (capabilities.find("auth") == std::string::npos || capabilities.find("plain") == std::string::npos) throw std::runtime_error("upstream lacks AUTH PLAIN");
         std::string credentials(1,'\0'); credentials += username; credentials += '\0'; credentials += password;
         peer.write("AUTH PLAIN " + base64_encode(credentials) + "\r\n"); reply(peer,235);

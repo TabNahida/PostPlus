@@ -20,7 +20,7 @@
 
 namespace postplus {
 namespace {
-const std::array<std::string,11> services{"postplus","setup","auth","storage","filter","transfer","delivery","smtp","pop3","imap","web"};
+const std::array<std::string,12> services{"postplus","setup","auth","storage","filter","transfer","delivery","smtp","pop3","imap","web","admin"};
 const std::array<std::string,4> levels{"debug","info","warn","error"};
 struct Settings {
     std::filesystem::path directory;
@@ -185,6 +185,10 @@ void configure_logging(const Config& config, const std::string& service) {
     try { next.secrets.push_back(config.token()); } catch (const std::exception&) {}
     const auto password_env = config.text("smarthost_password_env","POSTPLUS_SMARTHOST_PASSWORD");
     if (const char* value = std::getenv(password_env.c_str()); value && *value) next.secrets.emplace_back(value);
+    try {
+        auto password = config.relay_password();
+        if (!password.empty()) next.secrets.push_back(std::move(password));
+    } catch (const std::exception&) {}
     create_log_directory(next.directory);
     std::lock_guard guard(logger_mutex);
     settings = std::move(next);

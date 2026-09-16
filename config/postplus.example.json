@@ -1,6 +1,7 @@
 {
   "domain": "localhost",
   "bind": "127.0.0.1",
+  "admin_bind": "127.0.0.1",
   "data_dir": "../data",
   "web_root": "../web",
   "service_token_env": "POSTPLUS_SERVICE_TOKEN",
@@ -13,9 +14,17 @@
   "max_message_bytes": 10485760,
   "max_recipients": 100,
   "max_auth_attempts": 5,
+  "auth_pbkdf2_iterations": 600000,
+  "max_password_bytes": 1024,
+  "web_session_seconds": 3600,
+  "max_web_sessions": 1024,
   "max_connections": 32,
   "timeout_seconds": 30,
   "smtp_data_timeout_seconds": 120,
+  "max_mailbox_bytes": 1073741824,
+  "max_mailbox_messages": 10000,
+  "max_queue_bytes": 1073741824,
+  "max_queue_messages": 100000,
   "tls_certificate": "",
   "tls_private_key": "",
   "delivery_lock_port": 18085,
@@ -27,7 +36,8 @@
     "smtp": 2525,
     "pop3": 1110,
     "imap": 1143,
-    "web": 8080
+    "web": 8080,
+    "admin": 8081
   },
   "smarthost_host": "",
   "smarthost_port": 587,
@@ -35,8 +45,10 @@
   "smarthost_tls": "starttls",
   "smarthost_username": "",
   "smarthost_password_env": "POSTPLUS_SMARTHOST_PASSWORD",
+  "smarthost_password_file": "",
   "clamav_host": "",
   "clamav_port": 3310,
+  "clamav_timeout_seconds": 15,
   "blocked_terms": [],
   "spam_threshold": 5
 }

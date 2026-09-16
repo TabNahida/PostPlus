@@ -105,7 +105,7 @@ Config Config::from_file(const std::filesystem::path& path) {
     if (!file) throw std::runtime_error("cannot open config: " + config.source.string());
     file >> config.values;
     if (!config.values.is_object()) throw std::invalid_argument("config must be a JSON object");
-    for (const auto* key : {"data_dir", "web_root", "tls_certificate", "tls_private_key", "log_dir", "service_token_file"}) {
+    for (const auto* key : {"data_dir", "web_root", "tls_certificate", "tls_private_key", "log_dir", "service_token_file", "smarthost_password_file"}) {
         auto value = config.text(key);
         if (value.empty()) continue;
         auto resolved = std::filesystem::path(value);
@@ -126,7 +126,7 @@ std::string Config::text(const std::string& key, const std::string& fallback) co
 int Config::number(const std::string& key, int fallback) const { return values.value(key, fallback); }
 bool Config::flag(const std::string& key, bool fallback) const { return values.value(key, fallback); }
 int Config::port(const std::string& service) const {
-    static const std::map<std::string, int> defaults{{"auth",18081},{"storage",18082},{"filter",18083},{"transfer",18084},{"smtp",2525},{"pop3",1110},{"imap",1143},{"web",8080}};
+    static const std::map<std::string, int> defaults{{"auth",18081},{"storage",18082},{"filter",18083},{"transfer",18084},{"smtp",2525},{"pop3",1110},{"imap",1143},{"web",8080},{"admin",8081}};
     int port_value = defaults.at(service);
     if (values.contains("ports")) port_value = values.at("ports").value(service, port_value);
     if (port_value < 1 || port_value > 65535) throw std::invalid_argument("invalid service port");
@@ -148,6 +148,28 @@ std::string Config::token() const {
         result = trim(result);
     } else throw std::runtime_error("set " + name + " or configure service_token_file");
     if (result.size() < 32 || result.size() > 1024 || result.find_first_of("\r\n\0",0,3) != std::string::npos) throw std::invalid_argument("invalid service token");
+    return result;
+}
+
+std::string Config::relay_password() const {
+    const auto name = text("smarthost_password_env", "POSTPLUS_SMARTHOST_PASSWORD");
+    std::string result;
+    if (const char* value = std::getenv(name.c_str()); value && *value) result = value;
+    else if (!text("smarthost_password_file").empty()) {
+        auto path = std::filesystem::path(text("smarthost_password_file"));
+        if (path.is_relative()) path = source.parent_path() / path;
+        const auto status = std::filesystem::symlink_status(path);
+        if (!std::filesystem::is_regular_file(status) || std::filesystem::file_size(path) > 4096)
+            throw std::runtime_error("invalid smarthost password file");
+        std::ifstream file(path, std::ios::binary);
+        if (!file) throw std::runtime_error("cannot read smarthost password file");
+        result.assign(std::istreambuf_iterator<char>(file), std::istreambuf_iterator<char>());
+        // Permit a text file's final newline while preserving password spaces.
+        if (result.ends_with('\n')) result.pop_back();
+        if (result.ends_with('\r')) result.pop_back();
+    }
+    if (result.size() > 4096 || result.find_first_of("\r\n\0", 0, 3) != std::string::npos)
+        throw std::invalid_argument("invalid smarthost password");
     return result;
 }
 
@@ -262,7 +284,7 @@ void Connection::start_tls_client(const std::string& hostname) {
 }
 void serve_tcp(const Config& config, const std::string& service, Session handler, bool internal, std::function<bool()> stop_requested) {
     asio::io_context io;
-    const auto address = asio::ip::make_address(internal ? "127.0.0.1" : config.text("bind", "127.0.0.1"));
+    const auto address = asio::ip::make_address(internal ? "127.0.0.1" : config.text(service == "admin" ? "admin_bind" : "bind", "127.0.0.1"));
     tcp::acceptor acceptor(io, {address, static_cast<unsigned short>(config.port(service))});
     const auto max = config.number("max_connections", 32);
     asio::thread_pool workers(static_cast<std::size_t>(max));
@@ -433,6 +455,8 @@ void serve_http(const Config& config, const std::string& service, HttpHandler ha
             std::size_t limit = rpc_limit(config);
             if (!internal) {
                 limit = request.path == "/api/send" ? static_cast<std::size_t>(config.number("max_message_bytes",10485760)) * 2 + 16384 : 16384;
+                if (service == "admin" && request.path == "/api/admin/config") limit = 1024 * 1024;
+                if (service == "web" && request.path == "/api/setup") limit = 1024 * 1024;
                 if (request.method == "GET" || request.method == "DELETE") limit = 0;
             }
             const auto size = body_size(request.headers, limit);

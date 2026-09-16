@@ -21,20 +21,27 @@ int main() {
         const auto secret = random_hex(32);
         const auto token_file = directory / "service-token";
         { std::ofstream file(token_file); file << secret; }
+        const auto relay_secret = " relay-" + random_hex(12) + " ";
+        const auto relay_file = directory / "relay-password";
+        { std::ofstream file(relay_file, std::ios::binary); file << relay_secret << "\r\n"; }
         Config config;
         config.source = directory / "config.json";
         config.values = {{"data_dir",directory.string()},{"log_dir",(directory / "logs").string()},
                          {"service_token_file",token_file.string()},{"service_token_env","POSTPLUS_UNUSED_LOG_TEST_TOKEN"},
+                         {"smarthost_password_file",relay_file.string()},
+                         {"smarthost_password_env","POSTPLUS_UNUSED_LOG_TEST_RELAY"},
                          {"log_max_bytes",1024},{"log_backups",2},{"log_level","info"}};
         check(config.token() == secret,"secret-file authentication failed");
+        check(config.relay_password() == relay_secret,"relay password file did not preserve spaces");
         configure_logging(config,"auth");
         log("auth","must not be recorded","debug");
         check(read_logs(config).at("entries").empty(),"minimum severity ignored");
-        log("auth","credential " + secret + "\r\nsecond line","warn");
+        log("auth","credential " + secret + " relay " + relay_secret + "\r\nsecond line","warn");
         auto entries = read_logs(config,"auth","warn").at("entries");
         check(entries.size() == 1,"structured warning missing");
         const auto message = entries[0].at("message").get<std::string>();
         check(message.find(secret) == std::string::npos && message.find("[REDACTED]") != std::string::npos,"service token leaked");
+        check(message.find(relay_secret) == std::string::npos,"relay password leaked");
         check(message.find_first_of("\r\n") == std::string::npos,"control character escaped console line");
         std::ostringstream console;
         auto* previous = std::cerr.rdbuf(console.rdbuf());

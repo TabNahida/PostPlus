@@ -304,6 +304,21 @@ def check_transfer(suite):
         forwarded = suite.rpc("transfer", **request)
         assert forwarded["ok"], ("RCPT 251 must allow DATA delivery", forwarded)
         assert len(mock.messages) == 2 and mock.messages[-1][0] == raw
+        # Web configuration saves the relay password in a private file. Exercise
+        # that source against an actual TLS SMTP peer, including env precedence.
+        suite.stop("transfer")
+        secret_file = suite.directory / "relay-password"
+        secret_file.write_text("upstream-test-secret\n", encoding="utf-8")
+        suite.config["smarthost_password_file"] = str(secret_file)
+        suite.env.pop("POSTPLUS_TLS_TEST_SMARTHOST_PASSWORD")
+        suite.save()
+        suite.start("transfer")
+        assert suite.rpc("transfer", **request)["ok"]
+        suite.stop("transfer")
+        secret_file.write_text("unused-file-password", encoding="utf-8")
+        suite.env["POSTPLUS_TLS_TEST_SMARTHOST_PASSWORD"] = "upstream-test-secret"
+        suite.start("transfer")
+        assert suite.rpc("transfer", **request)["ok"], "environment relay password must take precedence"
     finally:
         mock.close()
     for mode in ("untrusted", "no_starttls"):

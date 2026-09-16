@@ -1,5 +1,6 @@
 #include "postplus/core.hpp"
 #include "postplus/mime.hpp"
+#include "postplus/settings.hpp"
 
 #include <algorithm>
 #include <charconv>
@@ -13,6 +14,13 @@
 
 namespace postplus {
 namespace {
+#ifdef POSTPLUS_ADMIN
+constexpr bool admin_only = true;
+const std::string service_name = "admin", cookie_name = "pp_admin_session";
+#else
+constexpr bool admin_only = false;
+const std::string service_name = "web", cookie_name = "pp_session";
+#endif
 using Clock = std::chrono::steady_clock;
 struct ApiError : std::runtime_error {
     int status;
@@ -29,7 +37,7 @@ std::string session_cookie(const HttpRequest& request) {
     std::string part;
     while (std::getline(stream, part, ';')) {
         part = trim(part);
-        if (part.starts_with("pp_session=")) return part.substr(11);
+        if (part.starts_with(cookie_name + "=")) return part.substr(cookie_name.size() + 1);
     }
     return "";
 }
@@ -116,7 +124,7 @@ Json message_view(const std::string& raw) {
 }
 
 struct WebSession {
-    std::string username, csrf;
+    std::string username, csrf, credential_version;
     bool admin = false;
     Clock::time_point expires;
 };
@@ -127,8 +135,12 @@ public:
         session_seconds_ = std::clamp(config_.number("web_session_seconds", 3600), 60, 86400);
         session_limit_ = static_cast<std::size_t>(std::clamp(config_.number("max_web_sessions", 1024), 1, 10000));
         const auto root = std::filesystem::path(config_.text("web_root", "web"));
-        load_static(root, "/", "index.html", "text/html; charset=utf-8");
-        load_static(root, "/app.js", "app.js", "application/javascript; charset=utf-8");
+        load_static(root, "/", admin_only ? "admin.html" : "index.html", "text/html; charset=utf-8");
+        if (admin_only) {
+            load_static(root, "/admin.js", "admin.js", "application/javascript; charset=utf-8");
+            load_static(root, "/settings.js", "settings.js", "application/javascript; charset=utf-8");
+        } else load_static(root, "/app.js", "app.js", "application/javascript; charset=utf-8");
+        load_static(root, "/favicon.svg", "favicon.svg", "image/svg+xml");
         load_static(root, "/i18n.js", "i18n.js", "application/javascript; charset=utf-8");
         load_static(root, "/style.css", "style.css", "text/css; charset=utf-8");
     }
@@ -139,6 +151,10 @@ public:
         catch (const ApiError& error) {
             response = json_response({{"ok", false}, {"error", error.what()}}, error.status);
             if (error.status == 429) response.headers["Retry-After"] = "60";
+        }
+        catch (const SettingsError& error) {
+            response = json_response({{"ok", false}, {"code", "invalid_configuration"},
+                                      {"field", error.field}, {"error", error.what()}}, error.status);
         }
         catch (const Json::exception&) { response = json_response({{"ok", false}, {"error", "Invalid request data."}}, 400); }
         catch (const std::exception&) { response = json_response({{"ok", false}, {"error", "A required service is unavailable. Please retry."}}, 503); }
@@ -152,6 +168,9 @@ public:
     }
 
     std::optional<HttpResponse> preflight(const HttpRequest& request) {
+        if ((!admin_only && request.path.starts_with("/api/admin/")) ||
+            (admin_only && (request.path.starts_with("/api/messages") || request.path == "/api/send")))
+            return json_response({{"ok",false},{"error","API route not found."}},404);
         // Verify session and CSRF before core allocates a potentially large compose body.
         if (!request.path.starts_with("/api/") || request.path == "/api/login") return std::nullopt;
         try {
@@ -160,6 +179,8 @@ public:
             return std::nullopt;
         } catch (const ApiError& error) {
             return json_response({{"ok",false},{"error",error.what()}},error.status);
+        } catch (const std::exception&) {
+            return json_response({{"ok",false},{"error","A required service is unavailable. Please retry."}},503);
         }
     }
 
@@ -217,11 +238,23 @@ private:
         require_transport(request);
         auto token = session_cookie(request);
         if (token.size() != 64) throw ApiError(401, "Sign in to continue.");
-        std::lock_guard lock(mutex_);
-        prune(Clock::now());
-        auto found = sessions_.find(token);
-        if (found == sessions_.end()) throw ApiError(401, "Your session has expired. Please sign in again.");
-        return found->second;
+        WebSession session;
+        {
+            std::lock_guard lock(mutex_);
+            prune(Clock::now());
+            auto found = sessions_.find(token);
+            if (found == sessions_.end()) throw ApiError(401, "Your session has expired. Please sign in again.");
+            session = found->second;
+        }
+        const auto account = rpc(config_, "auth", {{"op","session_check"},{"username",session.username},
+                                                  {"credential_version",session.credential_version}});
+        require_ok(account,"A required service is unavailable. Please retry.");
+        if (!account.value("valid",false) || account.value("admin",false) != session.admin) {
+            std::lock_guard lock(mutex_);
+            sessions_.erase(token);
+            throw ApiError(401,"Your session has expired. Please sign in again.");
+        }
+        return session;
     }
 
     void require_csrf(const HttpRequest& request, const WebSession& session) const {
@@ -235,11 +268,12 @@ private:
         auto input = request_json(request);
         auto username = username_field(input);
         auto password = field(input, "password", 1024);
-        auto user = rpc(config_, "auth", {{"op", "verify"}, {"username", username}, {"password", password}});
-        if (!user.value("ok",false)) log("web","sign-in failed for " + username + " from " + request.peer_address,"warn");
+        auto user = rpc(config_, "auth", {{"op", "verify"}, {"username", username}, {"password", password}, {"session", true}});
+        if (!user.value("ok",false)) log(service_name,"sign-in failed for " + username + " from " + request.peer_address,"warn");
         require_ok(user, "The email address or password is incorrect.", 401);
+        if (admin_only && !user.value("admin",false)) throw ApiError(403,"Administrator access is required.");
         auto token = random_hex(32);
-        WebSession session{user.at("username").get<std::string>(), random_hex(32), user.value("admin", false),
+        WebSession session{user.at("username").get<std::string>(), random_hex(32), user.at("credential_version").get<std::string>(), user.value("admin", false),
                            Clock::now() + std::chrono::seconds(session_seconds_)};
         {
             std::lock_guard lock(mutex_);
@@ -250,19 +284,23 @@ private:
         }
         auto response = json_response({{"ok", true}, {"username", session.username}, {"admin", session.admin},
                                        {"csrf", session.csrf}, {"expires_in", session_seconds_}});
-        response.headers["Set-Cookie"] = "pp_session=" + token + "; Path=/; HttpOnly; SameSite=Strict; Max-Age=" +
+        response.headers["Set-Cookie"] = cookie_name + "=" + token + "; Path=/; HttpOnly; SameSite=Strict; Max-Age=" +
                                          std::to_string(session_seconds_) + (request.encrypted ? "; Secure" : "");
-        log("web","signed in " + session.username + " from " + request.peer_address);
+        log(service_name,"signed in " + session.username + " from " + request.peer_address);
         return response;
     }
 
     HttpResponse send_mail(const HttpRequest& request, const WebSession& session);
 
     HttpResponse route(const HttpRequest& request) {
+        if ((!admin_only && request.path.starts_with("/api/admin/")) ||
+            (admin_only && (request.path.starts_with("/api/messages") || request.path == "/api/send")))
+            throw ApiError(404, "API route not found.");
         if (request.method == "GET" && request.path == "/health")
-            return json_response({{"ok", true}, {"service", "web"}});
+            return json_response({{"ok", true}, {"service", service_name}});
         if (request.method == "GET") {
-            auto path = request.path == "/index.html" ? "/" : request.path;
+            auto path = request.path == (admin_only ? "/admin.html" : "/index.html") ||
+                        (admin_only && request.path == "/admin") ? "/" : request.path;
             auto asset = assets_.find(path);
             if (asset != assets_.end()) return asset->second;
         }
@@ -276,7 +314,7 @@ private:
             std::lock_guard lock(mutex_);
             sessions_.erase(session_cookie(request));
             auto response = json_response({{"ok", true}});
-            response.headers["Set-Cookie"] = "pp_session=; Path=/; HttpOnly; SameSite=Strict; Max-Age=0" +
+            response.headers["Set-Cookie"] = cookie_name + "=; Path=/; HttpOnly; SameSite=Strict; Max-Age=0" +
                                              std::string(request.encrypted ? "; Secure" : "");
             return response;
         }
@@ -301,13 +339,18 @@ private:
             if (request.method == "DELETE") {
                 auto result = rpc(config_, "storage", {{"op", "delete"}, {"username", session.username}, {"ids", Json::array({id})}});
                 require_ok(result, "Unable to delete message.");
-                log("web","message deleted by " + session.username + ": " + id);
+                log(service_name,"message deleted by " + session.username + ": " + id);
                 return json_response(result);
             }
         }
         if (request.method == "POST" && request.path == "/api/send") return send_mail(request, session);
         if (request.path.starts_with("/api/admin/")) {
+            if (!admin_only) throw ApiError(404,"API route not found.");
             if (!session.admin) throw ApiError(403, "Administrator access is required.");
+            if (request.path == "/api/admin/config") {
+                if (request.method == "GET") return json_response(settings_view(config_));
+                if (request.method == "POST") return json_response(save_settings(config_, request_json(request)));
+            }
             if (request.method == "GET" && (request.path == "/api/admin/logs" || request.path.starts_with("/api/admin/logs?")))
                 return json_response(log_query(config_,request.path));
             if (request.method == "GET" && request.path == "/api/admin/users") {
@@ -333,7 +376,7 @@ private:
                 const auto password = password_field(input);
                 auto result = rpc(config_, "auth", {{"op", "create"}, {"username", username}, {"password", password}, {"admin", input.value("admin", false)}});
                 require_ok(result, "Unable to create account. This address may already exist.", 409);
-                log("web","administrator " + session.username + " created account " + username);
+                log(service_name,"administrator " + session.username + " created account " + username);
                 return json_response(result, 201);
             }
             if (request.method == "POST" && request.path == "/api/admin/password") {
@@ -342,7 +385,7 @@ private:
                 const auto password = password_field(input);
                 auto result = rpc(config_, "auth", {{"op", "change_password"}, {"username", username}, {"password", password}});
                 require_ok(result, "Unable to change password.", 400);
-                log("web","administrator " + session.username + " changed password for " + username);
+                log(service_name,"administrator " + session.username + " changed password for " + username);
                 std::lock_guard lock(mutex_);
                 std::erase_if(sessions_, [&username](const auto& item) { return item.second.username == username; });
                 return json_response(result);
@@ -385,16 +428,16 @@ HttpResponse Web::send_mail(const HttpRequest& request, const WebSession& sessio
     if (scanned.value("action", "reject") != "accept") throw ApiError(422, "The message was rejected by the server mail filter.");
     const auto result = rpc(config_, "storage", {{"op", "enqueue"}, {"sender", session.username}, {"recipients", recipients}, {"raw", raw}});
     require_ok(result, "Unable to queue your message.");
-    log("web","message queued by " + session.username + " for " + std::to_string(recipients.size()) + " recipients");
+    log(service_name,"message queued by " + session.username + " for " + std::to_string(recipients.size()) + " recipients");
     return json_response(result, 202);
 }
 } // namespace
 } // namespace postplus
 
 int main(int argc, char** argv) {
-    return postplus::service_main("web", argc, argv, [](const postplus::Config& config) {
+    return postplus::service_main(postplus::service_name, argc, argv, [](const postplus::Config& config) {
         postplus::Web web(config);
-        postplus::serve_http(config, "web", [&web](const auto& request) { return web.handle(request); }, false,
+        postplus::serve_http(config, postplus::service_name, [&web](const auto& request) { return web.handle(request); }, false,
                             [&web](const auto& request) { return web.preflight(request); });
     });
 }
