@@ -11,7 +11,7 @@ import subprocess
 from integration import PASSWORD, ROOT, Suite
 
 
-DEFAULT = dict(min_length=12, require_uppercase=False, require_lowercase=False,
+DEFAULT = dict(min_length=8, require_uppercase=False, require_lowercase=False,
                require_digit=False, require_symbol=False)
 POLICY_ROUTE = "/api/admin/password-policy"
 
@@ -51,9 +51,9 @@ def run(s):
     assert s.http("admin", "POST", POLICY_ROUTE, dict(policy=DEFAULT, revision=1), {"Cookie": a["Cookie"]})[0] == 403
     assert s.http("admin", "PUT", POLICY_ROUTE, {}, a)[0] == 405
     for op in ("create", "change_password"):
-        violation(s.rpc("auth", op=op, username=user, password="short-pass"), "min_length")
+        violation(s.rpc("auth", op=op, username=user, password="short"), "min_length")
     for route in ("/api/admin/users", "/api/admin/password"):
-        status, _, result = s.http("admin", "POST", route, dict(username=user, password="short-pass"), a)
+        status, _, result = s.http("admin", "POST", route, dict(username=user, password="short"), a)
         assert status == 400, result
         violation(result, "min_length")
 
@@ -69,13 +69,13 @@ def run(s):
         assert result["revision"] == before["revision"] + (before["policy"] != policy)
         return result
 
-    relaxed = dict(DEFAULT, min_length=8)
-    saved = save(relaxed)
+    relaxed = dict(DEFAULT)
+    saved = save(dict(DEFAULT, require_lowercase=True))
     assert saved["revision"] == 2
-    assert save(relaxed) == saved
+    assert save(saved["policy"]) == saved
     status, _, conflict = s.http("admin", "POST", POLICY_ROUTE, dict(policy=DEFAULT, revision=1), a)
     assert status == 409 and conflict["code"] == "password_policy_conflict" and conflict["revision"] == 2
-    assert conflict["policy"] == relaxed
+    assert conflict["policy"] == saved["policy"]
     assert not s.rpc("auth", op="password_policy_set", policy=DEFAULT, revision=1)["ok"]
     assert s.http("admin", "POST", "/api/admin/users", dict(username="eight@localhost", password="abcdefgh"), a)[0] == 201
     assert s.http("admin", "POST", "/api/admin/password", dict(username=user, password="ijklmnop"), a)[0] == 200
@@ -100,7 +100,7 @@ def run(s):
         assert current() == saved, "Invalid policy mutated saved state"
     bad_rpc = s.rpc("auth", op="password_policy_set", revision=2, policy=dict(relaxed, min_length=7))
     assert bad_rpc["code"] == "invalid_password_policy"
-    print("PASS password policy authorization, live lowering, strict fields and revision conflicts", flush=True)
+    print("PASS password policy authorization, live updates, strict fields and revision conflicts", flush=True)
 
     category_cases = (
         ("require_uppercase", "abcdefgh", "Abcdefgh"),
@@ -203,7 +203,7 @@ def migration_and_small_cap(binaries, directory):
         assert s.rpc("auth", op="create", username="cap@localhost", password="abcdefgh")["ok"]
         s.stop("auth")
         s.start("auth")
-        assert s.rpc("auth", op="password_policy_get")["revision"] == 2
+        assert s.rpc("auth", op="password_policy_get")["revision"] == 1
         assert s.rpc("auth", op="verify", username=username, password=password)["ok"]
         print("PASS v1 schema migration preserves hashes and small byte caps reject impossible policies", flush=True)
     finally:

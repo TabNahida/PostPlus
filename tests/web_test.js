@@ -123,7 +123,7 @@ for (const file of ["index.html", "admin.html", "setup.html"]) {
   }
   for (const match of html.matchAll(/data-i18n-(?:aria-label|title|placeholder)="([^"]+)"/g)) translated(match[1], file);
 }
-for (const file of ["app.js", "admin.js", "setup.js", "settings.js", "size.js", "acme.js", "preferences.js"]) {
+for (const file of ["app.js", "admin.js", "setup.js", "settings.js", "size.js", "acme.js", "preferences.js", "address.js"]) {
   const script = fs.readFileSync(path.join(root, "web", file), "utf8");
   new vm.Script(script, {filename:file});
   for (const match of script.matchAll(/\bt\("([^"]+)"/g)) translated(match[1], file);
@@ -292,6 +292,69 @@ async function checkCertificateControls() {
   assert.match(error.textContent,/Check the challenge port/,"Job failure handling uses the backend's code property");
   component.dispose();assert.equal(timers.size,0);
 }
-checkCertificateControls().then(()=>{
+checkCertificateControls().then(checkMaintenanceControls).then(()=>{
   console.log(`Web checks passed: language defaults, persistence, API errors, ${checkedLabels} translated labels, typed settings, exact size units, certificate controls, secret preservation, portal separation, and script syntax.`);
 }).catch(error=>{console.error(error);process.exitCode=1;});
+
+// Address inputs show the server domain and accept browser-autofilled full usernames.
+const addressSandbox={window:{},PostPlusI18n:fresh.i18n};
+vm.runInNewContext(fs.readFileSync(path.join(root,"web/address.js"),"utf8"),addressSandbox);
+const nameInput={value:"",addEventListener(){}},domainLabel={textContent:""};
+const mailbox=addressSandbox.window.PostPlusAddress.create(nameInput,domainLabel);
+assert.throws(()=>mailbox.address(),/Could not load the mail domain/);
+mailbox.setDomain("Example.COM");
+assert.equal(domainLabel.textContent,"@example.com");
+nameInput.value="Alice";assert.equal(mailbox.address(),"alice@example.com");
+nameInput.value=" Alice@Example.com ";assert.equal(mailbox.address(),"alice@example.com");
+assert.equal(nameInput.value,"Alice");
+nameInput.value="alice@other.example";assert.throws(()=>mailbox.address(),/displayed domain/);
+mailbox.setAddress("legacy@old.example");
+assert.equal(nameInput.value,"legacy");assert.equal(domainLabel.textContent,"@old.example");
+assert.equal(mailbox.address(),"legacy@old.example");assert.equal(nameInput.readOnly,true);
+mailbox.setAddress();assert.equal(domainLabel.textContent,"@example.com");assert.equal(nameInput.readOnly,false);
+assert.throws(()=>mailbox.setDomain("<img src=x>"),/unreadable response/);
+console.log("Mailbox address checks passed: fixed domain, pasted addresses, foreign-domain rejection, and legacy password-reset identity.");
+
+async function checkMaintenanceControls() {
+  const controls=new Map(),calls=[],timers=new Map();let timerId=0;
+  class AdminControl extends Control {
+    constructor(tag="div"){super(tag);this.classList={toggle(){},add(){},remove(){}};this.hidden=false;}
+    querySelector(){return id("submit-button");}
+    querySelectorAll(){return [];}
+    reset(){}
+    showModal(){this.open=true;}
+    close(){this.open=false;}
+    scrollIntoView(){}
+  }
+  function id(name){if(!controls.has(name))controls.set(name,new AdminControl());return controls.get(name);}
+  const sandbox={window:{},document:{getElementById:id,querySelectorAll:()=>[],addEventListener(){},title:""},
+    PostPlusI18n:fresh.i18n,PostPlusAddress:addressSandbox.window.PostPlusAddress,PostPlusPreferences:{closeNavigation(){}},
+    URL,URLSearchParams,TextEncoder,location:{origin:"http://localhost:8081"},
+    setTimeout(callback){const key=++timerId;timers.set(key,callback);return key;},clearTimeout:key=>timers.delete(key),
+    fetch:async route=>({ok:route==="/api/public/config",status:route==="/api/public/config"?200:401,
+      json:async()=>route==="/api/public/config"?{ok:true,domain:"localhost"}:{ok:false}})};
+  vm.createContext(sandbox);vm.runInContext(fs.readFileSync(path.join(root,"web/admin.js"),"utf8"),sandbox);
+  for(let index=0;index<12;index++)await Promise.resolve();
+  sandbox.request=async(route,options)=>{calls.push({route,options});return {ok:true,restart_required:true,admin_url:"http://localhost:8081/",web_url:"http://localhost:8080/"};};
+  vm.runInContext('api=request;state.user={username:"admin@localhost",admin:true,csrf:"test"};settingsData={revision:1};settingsEditor={read:()=>({domain:"example.com"}),clearSecrets(){},highlight(){}};',sandbox);
+  id("settings-form").hidden=false;
+  id("shutdown-form").callbacks.submit({preventDefault(){},currentTarget:id("shutdown-form")});
+  for(let index=0;index<12;index++)await Promise.resolve();
+  assert.deepEqual(calls.map(call=>call.route),["/api/admin/config","/api/admin/shutdown"],"Shutdown first commits changed settings");
+  assert.equal(id("shutdown-open").disabled,true);assert.match(id("shutdown-status").textContent,/Shutdown requested/);
+  calls.length=0;id("settings-form").hidden=false;
+  vm.runInContext('shutdownPending=false;settingsEditor.read=()=>{throw new Error("Invalid port");};',sandbox);
+  id("shutdown-form").callbacks.submit({preventDefault(){},currentTarget:id("shutdown-form")});
+  for(let index=0;index<12;index++)await Promise.resolve();
+  assert.equal(calls.length,0,"Invalid settings prevent the shutdown request");
+  assert.match(id("shutdown-error").textContent,/could not be saved/);
+  let state="running";
+  sandbox.request=async(route)=>{calls.push({route});return route==="/api/admin/backup"?{ok:true,job_id:"test-backup"}:{ok:true,state,download_url:"/api/admin/backup/download?job_id=test-backup"};};
+  vm.runInContext('api=request;',sandbox);
+  await id("backup-create").callbacks.click();
+  assert.equal(id("backup-create").disabled,true);assert.equal(timers.size,1);
+  state="complete";const [key,poll]=timers.entries().next().value;timers.delete(key);await poll();
+  assert.equal(id("backup-download").hidden,false);assert.equal(id("backup-create").disabled,false);
+  assert.equal(id("backup-download").href,"http://localhost:8081/api/admin/backup/download?job_id=test-backup");
+  assert.match(id("backup-status").textContent,/Backup ready/);
+}

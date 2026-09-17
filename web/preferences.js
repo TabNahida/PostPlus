@@ -30,7 +30,7 @@ window.PostPlusPreferences = (() => {
   }
   system.addEventListener("change",()=>{if(values.theme==="system")apply();});
   apply();
-  let closeNavigation=()=>{},authenticated=false,refreshAuthentication=()=>{};
+  let closeNavigation=()=>{};
   document.addEventListener("DOMContentLoaded",()=>{
     const t=(...args)=>PostPlusI18n.t(...args);
     const node=(tag,attributes={},text)=>{const item=document.createElement(tag);for(const [name,value] of Object.entries(attributes))item.setAttribute(name,value);if(text){item.dataset.i18n=text;item.textContent=t(text);}return item;};
@@ -61,18 +61,6 @@ window.PostPlusPreferences = (() => {
     }
     const footer=node("footer",{class:"dialog-footer"}),hint=node("span",{class:"muted",role:"status"},"Changes apply immediately."),done=node("button",{type:"button",class:"button primary"},"Done");
     done.addEventListener("click",()=>dialog.close());footer.append(hint,done);dialog.append(heading,body,footer);document.body.append(dialog);
-    const policyPanel=portal==="admin" ? document.getElementById("password-policy-panel") : null;
-    if(policyPanel)body.append(policyPanel);
-    refreshAuthentication=()=>{
-      title.dataset.i18n=portal==="admin" && authenticated ? "Settings" : "Display settings";
-      title.textContent=t(title.dataset.i18n);
-      if(policyPanel)policyPanel.hidden=!authenticated;
-      description.dataset.i18n=policyPanel && authenticated ? "Display preferences stay in this browser. The account password policy applies to all accounts." : "These preferences apply to this portal in this browser. Server settings are unchanged.";
-      description.textContent=t(description.dataset.i18n);
-      hint.dataset.i18n=policyPanel && authenticated ? "Display changes apply immediately. Save password policy separately." : "Changes apply immediately.";
-      hint.textContent=t(hint.dataset.i18n);
-    };
-    refreshAuthentication();
     function sync(){for(const [name,control] of Object.entries(controls))if(name==="language")control.value=PostPlusI18n.language;else if(name==="spellcheck")control.checked=values.spellcheck;else control.value=values[name];}
     document.querySelectorAll("[data-open-preferences]").forEach(button=>button.addEventListener("click",()=>{closeNavigation();sync();dialog.showModal();}));
     document.addEventListener("postplus:language",()=>{PostPlusI18n.apply(dialog);sync();});
@@ -111,5 +99,5 @@ window.PostPlusPreferences = (() => {
     });
     apply();sync();
   });
-  return {key,update,get values(){return {...values};},setAuthenticated(value){authenticated=Boolean(value);refreshAuthentication();},closeNavigation(){closeNavigation();}};
+  return {key,update,get values(){return {...values};},closeNavigation(){closeNavigation();}};
 })();

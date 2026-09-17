@@ -2,6 +2,7 @@
 #include "postplus/mime.hpp"
 #include "postplus/settings.hpp"
 #include "postplus/acme.hpp"
+#include "postplus/maintenance.hpp"
 
 #include <algorithm>
 #include <charconv>
@@ -184,11 +185,13 @@ public:
         load_static(root, "/", admin_only ? "admin.html" : "index.html", "text/html; charset=utf-8");
         if (admin_only) {
             acme_ = std::make_unique<AcmeManager>(AcmeOptions{config_.source.parent_path()/"certificates"});
+            backups_ = std::make_unique<BackupManager>(config_);
             load_static(root, "/admin.js", "admin.js", "application/javascript; charset=utf-8");
             load_static(root, "/settings.js", "settings.js", "application/javascript; charset=utf-8");
             load_static(root, "/acme.js", "acme.js", "application/javascript; charset=utf-8");
         } else load_static(root, "/app.js", "app.js", "application/javascript; charset=utf-8");
         load_static(root, "/size.js", "size.js", "application/javascript; charset=utf-8");
+        load_static(root, "/address.js", "address.js", "application/javascript; charset=utf-8");
         load_static(root, "/preferences.js", "preferences.js", "application/javascript; charset=utf-8");
         load_static(root, "/preferences.css", "preferences.css", "text/css; charset=utf-8");
         load_static(root, "/icons.svg", "icons.svg", "image/svg+xml");
@@ -209,6 +212,7 @@ public:
                                       {"field", error.field}, {"error", error.what()}}, error.status);
         }
         catch (const AcmeError& error) { response = json_response({{"ok",false},{"code",error.code},{"error",error.what()}},error.status); }
+        catch (const MaintenanceError& error) { response = json_response({{"ok",false},{"error",error.what()}},error.status); }
         catch (const Json::exception&) { response = json_response({{"ok", false}, {"error", "Invalid request data."}}, 400); }
         catch (const std::exception&) { response = json_response({{"ok", false}, {"error", "A required service is unavailable. Please retry."}}, 503); }
         response.headers["Cache-Control"] = "no-store";
@@ -224,7 +228,8 @@ public:
         if (forbidden_portal_route(request))
             return json_response({{"ok",false},{"error","API route not found."}},404);
         // Verify session and CSRF before core allocates a potentially large compose body.
-        if (!request.path.starts_with("/api/") || request.path == "/api/login") return std::nullopt;
+        if (!request.path.starts_with("/api/") || request.path == "/api/login" ||
+            (request.method == "GET" && request.path == "/api/public/config")) return std::nullopt;
         try {
             const auto session = authenticate(request);
             if (request.method != "GET") require_csrf(request,session);
@@ -239,6 +244,9 @@ public:
 private:
     Config config_;
     std::unique_ptr<AcmeManager> acme_;
+    std::unique_ptr<BackupManager> backups_;
+    std::mutex maintenance_mutex_;
+    bool shutting_down_ = false;
     std::mutex mutex_;
     std::map<std::string, WebSession> sessions_;
     struct Rate { Clock::time_point expires; unsigned count = 0; };
@@ -351,6 +359,8 @@ private:
             throw ApiError(404, "API route not found.");
         if (request.method == "GET" && request.path == "/health")
             return json_response({{"ok", true}, {"service", service_name}});
+        if (request.method == "GET" && request.path == "/api/public/config")
+            return json_response({{"ok", true}, {"domain", config_.text("domain", "localhost")}});
         if (request.method == "GET") {
             auto path = request.path == (admin_only ? "/admin.html" : "/index.html") ||
                         (admin_only && request.path == "/admin") ? "/" : request.path;
@@ -421,6 +431,32 @@ private:
         if (request.path.starts_with("/api/admin/")) {
             if (!admin_only) throw ApiError(404,"API route not found.");
             if (!session.admin) throw ApiError(403, "Administrator access is required.");
+            if (request.method == "POST" && path == "/api/admin/backup") {
+                (void)request_json(request);
+                std::lock_guard lock(maintenance_mutex_);
+                if (shutting_down_) throw ApiError(409, "The server is shutting down.");
+                const auto result = backups_->start();
+                log(service_name, "administrator " + session.username + " requested a data backup");
+                return json_response(result, 202);
+            }
+            if (request.method == "GET" && (path == "/api/admin/backup" || path == "/api/admin/backup/download")) {
+                if (path == "/api/admin/backup/download") {
+                    auto response = backups_->download(parameter("job_id"));
+                    log(service_name, "administrator " + session.username + " downloaded a data backup");
+                    return response;
+                }
+                return json_response(backups_->status(parameter("job_id")));
+            }
+            if (request.method == "POST" && path == "/api/admin/shutdown") {
+                (void)request_json(request);
+                std::lock_guard lock(maintenance_mutex_);
+                if (shutting_down_) throw ApiError(409, "The server is already shutting down.");
+                if (backups_->busy()) throw ApiError(409, "Wait for the data backup to finish before shutting down.");
+                request_supervisor_shutdown(config_);
+                shutting_down_ = true;
+                log(service_name, "administrator " + session.username + " requested server shutdown");
+                return json_response({{"ok", true}, {"state", "shutting_down"}}, 202);
+            }
             if (path == "/api/admin/password-policy") {
                 Json command = {{"op", "password_policy_get"}};
                 if (request.method == "POST") {
@@ -489,7 +525,11 @@ private:
             }
             if (request.path == "/api/admin/config") {
                 if (request.method == "GET") return json_response(settings_view(config_));
-                if (request.method == "POST") return json_response(save_settings(config_, request_json(request)));
+                if (request.method == "POST") {
+                    std::lock_guard lock(maintenance_mutex_);
+                    if (shutting_down_ || backups_->busy()) throw ApiError(409, "Wait for the backup or shutdown operation to finish before saving configuration.");
+                    return json_response(save_settings(config_, request_json(request)));
+                }
             }
             if (request.method == "GET" && (request.path == "/api/admin/logs" || request.path.starts_with("/api/admin/logs?")))
                 return json_response(log_query(config_,request.path));

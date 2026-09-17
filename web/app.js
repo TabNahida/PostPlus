@@ -5,6 +5,8 @@ const $ = (id) => document.getElementById(id);
 const state = { user: null, messages: [], selected: null, previews: new Map(), view: "INBOX", loading: false, readVersion: 0, listVersion: 0, folders: [], usage: null, draftId: null, composeDirty: false, composeSaving: false };
 const folderLabels = {INBOX:"Inbox",Sent:"Sent",Drafts:"Drafts",Trash:"Trash",Junk:"Junk",Archive:"Archive"};
 let noticeTimer;
+const loginAddress=PostPlusAddress.create($("login-email"),$("login-domain"));
+const mailDomainReady=api("/api/public/config",{quiet:true}).then(data=>{loginAddress.setDomain(data.domain);return true;}).catch(()=>false);
 
 function showNotice(message, error = false) {
   clearTimeout(noticeTimer);
@@ -99,7 +101,8 @@ $("login-form").addEventListener("submit", (event) => {
   busy(event.currentTarget, async () => {
     formError("login-error");
     try {
-      const user = await api("/api/login", { method: "POST", body: { username: $("login-email").value.trim(), password: $("login-password").value } });
+      await mailDomainReady;
+      const user = await api("/api/login", { method: "POST", body: { username: loginAddress.address(), password: $("login-password").value } });
       await signedIn(user);
     } catch (error) { formError("login-error", error.message); }
   });

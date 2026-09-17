@@ -149,7 +149,7 @@ public:
                     "require_digit INTEGER NOT NULL CHECK(require_digit IN (0,1)),"
                     "require_symbol INTEGER NOT NULL CHECK(require_symbol IN (0,1)),"
                     "revision INTEGER NOT NULL CHECK(revision BETWEEN 1 AND 9007199254740991));"
-                    "INSERT OR IGNORE INTO password_policy VALUES(1,12,0,0,0,0,1); PRAGMA user_version=2;");
+                    "INSERT OR IGNORE INTO password_policy VALUES(1,8,0,0,0,0,1); PRAGMA user_version=2;");
                 migration.commit();
             }
 #ifndef _WIN32

@@ -1,0 +1,105 @@
+name: Release binaries
+
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  verify:
+    uses: ./.github/workflows/ci.yml
+
+  package:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-24.04
+            platform: linux
+            arch: x86_64
+            format: targz
+            configure: ''
+          - os: windows-latest
+            platform: windows
+            arch: x64
+            format: zip
+            configure: '--runtimes=MT'
+          - os: macos-15
+            platform: macosx
+            arch: arm64
+            format: targz
+            configure: ''
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+      - uses: xmake-io/github-action-setup-xmake@v1
+        with:
+          xmake-version: '3.0.9'
+          actions-cache-folder: '.xmake-cache'
+          actions-cache-key: 'package-${{ matrix.platform }}-${{ matrix.arch }}-static-v1'
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.13'
+      - name: Check tag and project version
+        run: python scripts/release_manifest.py version
+      - name: Configure release
+        run: xmake f -p ${{ matrix.platform }} -a ${{ matrix.arch }} -m release ${{ matrix.configure }} -y
+      - name: Build all services
+        run: xmake build -y
+      - name: Unit tests with the packaged runtime
+        run: xmake test -v
+      - name: Package binaries, assets and documentation
+        run: xmake pack -f ${{ matrix.format }} --autobuild=n -o build/packages postplus
+      - name: Verify and run the extracted package
+        run: python tests/release_package_test.py --packages build/packages --platform ${{ matrix.platform }} --arch ${{ matrix.arch }}
+      - name: Upload verified release archive
+        uses: actions/upload-artifact@v4
+        with:
+          name: package-${{ matrix.platform }}-${{ matrix.arch }}
+          path: build/packages/postplus-*.*
+          if-no-files-found: error
+          retention-days: 14
+      - name: Upload diagnostic logs
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: package-logs-${{ matrix.platform }}-${{ matrix.arch }}
+          path: build/test-runs/
+          retention-days: 7
+
+  publish:
+    # Manual branch runs validate packages without creating a public release.
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: [verify, package]
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.13'
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: package-*
+          merge-multiple: true
+          path: release-assets
+      - name: Verify the complete release and generate checksums
+        run: python scripts/release_manifest.py checksums --packages release-assets
+      - name: Publish the verified release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          version="${GITHUB_REF_NAME#v}"
+          gh release create "$GITHUB_REF_NAME" release-assets/* \
+            --verify-tag --title "PostPlus $version" \
+            --notes-file "docs/releases/$version.md"

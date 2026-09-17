@@ -4,6 +4,7 @@
 #include <chrono>
 #include <filesystem>
 #include <functional>
+#include <fstream>
 #include <memory>
 #include <map>
 #include <optional>
@@ -72,6 +73,10 @@ struct HttpResponse {
     std::string content_type = "application/json; charset=utf-8";
     std::string body;
     std::map<std::string, std::string> headers;
+    // An already-open private file keeps downloads bounded in memory and pins
+    // the snapshot while a later backup replaces its on-disk name.
+    std::shared_ptr<std::ifstream> file;
+    std::uint64_t file_size = 0;
 };
 HttpResponse json_response(const Json& value, int status = 200);
 using HttpHandler = std::function<HttpResponse(const HttpRequest&)>;

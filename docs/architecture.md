@@ -71,7 +71,7 @@ An entered relay password is stored in a new private file; blank input preserves
 
 Both browser services validate the session's credential version and administrator role through authentication RPC on authenticated requests. Password changes, including CLI changes, invalidate existing sessions on their next request across both processes. This check avoids repeating password hashing for every request, but means authenticated browser operations require the auth service to remain available.
 
-Account password policy is a live authentication-database setting, independent of the server configuration file. Administrators can choose a minimum of 8–128 Unicode code points and optional ASCII character categories. The default remains 12 with no mandatory categories. A transactional revision prevents lost edits, and creation/reset operations recheck the policy in the write transaction after hashing. Policy changes do not restart services or invalidate existing credentials or sessions; the new rules apply when a password is created or reset. The version-2 authentication schema migration adds this policy without rewriting user records.
+Account password policy is a live authentication-database setting, independent of the server configuration file. Administrators can choose a minimum of 8–128 Unicode code points and optional ASCII character categories. The default is 8 with no mandatory categories. Existing saved policies are preserved when upgrading. A transactional revision prevents lost edits, and creation/reset operations recheck the policy in the write transaction after hashing. Policy changes do not restart services or invalidate existing credentials or sessions; the new rules apply when a password is created or reset. The version-2 authentication schema migration adds this policy without rewriting user records.
 
 Data, web-root, and log-directory paths are displayed read-only after installation. Service-token configuration is not exposed for Web editing. Offline data migration must preserve accounts, mailboxes, queue state, and permissions together. Changing a mail domain does not rename accounts or migrate their mail. Detailed field behavior is in the [configuration reference](configuration.md).
 
@@ -121,10 +121,12 @@ Development priorities are:
 2. Extend protocol fuzzing, TLS/state-machine tests, rate limits, session revocation, and service-specific authorization.
 3. Measure authentication latency, SMTP enqueue latency, queue age, FETCH throughput, memory, threads, and disk synchronization under realistic mailbox sizes and active-session counts.
 4. Use those measurements to guide coroutine sessions, bounded hash/database execution, content-storage separation, and leased parallel delivery.
-5. Add backup/recovery tooling, retention policy, quarantine review, service packaging, and internet-mail features as required.
+5. Extend recovery validation, retention policy, quarantine review, and internet-mail features as required.
 
 ## Backup and recovery
 
-For a consistent offline backup, stop the entire service group and copy the data directory, configuration, service-token file, and TLS credentials to protected storage. Copying only live `.sqlite3` files can omit WAL contents; a future online backup facility should use SQLite's backup API.
+Administration provides an online, downloadable backup. A native worker briefly holds SQLite writer locks on both databases, opens fixed read transactions, releases the write locks, and uses SQLite's backup API to write independent snapshots. The snapshot pair, portable configuration, service/relay secrets and configured TLS files are streamed into a private tar archive. Backup and download memory use is bounded. Copying only live `.sqlite3` files by hand can omit WAL contents and is not a supported online backup method.
 
 After restoring, validate authentication, UIDs, and queue state on isolated ports before accepting mail. Treat authentication and storage databases as one installation snapshot rather than independently rolling one back.
+
+The native supervisor shuts down in dependency stages: public listeners, delivery worker, then supporting services and databases. An authenticated administration request can ask the supervisor to stop through a private per-launch control directory. A web save-and-shutdown operation saves Server settings before requesting this stop; applying saved settings still requires a manual launch. See the [backup and shutdown guide](maintenance.md) for archive contents, private restoration, queue retry caveats and shutdown deadlines.

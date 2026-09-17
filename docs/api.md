@@ -6,6 +6,8 @@ The mailbox JSON API shares an origin with Webmail, normally port 8080. The admi
 
 ## Sessions
 
+`GET /api/public/config` is available without a session on both web services. It returns only `{"ok":true,"domain":"example.com"}` for the fixed-domain address inputs. API login and account creation still accept complete addresses.
+
 `POST /api/login` accepts:
 
 ```json
@@ -56,8 +58,14 @@ These routes require an administrator session. Ordinary users receive 403.
 | GET `/api/admin/logs` | Recent structured events, filtered as described below. |
 | GET `/api/admin/config` | Sanitized settings, editable-field schema, file revision, saved-secret status, and interface URLs. |
 | POST `/api/admin/config` | `revision` and `values`; validates/saves settings and reports that a manual restart is required. |
+| POST `/api/admin/backup` | `{}`; starts an asynchronous backup and returns 202 with `job_id` and `state: "running"`. |
+| GET `/api/admin/backup?job_id=...` | `state` is `running`, `complete`, or `failed`. Completed jobs include `download_url`; failed jobs include `error`. |
+| GET `/api/admin/backup/download?job_id=...` | Streams the current completed job as an attachment with content type `application/x-tar`. |
+| POST `/api/admin/shutdown` | `{}`; asks the native supervisor to stop. Returns 202 with `state: "shutting_down"`; it does not save browser form values. |
 
 Folder names are `INBOX`, `Sent`, `Trash`, `Drafts`, `Junk`, and `Archive`. URL-encode query values, especially a username containing `+`. Administrator inspection is read-only; mailbox mutation routes remain exclusive to Webmail and its current user.
+
+Backup and shutdown mutations require the administrator session and CSRF token. The backup download also requires an administrator session; its random job ID is not an authentication credential. A new backup replaces the previous completed job, returns 409 while another backup/download is active, and is discarded on a normal administration-service shutdown. Configuration saving and web shutdown return 409 during backup. Shutdown returns 503 if administration was started without the native supervisor. The web UI saves and validates its Server settings form through `/api/admin/config` before calling `/api/admin/shutdown`. See [maintenance.md](maintenance.md) for backup contents and restoration.
 
 ### Certificate requests
 
@@ -82,7 +90,7 @@ Both browser services check each authenticated request against the current crede
 {
   "ok": true,
   "policy": {
-    "min_length": 12,
+    "min_length": 8,
     "require_uppercase": false,
     "require_lowercase": false,
     "require_digit": false,
@@ -128,7 +136,7 @@ Account creation/reset failures caused by this policy return HTTP 400, including
 {"ok":false,"code":"password_policy_violation","error":"Password does not meet the account password policy.","violations":["min_length","require_digit"],"policy":{"min_length":12,"require_uppercase":false,"require_lowercase":false,"require_digit":true,"require_symbol":false},"revision":2,"max_password_bytes":1024,"length_unit":"unicode_code_points","restart_required":false}
 ```
 
-Violation names are `min_length`, `max_password_bytes`, `require_uppercase`, `require_lowercase`, `require_digit`, `require_symbol`, and `invalid_utf8` (malformed JSON encoding is rejected before policy validation). Password values are never echoed or logged. Fresh first-run setup uses the default minimum of 12 Unicode code points.
+Violation names are `min_length`, `max_password_bytes`, `require_uppercase`, `require_lowercase`, `require_digit`, `require_symbol`, and `invalid_utf8` (malformed JSON encoding is rejected before policy validation). Password values are never echoed or logged. Fresh first-run setup uses the default minimum of 8 Unicode code points.
 
 ### Server settings
 
@@ -226,7 +234,7 @@ POST fields:
 | Field | Meaning |
 | --- | --- |
 | `domain` | A valid ASCII mail domain. |
-| `admin_username`, `admin_password` | Administrator email in that domain and password of at least 12 Unicode code points (at most 1024 UTF-8 bytes). |
+| `admin_username`, `admin_password` | Administrator email in that domain and password of at least 8 Unicode code points (at most 1024 UTF-8 bytes). |
 | `bind` | IPv4 or IPv6 listener address; defaults to loopback. |
 | `admin_bind` | Separate administration listener address; defaults to loopback. |
 | `data_dir` | Mail data directory; relative paths resolve beside the configuration. |

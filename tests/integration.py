@@ -317,6 +317,8 @@ def main():
                         "--bin-dir", str(binaries)], check=True)
         subprocess.run([os.sys.executable, str(ROOT / "tests/password_policy_integration.py"),
                         "--bin-dir", str(binaries)], check=True)
+        subprocess.run([os.sys.executable, str(ROOT / "tests/maintenance_integration.py"),
+                        "--bin-dir", str(binaries)], check=True)
         subprocess.run([os.sys.executable, str(ROOT / "tests/tls_transfer_integration.py"),
                         "--bin-dir", str(binaries)], check=True)
         subprocess.run([os.sys.executable, str(ROOT / "tests/protocol_security.py"),

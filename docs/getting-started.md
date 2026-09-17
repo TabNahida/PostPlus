@@ -79,7 +79,7 @@ For a first trial on one computer, use the values below. Expand advanced section
 | Form area | Suggested local trial | What it means |
 | --- | --- | --- |
 | Server identity | Domain `localhost` | Addresses will look like `alice@localhost`; this domain cannot receive internet mail. |
-| First administrator | `admin@localhost` and a new password | Use a password of at least 12 characters. Save it in a password manager. |
+| First administrator | `admin@localhost` and a new password | Use a password of at least 8 characters. Save it in a password manager. |
 | Data directory | Keep the suggested directory | Stores accounts, messages, queues, and default logs. Choose a persistent, writable disk location. |
 | Connections and security | Loopback addresses; local development enabled | Allows a local trial without certificates. Clients on other computers cannot use this mode for plaintext login. |
 | Administration port | `8081` | Server management page; separate from Webmail. |
@@ -97,12 +97,12 @@ The generated internal service token lives in a private file referenced by `serv
 
 1. Open **Administration** at `http://127.0.0.1:8081/` for the local trial.
 2. Sign in with the permanent administrator address and password created in setup.
-3. Open **User accounts**. Create `alice@localhost` and `bob@localhost`, each with a password that meets the displayed rules (at least 12 characters by default). Leave administrator privileges disabled for regular users.
+3. Open **User accounts**. Enter `alice` and `bob` to create `alice@localhost` and `bob@localhost`, each with a password that meets the displayed rules (at least 8 characters by default). Leave administrator privileges disabled for regular users.
 4. Open **Webmail** at `http://127.0.0.1:8080/`. Sign in as Alice.
 5. Compose a message to `bob@localhost`, add a subject and text, and send it.
 6. Sign out, sign in as Bob, and refresh the inbox. Delivery is queued, so a message can take a short time to appear.
 
-Webmail has no registration page. Every account must be created by an administrator. Usernames are full email addresses, not just the part before `@`. The administrator can also use Webmail by signing in separately.
+Webmail has no registration page. Every account must be created by an administrator. The account form and Webmail login show the fixed `@domain`, so enter only the name before it. Pasting a complete address on the same domain also works. Mail clients, the administrator login, and API calls use the full email address. The administrator can also use Webmail by signing in separately.
 
 Use **Delivery queue** to inspect delayed or quarantined mail and **Service logs** to see errors. Sent copies appear when Webmail submits mail successfully; final delivery can happen later.
 
@@ -116,7 +116,7 @@ Open **Settings** near your account at the bottom of the navigation panel. Langu
 
 On a phone, use the navigation button to open folders or administration pages. Selecting a destination closes the navigation panel. Open a message to read it, then use the back button to return to the list. Wide administration tables scroll within their section.
 
-In administration, **Settings** also contains the account password policy. Set the minimum length and select any required uppercase letters, lowercase letters, digits, or symbols, then save. The default minimum is 12 characters, with no mandatory character categories. The policy is stored on the server and applies to future account creation and password resets, including CLI operations; existing passwords and sessions remain valid. **Server settings** is the separate page for ports, TLS, delivery and other operating settings.
+In administration, open **User accounts → Account password policy**. Set the minimum length and select any required uppercase letters, lowercase letters, digits, or symbols, then save. The default minimum is 8 characters, with no mandatory character categories. The policy is stored on the server and applies to future account creation and password resets, including CLI operations; existing passwords and sessions remain valid. **Server settings** is the separate page for ports, TLS, delivery and other operating settings.
 
 ### Organize mail and resume drafts
 

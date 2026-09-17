@@ -3,6 +3,7 @@
 #include <postplus/setup.hpp>
 #include <postplus/settings.hpp>
 #include <postplus/data_lock.hpp>
+#include <postplus/maintenance.hpp>
 
 #include <algorithm>
 #include <charconv>
@@ -299,7 +300,10 @@ int run(int argc, char** argv) {
                        options.setup_bind,options.setup_host,options.setup_certificate,options.setup_key},
                        [&](const Config& staged, const std::string& username, const std::string& password) {
                            provision_admin(binaries, staged, username, password);
-                       })) return 0;
+                       })) {
+            std::cout << "Setup stopped; PostPlus services were not started.\n" << std::flush;
+            return 0;
+        }
     } else if (status_error) {
         throw std::runtime_error("cannot inspect configuration file: " + options.config.string());
     }
@@ -308,7 +312,10 @@ int run(int argc, char** argv) {
     // supervisor handlers before any long-lived children are started.
     std::signal(SIGINT, stop_signal);
     std::signal(SIGTERM, stop_signal);
-    if (stop_requested()) return 0;
+    if (stop_requested()) {
+        std::cout << "Shutdown requested; PostPlus services were not started.\n" << std::flush;
+        return 0;
+    }
     auto config = Config::from_file(options.config);
     const std::filesystem::path data_directory(config.text("data_dir"));
     require_plain_path(data_directory);
@@ -326,24 +333,38 @@ int run(int argc, char** argv) {
         port_available(config, service);
     }
     ProcessGroup children;
+    SupervisorControl control(config);
     log("postplus", "starting service group");
     for (const auto& service : services) {
         if (stop_requested()) break;
         children.start(service, service_executable(binaries, service), {"--config", path_argument(config.source)});
-        wait_ready(children, config, service);
+        try { wait_ready(children, config, service); }
+        catch (const std::exception&) { if (stop_requested()) break; throw; }
         log("postplus", service + " is ready");
     }
     if (!stop_requested()) log("postplus", "all services are ready");
     std::cout << "Administration: " << settings_url(config,"admin") << '\n'
               << "Webmail:        " << settings_url(config,"web") << '\n' << std::flush;
+    bool admin_shutdown = false;
     while (!stop_requested()) {
         ensure_alive(children);
+        if (control.shutdown_requested()) { admin_shutdown = true; break; }
         std::this_thread::sleep_for(std::chrono::milliseconds(100));
     }
-    log("postplus", "stopping service group");
-    children.stop();
-    log("postplus", "service group stopped");
-    return 0;
+    auto progress = [&](const std::string& message) {
+        log("postplus", message);
+        if (config.text("log_level", "info") != "info" && config.text("log_level", "info") != "debug")
+            std::cout << "[shutdown] " << message << '\n' << std::flush;
+    };
+    progress(admin_shutdown ? "administrator requested shutdown; saved configuration is retained" : "shutdown signal received; stopping service group");
+    progress("1/3 closing mail and web listeners; finishing active requests");
+    bool graceful = children.stop_services({"smtp", "pop3", "imap", "web", "admin"}, std::chrono::seconds(35), progress);
+    progress("2/3 stopping delivery; pending queue entries remain saved for the next start");
+    graceful = children.stop_services({"delivery"}, std::chrono::seconds(35), progress) && graceful;
+    progress("3/3 stopping supporting services and closing the mail and account databases");
+    graceful = children.stop_services({"filter", "transfer", "storage", "auth"}, std::chrono::seconds(35), progress) && graceful;
+    progress(graceful ? "service group stopped; data saved; it is safe to close this terminal" : "service group stopped with errors; review the logs before restarting");
+    return graceful ? 0 : 1;
 }
 }
 }

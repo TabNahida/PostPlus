@@ -7,9 +7,12 @@ let settingsData = null;
 let settingsEditor = null;
 let settingsLoading = false;
 let settingsSaving = false;
+let backupVersion=0,backupTimer=null,shutdownPending=false;
 let acmeControl=null;
 let passwordPolicyData=null, passwordPolicyVersion=0, userDialogVersion=0, policySaving=false;
 let noticeTimer;
+const accountAddress=PostPlusAddress.create($("new-email"),$("new-email-domain"));
+const mailDomainReady=api("/api/public/config",{quiet:true}).then(data=>{accountAddress.setDomain(data.domain);return true;}).catch(()=>false);
 
 function showNotice(message, error = false) {
   clearTimeout(noticeTimer);
@@ -62,9 +65,13 @@ function element(tag, className, text) {
 
 function signedOut() {
   state.user = null;
+  backupVersion++;clearTimeout(backupTimer);backupTimer=null;shutdownPending=false;
+  $("backup-create").disabled=false;$("backup-download").hidden=true;
+  maintenanceStatus("backup-status","");maintenanceStatus("shutdown-status","");
+  formError("backup-error");formError("shutdown-error");$("settings-edit").disabled=false;
+  $("shutdown-open").disabled=false;
   passwordPolicyData=null;passwordPolicyVersion++;userDialogVersion++;
   PostPlusPreferences.closeNavigation();
-  PostPlusPreferences.setAuthenticated(false);
   document.querySelectorAll("dialog[open]").forEach(dialog => dialog.close());
   $("login-screen").hidden = false;
   $("app-screen").hidden = true;
@@ -84,7 +91,6 @@ function signedOut() {
 async function signedIn(user) {
   if (!user.admin) throw new Error(t("Administrator access is required."));
   state.user = user;
-  PostPlusPreferences.setAuthenticated(true);
   $("login-screen").hidden = true;
   $("app-screen").hidden = false;
   $("settings-success").hidden = true;
@@ -205,15 +211,15 @@ async function openUserDialog(username = "") {
   $("user-form").reset();
   formError("user-error");
   $("user-dialog-title").textContent = username ? t("Reset password") : t("Create user");
-  $("new-email").value = username;
-  $("new-email").readOnly = Boolean(username);
+  accountAddress.setAddress(username);
   $("admin-checkbox-label").hidden = Boolean(username);
   $("user-form").querySelector('[type="submit"]').disabled=true;
   $("account-password-hint").textContent=t("Loading password policy…");
   $("user-dialog").showModal();
-  const policy=await loadPasswordPolicy();
+  const [policy,domainReady]=await Promise.all([loadPasswordPolicy(),mailDomainReady]);
   if(version!==userDialogVersion || !$("user-dialog").open)return;
-  $("user-form").querySelector('[type="submit"]').disabled=!policy;
+  $("user-form").querySelector('[type="submit"]').disabled=!policy || !domainReady;
+  if(!domainReady)formError("user-error",t("Could not load the mail domain. Refresh this page and try again."));
   if(!policy)formError("user-error",t("Could not load the password policy. Close this window and try again."));
 }
 
@@ -222,11 +228,11 @@ $("user-form").addEventListener("submit", (event) => {
   event.preventDefault();
   busy(event.currentTarget, async () => {
     formError("user-error");
-    const username = $("new-email").value.trim().toLowerCase();
     const password = $("new-password").value;
     const changing = state.userMode === "password";
-    const currentAccount = username === state.user?.username;
     try {
+      const username=accountAddress.address();
+      const currentAccount = username === state.user?.username;
       if(!passwordPolicyData)throw new Error(t("Could not load the password policy. Close this window and try again."));
       const violations=checkPassword(password,passwordPolicyData);
       if(violations.length)throw new Error(passwordViolationMessage(violations,passwordPolicyData.policy,passwordPolicyData.max_password_bytes));
@@ -340,28 +346,71 @@ async function loadSettings() {
   finally { settingsLoading = false; $("settings-loading").hidden = true; }
 }
 $("settings-edit").addEventListener("click",loadSettings);
-$("settings-form").addEventListener("submit", async event => {
-  event.preventDefault();
-  if (settingsSaving || !settingsEditor) return;
+async function saveSettings() {
+  if(settingsSaving || !settingsEditor)return false;
+  if($("settings-form").hidden)return true;
   formError("settings-error");
   let values;
-  try { values = settingsEditor.read(); }
-  catch (error) { formError("settings-error",error.message); return; }
-  if (!Object.keys(values).length) { showNotice(t("No settings have changed.")); return; }
-  settingsSaving = true;
-  $("settings-save").disabled = true;
-  $("settings-form").setAttribute("aria-busy","true");
+  try { values=settingsEditor.read(); }
+  catch(error) {formError("settings-error",error.message);return false;}
+  if(!Object.keys(values).length)return true;
+  settingsSaving=true;$("settings-save").disabled=true;$("settings-form").setAttribute("aria-busy","true");
   try {
-    const data = await api("/api/admin/config",{method:"POST",body:{revision:settingsData.revision,values}});
-    $("settings-pending").hidden = !data.restart_required;
-    setLink("settings-open-admin",data.admin_url);
-    setLink("settings-open-web",data.web_url);
-    settingsEditor.clearSecrets();
-    $("settings-form").hidden = true;
-    $("settings-success").hidden = false;
-    $("settings-success").scrollIntoView({block:"center"});
-  } catch (error) { formError("settings-error",error.message); settingsEditor?.highlight(error.field); }
-  finally { settingsSaving = false; $("settings-save").disabled = false; $("settings-form").removeAttribute("aria-busy"); }
+    const data=await api("/api/admin/config",{method:"POST",body:{revision:settingsData.revision,values}});
+    $("settings-pending").hidden=!data.restart_required;
+    setLink("settings-open-admin",data.admin_url);setLink("settings-open-web",data.web_url);
+    settingsEditor.clearSecrets();$("settings-form").hidden=true;$("settings-success").hidden=false;
+    return true;
+  } catch(error) {formError("settings-error",error.message);settingsEditor?.highlight(error.field);return false;}
+  finally {settingsSaving=false;$("settings-save").disabled=false;$("settings-form").removeAttribute("aria-busy");}
+}
+$("settings-form").addEventListener("submit",async event=>{
+  event.preventDefault();
+  if(await saveSettings()) {
+    if($("settings-success").hidden)showNotice(t("No settings have changed."));
+    else $("settings-success").scrollIntoView({block:"center"});
+  }
+});
+function maintenanceStatus(id,key) {$(id).dataset.i18n=key;$(id).textContent=t(key);}
+$("backup-create").addEventListener("click",async()=>{
+  const version=++backupVersion;clearTimeout(backupTimer);formError("backup-error");
+  $("backup-create").disabled=true;$("backup-download").hidden=true;
+  maintenanceStatus("backup-status","Creating backup… This may take a few minutes.");
+  try {
+    const job=await api("/api/admin/backup",{method:"POST",body:{}});
+    if(version!==backupVersion)return;
+    async function poll() {
+      if(version!==backupVersion)return;
+      try {
+        const data=await api(`/api/admin/backup?job_id=${encodeURIComponent(job.job_id)}`);
+        if(version!==backupVersion)return;
+        if(data.state==="running"){backupTimer=setTimeout(poll,1500);return;}
+        if(data.state!=="complete")throw new Error(t("Backup failed. Check service logs and try again."));
+        const url=new URL(data.download_url,location.origin);
+        if(url.origin!==location.origin || url.pathname!=="/api/admin/backup/download")throw new Error(t("The server returned an unreadable response."));
+        $("backup-download").href=url.href;$("backup-download").hidden=false;$("backup-create").disabled=false;
+        maintenanceStatus("backup-status","Backup ready. Download it before the next backup or server restart.");
+      } catch(error){if(version===backupVersion){maintenanceStatus("backup-status","");formError("backup-error",error.message);$("backup-create").disabled=false;}}
+    }
+    await poll();
+  } catch(error){if(version===backupVersion){maintenanceStatus("backup-status","");formError("backup-error",error.message);$("backup-create").disabled=false;}}
+});
+$("shutdown-open").addEventListener("click",()=>{formError("shutdown-error");$("shutdown-dialog").showModal();});
+$("shutdown-form").addEventListener("submit",event=>{
+  event.preventDefault();if(shutdownPending)return;
+  busy(event.currentTarget,async()=>{
+    shutdownPending=true;formError("shutdown-error");
+    try {
+      if(!await saveSettings())throw new Error(t("Server settings could not be saved. Check the highlighted fields before shutting down."));
+      await api("/api/admin/shutdown",{method:"POST",body:{}});
+      backupVersion++;clearTimeout(backupTimer);
+      maintenanceStatus("backup-status","");
+      $("shutdown-dialog").close();$("shutdown-open").disabled=true;$("backup-create").disabled=true;$("backup-download").hidden=true;
+      maintenanceStatus("shutdown-status","Shutdown requested. Check the terminal for completion. Start PostPlus manually to resume service.");
+      $("settings-form").querySelectorAll("input,select,textarea,button").forEach(input=>{input.disabled=true;});
+      $("settings-edit").disabled=true;
+    } catch(error){shutdownPending=false;formError("shutdown-error",error.message);}
+  });
 });
 document.addEventListener("postplus:language", () => {
   document.title = state.user ? `${t(viewLabels[state.view])} · PostPlus` : t("PostPlus · Administration");
@@ -453,7 +502,7 @@ $("quota-form").addEventListener("submit",event=>{
 });
 
 function passwordViolationMessage(violations=[],policy={},maximum=1024) {
-  const labels={min_length:t("Use at least {count} characters.",{count:policy.min_length || 12}),max_password_bytes:t("The password must fit within {count} UTF-8 bytes.",{count:maximum}),require_uppercase:t("Include an uppercase letter (A–Z)."),require_lowercase:t("Include a lowercase letter (a–z)."),require_digit:t("Include a digit (0–9)."),require_symbol:t("Include a printable ASCII punctuation symbol."),invalid_utf8:t("Use valid Unicode characters.")};
+  const labels={min_length:t("Use at least {count} characters.",{count:policy.min_length || 8}),max_password_bytes:t("The password must fit within {count} UTF-8 bytes.",{count:maximum}),require_uppercase:t("Include an uppercase letter (A–Z)."),require_lowercase:t("Include a lowercase letter (a–z)."),require_digit:t("Include a digit (0–9)."),require_symbol:t("Include a printable ASCII punctuation symbol."),invalid_utf8:t("Use valid Unicode characters.")};
   return violations.map(value=>labels[value] || t("The password does not meet the account policy.")).join(" ") || t("The password does not meet the account policy.");
 }
 function checkPassword(password,data) {

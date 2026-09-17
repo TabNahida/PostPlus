@@ -132,17 +132,17 @@ One certificate/key pair is shared across the TLS listeners. Access the server t
 
 ### Account password policy
 
-Open **Administration → Settings → Account password policy** to change requirements for new passwords. This policy is independent of server connection settings: it is stored in `auth.sqlite3`, applies immediately, and does not require a restart or rewrite `postplus.json`. Back up the authentication database to preserve it. Existing passwords still work after the policy changes; existing sessions remain valid. Creating an account or resetting its password must satisfy the current policy through every entry point, including the CLI. Resetting an actual password still revokes that account's sessions.
+Open **Administration → User accounts → Account password policy** to change requirements for new passwords. This policy is independent of server connection settings: it is stored in `auth.sqlite3`, applies immediately, and does not require a restart or rewrite `postplus.json`. Back up the authentication database to preserve it. Existing passwords still work after the policy changes; existing sessions remain valid. Creating an account or resetting its password must satisfy the current policy through every entry point, including the CLI. Resetting an actual password still revokes that account's sessions.
 
 | Policy field | Default | Meaning |
 | --- | --- | --- |
-| `min_length` | `12` | Integer 8–128, at most the running `max_password_bytes`. Counts Unicode code points. |
+| `min_length` | `8` | Integer 8–128, at most the running `max_password_bytes`. Counts Unicode code points. |
 | `require_uppercase` | `false` | Require at least one ASCII uppercase letter, `A–Z`. |
 | `require_lowercase` | `false` | Require at least one ASCII lowercase letter, `a–z`. |
 | `require_digit` | `false` | Require at least one ASCII digit, `0–9`. |
 | `require_symbol` | `false` | Require at least one printable ASCII punctuation character, such as `!`, `@`, `-`, or `_`; spaces and emoji do not qualify. |
 
-Non-ASCII characters count toward the minimum but not toward the optional ASCII categories. A code point is not always a visible character: combining marks count separately, and one emoji outside the BMP counts as one code point. Passwords are never trimmed or normalized. The maximum remains a separate byte limit, so 12 Chinese characters typically occupy 36 UTF-8 bytes. Fresh setup requires at least 12 code points and accepts at most 1024 bytes for its first administrator.
+Non-ASCII characters count toward the minimum but not toward the optional ASCII categories. A code point is not always a visible character: combining marks count separately, and one emoji outside the BMP counts as one code point. Passwords are never trimmed or normalized. The maximum remains a separate byte limit, so 12 Chinese characters typically occupy 36 UTF-8 bytes. Fresh setup requires at least 8 code points and accepts at most 1024 bytes for its first administrator.
 
 Saving a policy cannot set its minimum above the running byte cap. Before lowering `max_password_bytes` in server settings or a configuration file, ensure it still accommodates the policy and existing passwords; lowering that cap affects which existing passwords can be submitted on login after restart. If a manually reduced cap is below the stored minimum, lower the live minimum or restore the cap before creating or resetting accounts. Browser API details and stale-edit conflict handling are in the [password policy API](api.md#account-password-policy).
 

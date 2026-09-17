@@ -199,7 +199,7 @@ Config validate_input(const Json& input, const Json& defaults, const SetupOption
         throw SetupError("invalid_admin", "The administrator email address must belong to the configured domain.");
     password = text_field(input, "admin_password", "", 1024);
     if (!password_violations(password, PasswordPolicy{}, 1024).empty())
-        throw SetupError("weak_password", "The administrator password must contain at least 12 Unicode characters.");
+        throw SetupError("weak_password", "The administrator password must contain at least 8 Unicode characters.");
     const auto bind = trim(text_field(input, "bind", "127.0.0.1", 128));
     std::error_code address_error;
     const auto address = asio::ip::make_address(bind, address_error);

@@ -7,10 +7,12 @@ set_warnings("allextra")
 set_rundir("$(projectdir)")
 add_rules("mode.debug", "mode.release")
 
-add_requires("asio 1.34.2")
-add_requires("nlohmann_json 3.12.0")
-add_requires("openssl3 3.6.1")
-add_requires("sqlite3 3.51.0+300")
+add_requires("asio 1.34.2", {system = false})
+add_requires("nlohmann_json 3.12.0", {system = false})
+-- Ship OpenSSL and SQLite in the executables; packages must not depend on a
+-- developer machine's package cache or an unpinned system installation.
+add_requires("openssl3 3.6.1", {system = false, configs = {shared = false}})
+add_requires("sqlite3 3.51.0+300", {system = false, configs = {shared = false}})
 
 target("postplus-core")
     set_kind("static")
@@ -18,7 +20,7 @@ target("postplus-core")
     add_headerfiles("include/(postplus/*.hpp)")
     add_includedirs("include", {public = true})
     add_defines("ASIO_STANDALONE", "ASIO_NO_DEPRECATED", {public = true})
-    add_packages("asio", "nlohmann_json", "openssl3", {public = true})
+    add_packages("asio", "nlohmann_json", "openssl3", "sqlite3", {public = true})
     if is_plat("windows") then
         add_defines("_WIN32_WINNT=0x0A00", "WIN32_LEAN_AND_MEAN", "NOMINMAX", "_CRT_SECURE_NO_WARNINGS", {public = true})
         add_syslinks("ws2_32", "mswsock", "advapi32", "crypt32", {public = true})
@@ -124,3 +126,25 @@ target("postplus-acme-tests")
     add_files("tests/acme_test.cpp")
     add_deps("postplus-core")
     add_tests("acme")
+
+includes("@builtin/xpack")
+xpack("postplus")
+    set_formats("zip", "targz")
+    set_title("PostPlus")
+    set_description("A mail server with browser-based setup, administration, and Webmail.")
+    set_homepage("https://github.com/TabNahida/PostPlus")
+    set_license("GPL-3.0-only")
+    set_licensefile("LICENSE")
+    set_basename("postplus-$(version)-$(plat)-$(arch)")
+    set_prefixdir("postplus-$(version)")
+    -- The supervisor discovers services and web assets beside its executable.
+    set_bindir(".")
+    set_libdir(".")
+    add_targets("postplus", "postplus-admin", "postplus-web", "postplus-auth",
+                "postplus-storage", "postplus-filter", "postplus-smtp",
+                "postplus-pop3", "postplus-imap", "postplus-delivery",
+                "postplus-transfer", "postplus-ctl", "postplus-clean-data")
+    add_installfiles("README.md", "LICENSE", "THIRD_PARTY_NOTICES.md")
+    -- Explicit allowlist: never include the local configuration or mail data.
+    add_installfiles("(web/**)", "(docs/**)", "(licenses/**)", "(config/postplus.example.json)")
+xpack_end()

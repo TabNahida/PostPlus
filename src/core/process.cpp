@@ -1,6 +1,7 @@
 #include <postplus/process.hpp>
 
 #include <cerrno>
+#include <algorithm>
 #include <cstdint>
 #include <cstdlib>
 #include <stdexcept>
@@ -230,9 +231,26 @@ std::optional<std::pair<std::string, int>> ProcessGroup::exited() {
 
 void ProcessGroup::stop(std::chrono::milliseconds grace) noexcept {
     if (!impl_ || impl_->children.empty()) return;
+    std::vector<std::string> names;
+    for (const auto& child : impl_->children) names.push_back(child->name);
+    (void)stop_services(names, grace, {});
+}
+
+bool ProcessGroup::stop_services(const std::vector<std::string>& names, std::chrono::milliseconds grace,
+                                 const std::function<void(const std::string&)>& progress) noexcept {
+    if (!impl_ || impl_->children.empty()) return true;
+    auto selected = [&](const Child& child) { return std::find(names.begin(), names.end(), child.name) != names.end(); };
+    auto report = [&](const std::string& message) { if (progress) { try { progress(message); } catch (...) {} } };
+    bool graceful = true;
     for (auto it = impl_->children.rbegin(); it != impl_->children.rend(); ++it) {
         auto& child = **it;
-        if (poll(child)) continue;
+        if (!selected(child)) continue;
+        if (poll(child)) {
+            report(child.name + " was already stopped (exit " + std::to_string(*child.code) + ")");
+            if (*child.code) graceful = false;
+            continue;
+        }
+        report("requesting " + child.name + " to stop");
 #ifdef _WIN32
         SetEvent(child.stop_event);
 #else
@@ -240,15 +258,30 @@ void ProcessGroup::stop(std::chrono::milliseconds grace) noexcept {
 #endif
     }
     const auto deadline = std::chrono::steady_clock::now() + grace;
+    auto next_notice = std::chrono::steady_clock::now() + std::chrono::seconds(5);
     for (;;) {
         bool all_done = true;
-        for (auto& child : impl_->children) if (!poll(*child)) all_done = false;
+        for (auto& child : impl_->children) {
+            if (!selected(*child)) continue;
+            const auto previous = child->code;
+            if (!poll(*child)) all_done = false;
+            else if (!previous) {
+                report(child->name + " stopped (exit " + std::to_string(*child->code) + ")");
+                if (*child->code) graceful = false;
+            }
+        }
         if (all_done || std::chrono::steady_clock::now() >= deadline) break;
+        if (std::chrono::steady_clock::now() >= next_notice) {
+            for (const auto& child : impl_->children) if (selected(*child) && !child->code) report("waiting for " + child->name + " to finish active work");
+            next_notice += std::chrono::seconds(5);
+        }
         std::this_thread::sleep_for(std::chrono::milliseconds(50));
     }
     for (auto& pointer : impl_->children) {
         auto& child = *pointer;
-        if (poll(child)) continue;
+        if (!selected(child) || poll(child)) continue;
+        graceful = false;
+        report(child.name + " exceeded the shutdown deadline; forcing termination");
 #ifdef _WIN32
         TerminateProcess(child.process, 1);
         WaitForSingleObject(child.process, INFINITE);
@@ -258,7 +291,8 @@ void ProcessGroup::stop(std::chrono::milliseconds grace) noexcept {
 #endif
         child.code = 1;
     }
-    impl_->children.clear();
+    std::erase_if(impl_->children, [&](const auto& child) { return selected(*child); });
+    return graceful;
 }
 
 bool process_stop_requested() noexcept {

@@ -206,3 +206,19 @@ dialog .icon-button { flex-shrink: 0; width: 44px; height: 44px; }
   .preferences-dialog .dialog-footer .muted { max-width: 65%; }
 }
 @media(prefers-reduced-motion:reduce) { .app-shell .sidebar { transition: none; } }
+
+/* The domain is server-owned and remains readable on narrow screens. */
+.mailbox-address { display:flex; align-items:stretch; min-width:0; border:1px solid var(--line); border-radius:7px; background:var(--surface,#fff); overflow:hidden; }
+.mailbox-address:focus-within { outline:3px solid var(--accent); outline-offset:3px; }
+.mailbox-address input { width:0; min-width:70px; flex:1 1 45%; border:0; border-radius:0; margin:0; background:transparent; }
+.mailbox-address input:focus-visible { outline:none; }
+.mailbox-domain { align-self:center; max-width:65%; padding:10px 12px 10px 6px; font-size:13px; color:var(--muted); overflow-wrap:anywhere; }
+.password-policy { margin-top:24px; }
+
+.server-operations { margin-top:28px; }
+.server-operations h2 { font-size:20px; margin:0 0 18px; }
+.server-operations h3 { font-size:15px; margin:0 0 9px; }
+.maintenance-grid { display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); gap:28px; }
+.maintenance-grid .button { margin:5px 5px 0 0; }
+.maintenance-grid .field-hint { margin-top:0; }
+@media(max-width:700px) { .maintenance-grid { grid-template-columns:1fr; gap:22px; } }

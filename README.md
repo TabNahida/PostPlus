@@ -33,6 +33,22 @@ PostPlus is under active development. The current release supports local mail wo
 
 ## Quick start
 
+Download a package for your platform from [Releases](https://github.com/TabNahida/PostPlus/releases), extract it, and open a terminal in the extracted directory:
+
+```sh
+# Linux or macOS
+./postplus
+```
+
+```powershell
+# Windows PowerShell
+.\postplus.exe
+```
+
+Keep the executables and `web` folder together. No compiler, Python, or Node.js is needed to run a binary release. See [binary releases](docs/releases.md) for platform requirements and checksum verification.
+
+### Build from source
+
 Install [xmake](https://xmake.io/) 2.9.8 or newer and a C++20 compiler. Windows users need Visual Studio 2022's **Desktop development with C++** workload; Linux users can use GCC 12 or newer; macOS users need current Xcode Command Line Tools.
 
 From the repository root:
@@ -74,9 +90,11 @@ The native launcher starts and monitors all service processes. A standalone inst
 
 Storage-size fields offer byte, KiB, MiB, GiB, and TiB selectors while configuration files retain exact integer byte values. Per-user quotas in **User accounts → Storage quota** take effect immediately; global settings apply after a manual restart.
 
-Open **Settings** near your account for language and appearance preferences. Administration also provides a password policy for new accounts and password resets, with configurable minimum length and character requirements. This policy is enforced by authentication and takes effect immediately; existing passwords continue to work.
+Open **Settings** near your account for language and appearance preferences. **User accounts → Account password policy** controls new accounts and password resets, with an eight-character default minimum and optional character requirements. Changes take effect immediately; existing passwords and saved policies continue to work. When creating a mailbox or signing in to Webmail, enter the name before the displayed `@domain`.
 
 Most day-to-day options are available in **Administration → Server settings**: listener addresses and ports, TLS, relay delivery, filtering, resource limits, sessions, and logging. Saving validates the configuration, creates a backup, and shows the addresses that will apply after restart. The current services keep running. When ready, press **Ctrl+C** in the launcher terminal, wait for shutdown, then run the same launch command to apply the saved settings.
+
+**Server settings → Server maintenance** lets you download a data backup or save the current server settings and shut down. Backups include accounts, mail, queues, configuration, and configured credentials; store them privately. The terminal reports shutdown progress for both the web action and **Ctrl+C**. See [backup, restore, and shutdown](docs/maintenance.md) for recovery instructions.
 
 - [Getting started](docs/getting-started.md) — from first launch to your first message.
 - [中文入门指南](docs/getting-started.zh-CN.md) — 本地试用、域名与 TLS、后台设置和常见问题。
@@ -119,7 +137,7 @@ node tests/preferences_ui_test.js
 python tests/integration.py --build-dir build --mode debug
 ```
 
-xmake installs pinned dependencies. Web checks require Node.js 22 or newer; integration tests require Python 3.10 or newer. Tests use isolated data directories, local accounts and ports, and a simulated relay. They do not send public email. Diagnostics are written under `build/test-runs/`.
+xmake installs pinned dependencies. Web checks require Node.js 22 or newer; integration tests require Python 3.12 or newer. Tests use isolated data directories, local accounts and ports, and a simulated relay. They do not send public email. Diagnostics are written under `build/test-runs/`.
 
 [GitHub Actions](.github/workflows/ci.yml) builds and tests Linux, Windows, and macOS in Debug and Release. The source layout is:
 

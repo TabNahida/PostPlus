@@ -7,6 +7,8 @@
 #include <openssl/rand.h>
 #include <openssl/ssl.h>
 #include <algorithm>
+#include <array>
+#include <array>
 #include <atomic>
 #include <charconv>
 #include <csignal>
@@ -409,14 +411,23 @@ void send_response(Connection& connection, const HttpResponse& response) {
     static const std::map<int,std::string> reasons{{200,"OK"},{201,"Created"},{202,"Accepted"},{204,"No Content"},{400,"Bad Request"},{401,"Unauthorized"},{403,"Forbidden"},{404,"Not Found"},{405,"Method Not Allowed"},{409,"Conflict"},{413,"Payload Too Large"},{429,"Too Many Requests"},{500,"Internal Server Error"},{503,"Service Unavailable"}};
     const auto it = reasons.find(response.status);
     std::string out = "HTTP/1.1 " + std::to_string(response.status) + " " + (it == reasons.end() ? "Response" : it->second) + "\r\n";
-    out += "Content-Type: " + response.content_type + "\r\nContent-Length: " + std::to_string(response.body.size()) + "\r\nConnection: close\r\nX-Content-Type-Options: nosniff\r\n";
+    out += "Content-Type: " + response.content_type + "\r\nContent-Length: " + std::to_string(response.file ? response.file_size : response.body.size()) + "\r\nConnection: close\r\nX-Content-Type-Options: nosniff\r\n";
     for (const auto& [name,value] : response.headers) {
         if (name.find_first_of("\r\n:") != std::string::npos || value.find_first_of("\r\n") != std::string::npos) throw std::invalid_argument("invalid response header");
         out += name + ": " + value + "\r\n";
     }
     out += "\r\n";
     connection.write(out);
-    connection.write(response.body);
+    if (response.file) {
+        std::array<char, 65536> buffer{};
+        auto remaining = response.file_size;
+        while (remaining) {
+            const auto count = static_cast<std::streamsize>(std::min<std::uint64_t>(remaining, buffer.size()));
+            if (!response.file->read(buffer.data(), count)) throw std::runtime_error("backup download read failed");
+            connection.write(std::string_view(buffer.data(), static_cast<std::size_t>(count)));
+            remaining -= static_cast<std::uint64_t>(count);
+        }
+    } else connection.write(response.body);
 }
 void reject_request(Connection& connection, const HttpRequest& request, const HttpResponse& response) {
     connection.set_deadline(std::nullopt);

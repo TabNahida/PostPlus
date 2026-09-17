@@ -78,7 +78,7 @@
         for (let section=input.closest("details"); section; section=section.parentElement?.closest("details")) section.open=true;
       });
       invalid[0].focus();
-      fail({key:invalid.some(input => input.type === "password") ? "Choose a password with at least 12 characters." : "Check the highlighted fields and try again."});
+      fail({key:invalid.some(input => input.type === "password") ? "Choose a password with at least 8 characters." : "Check the highlighted fields and try again."});
       return;
     }
     if ($("setup-password").value !== $("setup-password-confirm").value) {

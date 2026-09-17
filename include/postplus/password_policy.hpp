@@ -3,7 +3,7 @@
 
 namespace postplus {
 struct PasswordPolicy {
-    int min_length = 12;
+    int min_length = 8;
     bool require_uppercase = false;
     bool require_lowercase = false;
     bool require_digit = false;
