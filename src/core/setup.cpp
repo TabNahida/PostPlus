@@ -1,5 +1,6 @@
 #include <postplus/setup.hpp>
 #include <postplus/settings.hpp>
+#include <postplus/password_policy.hpp>
 #include <postplus/acme.hpp>
 #include <asio/ssl.hpp>
 #include <openssl/ssl.h>
@@ -197,7 +198,8 @@ Config validate_input(const Json& input, const Json& defaults, const SetupOption
     if (!valid_address(username) || username.substr(username.find('@') + 1) != domain)
         throw SetupError("invalid_admin", "The administrator email address must belong to the configured domain.");
     password = text_field(input, "admin_password", "", 1024);
-    if (password.size() < 12) throw SetupError("weak_password", "The administrator password must contain at least 12 characters.");
+    if (!password_violations(password, PasswordPolicy{}, 1024).empty())
+        throw SetupError("weak_password", "The administrator password must contain at least 12 Unicode characters.");
     const auto bind = trim(text_field(input, "bind", "127.0.0.1", 128));
     std::error_code address_error;
     const auto address = asio::ip::make_address(bind, address_error);
@@ -339,6 +341,8 @@ bool run_setup(const SetupOptions& options, SetupProvision provision) {
         {"setup.html", "text/html; charset=utf-8"}, {"setup.js", "application/javascript; charset=utf-8"},
         {"i18n.js", "application/javascript; charset=utf-8"}, {"settings.js", "application/javascript; charset=utf-8"},
         {"size.js", "application/javascript; charset=utf-8"}, {"acme.js", "application/javascript; charset=utf-8"},
+        {"preferences.js", "application/javascript; charset=utf-8"}, {"preferences.css", "text/css; charset=utf-8"},
+        {"icons.svg", "image/svg+xml"},
         {"favicon.svg", "image/svg+xml"}, {"style.css", "text/css; charset=utf-8"}}) {
         std::ifstream file(fs::absolute(options.web_root) / filename, std::ios::binary);
         if (!file) throw std::runtime_error("setup web asset is missing: " + filename);

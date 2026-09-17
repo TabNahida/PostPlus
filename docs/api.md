@@ -49,6 +49,8 @@ These routes require an administrator session. Ordinary users receive 403.
 | POST `/api/admin/quota` | `username`, `quota_bytes` (null to inherit, integer 1..2^50 to override); applies immediately. |
 | POST `/api/admin/users` | `username`, `password`, `admin`. The address must use the configured domain. Returns 201. |
 | POST `/api/admin/password` | `username`, `password`. Invalidates that user's existing sessions in both administration and Webmail. |
+| GET `/api/admin/password-policy` | Current account policy, revision, byte limit, and character-count convention. |
+| POST `/api/admin/password-policy` | Full `policy` object and `revision`; saves immediately without a restart. |
 | GET `/api/admin/stats` | messages, bytes, queued, queued_bytes, quarantined. |
 | GET `/api/admin/queue` | Up to 100 jobs with state and errors; no message bodies. |
 | GET `/api/admin/logs` | Recent structured events, filtered as described below. |
@@ -70,7 +72,63 @@ The following paths use the `/api/admin/acme` prefix in administration, or `/api
 
 Issuance does not save server settings or restart services. On an existing installation, save the returned file paths through the settings API, then manually restart. During first-run setup, include the paths in the setup submission; successful setup starts the services with that configuration. Private keys never leave the server. Terms are checked again before issuance and changed terms require fresh consent. See [certificate deployment prerequisites](configuration.md#lets-encrypt-certificates).
 
-Passwords must contain at least 12 bytes. Both browser services check each authenticated request against the current credential version through authentication RPC. A password change through administration or the CLI invalidates older sessions on their next authenticated request, without requiring a service restart. A change to administrator status likewise invalidates a session whose stored role no longer matches. Credential-version values stay inside the service processes and are not returned to the browser.
+Both browser services check each authenticated request against the current credential version through authentication RPC. A password change through administration or the CLI invalidates older sessions on their next authenticated request, without requiring a service restart. A change to administrator status likewise invalidates a session whose stored role no longer matches. Credential-version values stay inside the service processes and are not returned to the browser.
+
+### Account password policy
+
+`GET /api/admin/password-policy` returns the current policy persisted in the authentication database. Defaults are:
+
+```json
+{
+  "ok": true,
+  "policy": {
+    "min_length": 12,
+    "require_uppercase": false,
+    "require_lowercase": false,
+    "require_digit": false,
+    "require_symbol": false
+  },
+  "revision": 1,
+  "max_password_bytes": 1024,
+  "length_unit": "unicode_code_points",
+  "restart_required": false
+}
+```
+
+`POST /api/admin/password-policy` requires an administrator session and CSRF token. Submit all five policy fields, with the revision from the last GET:
+
+```json
+{
+  "revision": 1,
+  "policy": {
+    "min_length": 10,
+    "require_uppercase": true,
+    "require_lowercase": true,
+    "require_digit": true,
+    "require_symbol": false
+  }
+}
+```
+
+The minimum must be an integer from 8 to 128 and cannot exceed the running authentication service's `max_password_bytes`. Diversity fields must be booleans. Uppercase means `A–Z`, lowercase `a–z`, digits `0–9`, and symbols printable ASCII punctuation (`!` through `/`, `:` through `@`, `[` through the backtick, and `{` through `~`). Whitespace and emoji do not satisfy these four optional ASCII categories. All valid Unicode code points count toward the minimum; one emoji outside the BMP counts as one code point, and a combining mark counts separately. The server never trims or normalizes passwords. The maximum is measured separately in UTF-8 bytes.
+
+Successful POST returns the same shape as GET, with an incremented revision when the policy changed. Saving an unchanged policy with its current revision is idempotent. The change applies immediately to subsequent account creation/password resets through administration, CLI, and internal RPC, including writes whose password hashing began before the policy changed. Existing passwords and sessions keep working; the new policy does not run on login. The JSON server configuration is not rewritten, and services are not restarted.
+
+Missing, unknown, mistyped, and out-of-range fields return HTTP 400:
+
+```json
+{"ok":false,"code":"invalid_password_policy","error":"Check the password policy fields.","errors":[{"field":"min_length","code":"out_of_range","min":8,"max":128}]}
+```
+
+Field-error codes are `required`, `unknown_field`, `invalid_type`, and `out_of_range`. A stale revision returns HTTP 409 with `code: "password_policy_conflict"` and the current `policy`/`revision`; reload and review before saving again.
+
+Account creation/reset failures caused by this policy return HTTP 400, including from `/api/admin/users`:
+
+```json
+{"ok":false,"code":"password_policy_violation","error":"Password does not meet the account password policy.","violations":["min_length","require_digit"],"policy":{"min_length":12,"require_uppercase":false,"require_lowercase":false,"require_digit":true,"require_symbol":false},"revision":2,"max_password_bytes":1024,"length_unit":"unicode_code_points","restart_required":false}
+```
+
+Violation names are `min_length`, `max_password_bytes`, `require_uppercase`, `require_lowercase`, `require_digit`, `require_symbol`, and `invalid_utf8` (malformed JSON encoding is rejected before policy validation). Password values are never echoed or logged. Fresh first-run setup uses the default minimum of 12 Unicode code points.
 
 ### Server settings
 
@@ -168,7 +226,7 @@ POST fields:
 | Field | Meaning |
 | --- | --- |
 | `domain` | A valid ASCII mail domain. |
-| `admin_username`, `admin_password` | Administrator email in that domain and password of at least 12 bytes. |
+| `admin_username`, `admin_password` | Administrator email in that domain and password of at least 12 Unicode code points (at most 1024 UTF-8 bytes). |
 | `bind` | IPv4 or IPv6 listener address; defaults to loopback. |
 | `admin_bind` | Separate administration listener address; defaults to loopback. |
 | `data_dir` | Mail data directory; relative paths resolve beside the configuration. |

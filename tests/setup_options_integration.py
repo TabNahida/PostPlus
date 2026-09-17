@@ -30,6 +30,8 @@ def run(binaries, directory):
         assert http(port,"POST","/api/setup/acme/start",{"directory":"http://127.0.0.1/"},headers)[0]==400
         assert http(port,"GET","/size.js",headers={"Host":f"localhost:{port}"})[0]==200
         assert http(port,"GET","/acme.js",headers={"Host":f"localhost:{port}"})[0]==200
+        for asset in ("preferences.js", "preferences.css", "icons.svg"):
+            assert http(port,"GET","/"+asset,headers={"Host":f"localhost:{port}"})[0]==200
     finally:server.close()
 
     # Test remote-bind setup using the existing local certificate and a scoped

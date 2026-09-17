@@ -8,6 +8,7 @@ let settingsEditor = null;
 let settingsLoading = false;
 let settingsSaving = false;
 let acmeControl=null;
+let passwordPolicyData=null, passwordPolicyVersion=0, userDialogVersion=0, policySaving=false;
 let noticeTimer;
 
 function showNotice(message, error = false) {
@@ -41,8 +42,9 @@ async function api(path, { method = "GET", body, quiet = false } = {}) {
       signedOut();
       showNotice(t("Your session has expired. Please sign in again."), true);
     }
-    const error = new Error(PostPlusI18n.error(data));
+    const error = new Error(data.code==="password_policy_violation" ? passwordViolationMessage(data.violations,data.policy,data.max_password_bytes) : PostPlusI18n.error(data));
     error.field = data.field;
+    error.data = data;
     throw error;
   }
   return data;
@@ -60,6 +62,9 @@ function element(tag, className, text) {
 
 function signedOut() {
   state.user = null;
+  passwordPolicyData=null;passwordPolicyVersion++;userDialogVersion++;
+  PostPlusPreferences.closeNavigation();
+  PostPlusPreferences.setAuthenticated(false);
   document.querySelectorAll("dialog[open]").forEach(dialog => dialog.close());
   $("login-screen").hidden = false;
   $("app-screen").hidden = true;
@@ -79,6 +84,7 @@ function signedOut() {
 async function signedIn(user) {
   if (!user.admin) throw new Error(t("Administrator access is required."));
   state.user = user;
+  PostPlusPreferences.setAuthenticated(true);
   $("login-screen").hidden = true;
   $("app-screen").hidden = false;
   $("settings-success").hidden = true;
@@ -88,6 +94,7 @@ async function signedIn(user) {
   $("login-password").value = "";
   await switchView("overview");
   await loadSettings();
+  await loadPasswordPolicy();
 }
 async function busy(form, action) {
   const submit = form.querySelector('[type="submit"]');
@@ -192,7 +199,8 @@ async function loadAdmin() {
   } finally { $("admin-refresh").disabled = false; }
 }
 
-function openUserDialog(username = "") {
+async function openUserDialog(username = "") {
+  const version=++userDialogVersion;
   state.userMode = username ? "password" : "create";
   $("user-form").reset();
   formError("user-error");
@@ -200,7 +208,13 @@ function openUserDialog(username = "") {
   $("new-email").value = username;
   $("new-email").readOnly = Boolean(username);
   $("admin-checkbox-label").hidden = Boolean(username);
+  $("user-form").querySelector('[type="submit"]').disabled=true;
+  $("account-password-hint").textContent=t("Loading password policy…");
   $("user-dialog").showModal();
+  const policy=await loadPasswordPolicy();
+  if(version!==userDialogVersion || !$("user-dialog").open)return;
+  $("user-form").querySelector('[type="submit"]').disabled=!policy;
+  if(!policy)formError("user-error",t("Could not load the password policy. Close this window and try again."));
 }
 
 $("user-create-open").addEventListener("click", () => openUserDialog());
@@ -213,6 +227,9 @@ $("user-form").addEventListener("submit", (event) => {
     const changing = state.userMode === "password";
     const currentAccount = username === state.user?.username;
     try {
+      if(!passwordPolicyData)throw new Error(t("Could not load the password policy. Close this window and try again."));
+      const violations=checkPassword(password,passwordPolicyData);
+      if(violations.length)throw new Error(passwordViolationMessage(violations,passwordPolicyData.policy,passwordPolicyData.max_password_bytes));
       await api(changing ? "/api/admin/password" : "/api/admin/users", { method: "POST", body: { username, password, admin: $("new-admin").checked } });
       $("user-dialog").close();
       $("new-password").value = "";
@@ -223,14 +240,17 @@ $("user-form").addEventListener("submit", (event) => {
         showNotice(changing ? t("Password updated. This user's sessions have been revoked.") : t("User account created."));
         await loadAdmin();
       }
-    } catch (error) { formError("user-error", error.message); }
+    } catch (error) {
+      if(error.data?.code==="password_policy_violation" && error.data.policy){passwordPolicyData={...passwordPolicyData,policy:error.data.policy,max_password_bytes:error.data.max_password_bytes};renderPasswordHint();}
+      formError("user-error", error.message);
+    }
   });
 });
 
 document.querySelectorAll("[data-close]").forEach((button) => {
   button.addEventListener("click", () => $(button.dataset.close).close());
 });
-$("user-dialog").addEventListener("close", () => { $("new-password").value = ""; });
+$("user-dialog").addEventListener("close", () => { userDialogVersion++;$("new-password").value = ""; });
 
 
 let logVersion = 0;
@@ -350,6 +370,7 @@ document.addEventListener("postplus:language", () => {
   for (const id of ["login-error","user-error","logs-error","settings-error"]) formError(id);
   $("user-dialog-title").textContent = t(state.userMode === "password" ? "Reset password" : "Create user");
   settingsEditor?.translate();
+  renderPasswordHint();
   acmeControl?.translate();
   renderInspection();
   if (state.user) { loadAdmin(); renderLogs(); }
@@ -429,6 +450,57 @@ $("quota-form").addEventListener("submit",event=>{
     try {let quota_bytes=null; if(!$("quota-inherit-bytes").checked) {try {quota_bytes=quotaControl.read();}catch(problem){throw new Error(PostPlusI18n.error({error:problem.message}));}}await api("/api/admin/quota",{method:"POST",body:{username:quotaUsername,quota_bytes}});$("quota-dialog").close();showNotice(t("Mailbox quota updated."));}
     catch(error) {formError("quota-error",error.message);}
   });
+});
+
+function passwordViolationMessage(violations=[],policy={},maximum=1024) {
+  const labels={min_length:t("Use at least {count} characters.",{count:policy.min_length || 12}),max_password_bytes:t("The password must fit within {count} UTF-8 bytes.",{count:maximum}),require_uppercase:t("Include an uppercase letter (A–Z)."),require_lowercase:t("Include a lowercase letter (a–z)."),require_digit:t("Include a digit (0–9)."),require_symbol:t("Include a printable ASCII punctuation symbol."),invalid_utf8:t("Use valid Unicode characters.")};
+  return violations.map(value=>labels[value] || t("The password does not meet the account policy.")).join(" ") || t("The password does not meet the account policy.");
+}
+function checkPassword(password,data) {
+  const policy=data.policy,violations=[];
+  if(Array.from(password).length<policy.min_length)violations.push("min_length");
+  if(new TextEncoder().encode(password).length>data.max_password_bytes)violations.push("max_password_bytes");
+  for(const [field,pattern] of [["require_uppercase",/[A-Z]/],["require_lowercase",/[a-z]/],["require_digit",/[0-9]/],["require_symbol",/[!-/:-@\[-`{-~]/]])if(policy[field] && !pattern.test(password))violations.push(field);
+  return violations;
+}
+function renderPasswordHint() {
+  if(!passwordPolicyData)return;
+  const policy=passwordPolicyData.policy;
+  $("new-password").minLength=policy.min_length;
+  $("new-password").maxLength=passwordPolicyData.max_password_bytes;
+  const requirements=["min_length",...Object.keys(policy).filter(key=>key.startsWith("require_") && policy[key])];
+  $("account-password-hint").textContent=passwordViolationMessage(requirements,policy,passwordPolicyData.max_password_bytes);
+}
+function renderPasswordPolicy() {
+  if(!passwordPolicyData)return;
+  $("policy-min-length").value=passwordPolicyData.policy.min_length;
+  for(const field of ["uppercase","lowercase","digit","symbol"])$("policy-"+field).checked=passwordPolicyData.policy["require_"+field];
+  $("password-policy-save").disabled=false;renderPasswordHint();
+}
+async function loadPasswordPolicy() {
+  if(!state.user?.admin)return null;
+  const version=++passwordPolicyVersion,user=state.user;
+  $("password-policy-status").textContent=t("Loading password policy…");
+  $("password-policy-save").disabled=true;formError("password-policy-error");
+  try {
+    const data=await api("/api/admin/password-policy");
+    if(version!==passwordPolicyVersion || user!==state.user)return null;
+    passwordPolicyData=data;renderPasswordPolicy();$("password-policy-status").textContent="";return data;
+  } catch(error){if(version===passwordPolicyVersion){$("password-policy-status").textContent="";formError("password-policy-error",error.message);}return null;}
+}
+$("password-policy-reload").addEventListener("click",loadPasswordPolicy);
+$("password-policy-form").addEventListener("submit",async event=>{
+  event.preventDefault();if(policySaving || !passwordPolicyData)return;
+  formError("password-policy-error");const length=Number($("policy-min-length").value);
+  if(!Number.isInteger(length) || length<8 || length>128){formError("password-policy-error",t("Choose a minimum length from 8 to 128."));$("policy-min-length").focus();return;}
+  const policy={min_length:length};for(const field of ["uppercase","lowercase","digit","symbol"])policy["require_"+field]=$("policy-"+field).checked;
+  policySaving=true;const user=state.user;
+  $("password-policy-form").querySelectorAll("input,button").forEach(input=>{input.disabled=true;});
+  try {
+    const data=await api("/api/admin/password-policy",{method:"POST",body:{revision:passwordPolicyData.revision,policy}});
+    if(user!==state.user)return;passwordPolicyData=data;renderPasswordPolicy();$("password-policy-status").textContent=t("Password policy saved. It applies immediately to new and reset passwords.");
+  } catch(error){if(user===state.user)formError("password-policy-error",error.message);}
+  finally{policySaving=false;$("password-policy-form").querySelectorAll("input,button").forEach(input=>{input.disabled=false;});}
 });
 
 document.title = t("PostPlus · Administration");

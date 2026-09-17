@@ -97,7 +97,7 @@ The generated internal service token lives in a private file referenced by `serv
 
 1. Open **Administration** at `http://127.0.0.1:8081/` for the local trial.
 2. Sign in with the permanent administrator address and password created in setup.
-3. Open **User accounts**. Create `alice@localhost` and `bob@localhost`, each with a password of at least 12 characters. Leave administrator privileges disabled for regular users.
+3. Open **User accounts**. Create `alice@localhost` and `bob@localhost`, each with a password that meets the displayed rules (at least 12 characters by default). Leave administrator privileges disabled for regular users.
 4. Open **Webmail** at `http://127.0.0.1:8080/`. Sign in as Alice.
 5. Compose a message to `bob@localhost`, add a subject and text, and send it.
 6. Sign out, sign in as Bob, and refresh the inbox. Delivery is queued, so a message can take a short time to appear.
@@ -105,6 +105,18 @@ The generated internal service token lives in a private file referenced by `serv
 Webmail has no registration page. Every account must be created by an administrator. Usernames are full email addresses, not just the part before `@`. The administrator can also use Webmail by signing in separately.
 
 Use **Delivery queue** to inspect delayed or quarantined mail and **Service logs** to see errors. Sent copies appear when Webmail submits mail successfully; final delivery can happen later.
+
+### Customize the interface
+
+Open **Settings** near your account at the bottom of the navigation panel. Language and appearance controls are also available before signing in and during first-run setup.
+
+- Choose **English** or **简体中文**. English is the default.
+- Choose a light or dark theme, or follow the system appearance. System mode is the default and responds when your device changes theme.
+- Adjust display density and, in Webmail, the reading text size. These preferences apply immediately and are remembered in the current browser for each portal. They do not change mail or server configuration.
+
+On a phone, use the navigation button to open folders or administration pages. Selecting a destination closes the navigation panel. Open a message to read it, then use the back button to return to the list. Wide administration tables scroll within their section.
+
+In administration, **Settings** also contains the account password policy. Set the minimum length and select any required uppercase letters, lowercase letters, digits, or symbols, then save. The default minimum is 12 characters, with no mandatory character categories. The policy is stored on the server and applies to future account creation and password resets, including CLI operations; existing passwords and sessions remain valid. **Server settings** is the separate page for ports, TLS, delivery and other operating settings.
 
 ### Organize mail and resume drafts
 

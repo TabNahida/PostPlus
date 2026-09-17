@@ -20,7 +20,7 @@
 - **Keep administration separate.** Manage accounts, inspect a user’s mail without changing its read status, set individual storage quotas, and review queues and logs. Webmail runs on its own port.
 - **Give every message a place.** Use Inbox, Sent, Drafts, Trash, Junk, and Archive. Save a draft, resume writing later, and move messages between folders.
 - **Set up encrypted connections.** Request a Let’s Encrypt certificate through the browser, or use certificates you already have.
-- **Use your preferred language.** Setup, administration, and Webmail default to English and support Simplified Chinese.
+- **Make it comfortable.** Switch between English and Simplified Chinese, choose light or dark mode, or follow your device's appearance. Adjust reading preferences and use the same tools on your phone.
 - **Connect mail clients.** Send through SMTP and read through POP3 or the supported IMAP commands, with TLS support.
 - **Keep mail on disk.** Accounts, mailboxes, delivery queues, and retries survive restarts. Rejected mail is retained in quarantine.
 - **Choose who has an account.** Administrators create users; Webmail has no public registration.
@@ -74,6 +74,8 @@ The native launcher starts and monitors all service processes. A standalone inst
 
 Storage-size fields offer byte, KiB, MiB, GiB, and TiB selectors while configuration files retain exact integer byte values. Per-user quotas in **User accounts → Storage quota** take effect immediately; global settings apply after a manual restart.
 
+Open **Settings** near your account for language and appearance preferences. Administration also provides a password policy for new accounts and password resets, with configurable minimum length and character requirements. This policy is enforced by authentication and takes effect immediately; existing passwords continue to work.
+
 Most day-to-day options are available in **Administration → Server settings**: listener addresses and ports, TLS, relay delivery, filtering, resource limits, sessions, and logging. Saving validates the configuration, creates a backup, and shows the addresses that will apply after restart. The current services keep running. When ready, press **Ctrl+C** in the launcher terminal, wait for shutdown, then run the same launch command to apply the saved settings.
 
 - [Getting started](docs/getting-started.md) — from first launch to your first message.
@@ -113,6 +115,7 @@ xmake f -m debug -y
 xmake build -y
 xmake test -v
 node tests/web_test.js
+node tests/preferences_ui_test.js
 python tests/integration.py --build-dir build --mode debug
 ```
 

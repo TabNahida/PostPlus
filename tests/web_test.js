@@ -7,9 +7,10 @@ const vm = require("node:vm");
 const root = path.resolve(__dirname, "..");
 const source = fs.readFileSync(path.join(root, "web/i18n.js"), "utf8");
 
-function fixture(preference = null, unavailable = false) {
+function fixture(preference = null, unavailable = false, portal = null) {
   const callbacks = new Map();
-  const persisted = new Map(preference === null ? [] : [["postplus.language", preference]]);
+  const languageKey = portal ? `postplus.${portal}.language` : "postplus.language";
+  const persisted = new Map(preference === null ? [] : [[languageKey, preference]]);
   const events = [];
   const textNode = {dataset:{i18n:"Sign in"},textContent:"Sign in"};
   const attributeNode = {
@@ -32,6 +33,7 @@ function fixture(preference = null, unavailable = false) {
     getItem(key) {if(unavailable) throw new Error("Storage unavailable"); return persisted.get(key) ?? null;},
     setItem(key,value) {if(unavailable) throw new Error("Storage unavailable"); persisted.set(key,value);}
   }};
+  if (portal) sandbox.window.PostPlusPreferences = {key:name=>`postplus.${portal}.${name}`};
   vm.runInNewContext(source, sandbox, {filename:"web/i18n.js"});
   return {i18n:sandbox.window.PostPlusI18n,document,textNode,attributeNode,select,persisted,events,
     choose(language) {select.value=language;callbacks.get("change")();}};
@@ -62,6 +64,39 @@ const restricted = fixture(null, true);
 assert.equal(restricted.i18n.language, "en");
 restricted.choose("zh-CN");
 assert.equal(restricted.textNode.textContent, "登录", "Language switching works when storage is blocked");
+const adminLanguage = fixture(null, false, "admin");
+adminLanguage.i18n.setLanguage("zh-CN");
+assert.equal(adminLanguage.persisted.get("postplus.admin.language"), "zh-CN");
+assert.equal(adminLanguage.persisted.has("postplus.language"), false, "Portal language changes do not overwrite a shared preference");
+assert.equal(fixture(null, false, "webmail").i18n.language, "en");
+
+// Exercise appearance before DOMContentLoaded, when the page has no body yet.
+function appearanceFixture({portal="webmail",saved=null,dark=false,unavailable=false}={}) {
+  const dataset={portal},storage=new Map(saved===null ? [] : [[`postplus.${portal}.preferences`,saved]]);
+  const media={matches:dark,addEventListener(name,callback){this.callback=callback;}};
+  const sandbox={window:{matchMedia:()=>media},document:{documentElement:{dataset},querySelectorAll:()=>[],addEventListener(){}},localStorage:{
+    getItem(key){if(unavailable)throw new Error("Storage blocked");return storage.get(key) ?? null;},
+    setItem(key,value){if(unavailable)throw new Error("Storage blocked");storage.set(key,value);}
+  }};
+  vm.runInNewContext(fs.readFileSync(path.join(root,"web/preferences.js"),"utf8"),sandbox);
+  return {api:sandbox.window.PostPlusPreferences,dataset,storage,system(value){media.matches=value;media.callback();}};
+}
+const appearance=appearanceFixture({dark:true});
+assert.equal(appearance.dataset.theme,"dark","First paint follows the system without writing a preference");
+assert.equal(appearance.storage.size,0);
+appearance.system(false);assert.equal(appearance.dataset.theme,"light");
+appearance.api.update({theme:"dark"});appearance.system(false);assert.equal(appearance.dataset.theme,"dark","Explicit appearance ignores system changes");
+appearance.api.update({theme:"system"});assert.equal(appearance.dataset.theme,"light");
+appearance.system(true);assert.equal(appearance.dataset.theme,"dark","Returning to system mode resumes live changes");
+appearance.api.update({density:"compact",reading:"large",spellcheck:false});
+const restored=appearanceFixture({saved:appearance.storage.get("postplus.webmail.preferences")});
+assert.equal(restored.dataset.density,"compact");assert.equal(restored.dataset.reading,"large");assert.equal(restored.api.values.spellcheck,false);
+const malformed=appearanceFixture({saved:'{"theme":"invalid","reading":"unexpected"}'});
+assert.equal(malformed.dataset.appearance,"system");assert.equal(malformed.dataset.reading,"standard");
+assert.equal(appearanceFixture({saved:"not JSON"}).dataset.appearance,"system");
+const blockedAppearance=appearanceFixture({unavailable:true});blockedAppearance.api.update({theme:"dark"});assert.equal(blockedAppearance.dataset.theme,"dark");
+const adminAppearance=appearanceFixture({portal:"admin"});adminAppearance.api.update({theme:"light"});
+assert.equal(adminAppearance.storage.has("postplus.admin.preferences"),true);assert.equal(adminAppearance.storage.has("postplus.webmail.preferences"),false);
 
 const chinese = fixture("zh-CN").i18n;
 assert.equal(chinese.error({error:"The email address or password is incorrect."}), "邮箱地址或密码错误。");
@@ -79,7 +114,7 @@ function translated(key, file) {
 }
 for (const file of ["index.html", "admin.html", "setup.html"]) {
   const html = fs.readFileSync(path.join(root, "web", file), "utf8");
-  assert.match(html, /<html lang="en">/, `${file} must render in English before scripts run`);
+  assert.match(html, /<html\b[^>]*\blang="en"(?:\s|>)/, `${file} must render in English before scripts run`);
   assert.match(html, /src="\/i18n\.js"/);
   assert.match(html, /rel="icon" href="\/favicon\.svg"/);
   for (const match of html.matchAll(/data-i18n(?=[\s=>])(?:="([^"]*)")?[^>]*>([^<]*)/g)) {
@@ -88,7 +123,7 @@ for (const file of ["index.html", "admin.html", "setup.html"]) {
   }
   for (const match of html.matchAll(/data-i18n-(?:aria-label|title|placeholder)="([^"]+)"/g)) translated(match[1], file);
 }
-for (const file of ["app.js", "admin.js", "setup.js", "settings.js", "size.js", "acme.js"]) {
+for (const file of ["app.js", "admin.js", "setup.js", "settings.js", "size.js", "acme.js", "preferences.js"]) {
   const script = fs.readFileSync(path.join(root, "web", file), "utf8");
   new vm.Script(script, {filename:file});
   for (const match of script.matchAll(/\bt\("([^"]+)"/g)) translated(match[1], file);

@@ -274,6 +274,33 @@ window.PostPlusI18n = (() => {
   "Could not complete certificate issuance. Check network connectivity, trusted CA roots and certificate directory permissions.": "无法完成证书签发，请检查网络连接、受信任根证书及证书目录权限。",
   "Certificate paths filled. Review and save your configuration.": "已填入证书路径，请检查并保存配置。"
 });
+  Object.assign(chinese, {
+    "Settings":"设置", "Display settings":"显示设置", "Close display settings":"关闭显示设置",
+    "These preferences apply to this portal in this browser. Server settings are unchanged.":"这些偏好仅用于此浏览器中的当前界面，不会修改服务器设置。",
+    "Appearance":"外观", "Follow system":"跟随系统", "Light":"浅色", "Dark":"深色",
+    "Follow system changes appearance when your device switches between light and dark.":"跟随系统会在设备切换深浅模式时自动调整外观。",
+    "Layout density":"布局密度", "Comfortable":"舒适", "Compact":"紧凑", "Message text size":"邮件正文字号",
+    "Standard":"标准", "Large":"大", "Extra large":"更大", "Check spelling while composing":"写邮件时检查拼写",
+    "Changes apply immediately.":"更改立即生效。", "Done":"完成", "Navigation":"导航", "Open navigation":"打开导航", "Close navigation":"关闭导航",
+    "Display preferences stay in this browser. The account password policy applies to all accounts.":"显示偏好仅保存在此浏览器中，账户密码策略对所有账户生效。",
+    "Display changes apply immediately. Save password policy separately.":"显示更改立即生效，密码策略需单独保存。",
+    "Scrollable table":"可滚动表格", "Account password policy":"账户密码策略",
+    "Set the requirements for newly created or reset passwords. Existing passwords keep working.":"设置新建或重置密码时的要求，已有密码仍可使用。",
+    "Minimum password length":"最小密码长度", "8–128 Unicode characters. The default is 12.":"8 至 128 个 Unicode 字符，默认为 12 个。",
+    "Require an uppercase letter (A–Z)":"要求大写字母（A–Z）", "Require a lowercase letter (a–z)":"要求小写字母（a–z）",
+    "Require a digit (0–9)":"要求数字（0–9）", "Require a punctuation symbol":"要求标点符号",
+    "Letter and digit rules use ASCII characters. Symbols are printable ASCII punctuation; spaces and emoji do not count as symbols.":"字母与数字要求采用 ASCII 字符；符号要求采用可打印的 ASCII 标点，空格和表情不计为符号。",
+    "Reload policy":"重新加载策略", "Save password policy":"保存密码策略", "Loading password policy…":"正在读取密码策略…",
+    "Could not load the password policy. Close this window and try again.":"无法读取密码策略，请关闭此窗口后重试。",
+    "Use at least {count} characters.":"请使用至少 {count} 个字符。", "The password must fit within {count} UTF-8 bytes.":"密码的 UTF-8 编码不能超过 {count} 字节。",
+    "Include an uppercase letter (A–Z).":"请包含大写字母（A–Z）。", "Include a lowercase letter (a–z).":"请包含小写字母（a–z）。",
+    "Include a digit (0–9).":"请包含数字（0–9）。", "Include a printable ASCII punctuation symbol.":"请包含可打印的 ASCII 标点符号。",
+    "Use valid Unicode characters.":"请使用有效的 Unicode 字符。", "The password does not meet the account policy.":"密码不符合账户密码策略。",
+    "Choose a minimum length from 8 to 128.":"请选择 8 至 128 之间的最小长度。",
+    "Password policy saved. It applies immediately to new and reset passwords.":"密码策略已保存，立即用于新建及重置密码。",
+    "The password policy changed. Reload it before saving again.":"密码策略已被修改，请重新加载后再保存。",
+    "Check the password policy fields and try again.":"请检查密码策略各字段后重试。"
+  });
   const acmeCodes = {
     terms_required:"Read and accept the current certificate authority terms before requesting a certificate.",
     terms_changed:"The certificate authority terms changed. Load and review the new terms before retrying.",
@@ -287,8 +314,9 @@ window.PostPlusI18n = (() => {
   const setupCodes = {port_unavailable:"A service port is unavailable. Choose another port or check permissions.",
     invalid_field:"Check the highlighted fields and try again.", invalid_port:"Ports must be whole numbers from 1 to 65535.", invalid_domain:"Enter a valid mail domain.", invalid_admin:"The administrator address must belong to your mail domain.", weak_password:"Choose a password with at least 12 characters.", invalid_bind:"Enter a valid listen address.", transport_selection_required:"Choose a connection mode.", tls_required:"Network access requires TLS and secure authentication.", invalid_tls:"The TLS certificate or key could not be loaded. Check the server paths and permissions.", invalid_data_dir:"The data folder is invalid or cannot be used. Choose an empty folder.", duplicate_port:"Each service must use a different port.", setup_port_conflict:"A service port conflicts with the setup server.", invalid_environment_name:"Enter a valid environment variable name.", invalid_smarthost_tls:"Choose a valid relay encryption mode. Authentication requires TLS.", invalid_setup_token:"The setup password is incorrect or expired. Copy the latest one-time password from the terminal.", local_access_required:"Setup is only available from this computer.", invalid_origin:"This setup request is not from the setup page. Reopen the launcher URL.", setup_busy:"Setup is already saving. Wait for it to finish.", already_configured:"This server has already been configured.", invalid_json:"The setup request is invalid. Refresh using the launcher URL.", invalid_content_type:"The setup request is invalid. Refresh using the launcher URL.", provision_failed:"Could not create the server data or administrator. Check the launcher output and folder permissions.", config_commit_failed:"Could not save the configuration file. Check the launcher output and file permissions.", setup_failed:"Setup failed. Check the launcher output before trying again."
   };
+  const languageKey = window.PostPlusPreferences?.key("language") || "postplus.language";
   let language = "en";
-  try { if (localStorage.getItem("postplus.language") === "zh-CN") language = "zh-CN"; } catch { /* Storage can be disabled. */ }
+  try { if ((localStorage.getItem(languageKey) ?? localStorage.getItem("postplus.language")) === "zh-CN") language = "zh-CN"; } catch { /* Storage can be disabled. */ }
   function t(key, parameters = {}) {
     const source = language === "zh-CN" ? (chinese[key] || key) : key;
     return source.replace(/\{(\w+)\}/g, (match, name) => Object.hasOwn(parameters, name) ? String(parameters[name]) : match);
@@ -305,6 +333,8 @@ window.PostPlusI18n = (() => {
     document.querySelectorAll("[data-language]").forEach(select => { select.value = language; });
   }
   function error(data) {
+    if(data?.code==="password_policy_conflict")return t("The password policy changed. Reload it before saving again.");
+    if(data?.code==="invalid_password_policy")return t("Check the password policy fields and try again.");
     if (acmeCodes[data?.code]) return t(acmeCodes[data.code]);
     if (setupCodes[data?.code]) return t(setupCodes[data.code]);
     const message = data?.error || "";
@@ -316,11 +346,12 @@ window.PostPlusI18n = (() => {
     return t("The request failed. Please try again.");
   }
   apply();
-  document.querySelectorAll("[data-language]").forEach(select => select.addEventListener("change", () => {
-    language = select.value === "zh-CN" ? "zh-CN" : "en";
-    try { localStorage.setItem("postplus.language", language); } catch { /* Language still works for this page. */ }
+  function setLanguage(value, persist = true) {
+    language = value === "zh-CN" ? "zh-CN" : "en";
+    if(persist) try { localStorage.setItem(languageKey, language); } catch { /* Language still works for this page. */ }
     apply();
     document.dispatchEvent(new CustomEvent("postplus:language"));
-  }));
-  return {t, apply, error, get language() { return language; }};
+  }
+  document.querySelectorAll("[data-language]").forEach(select => select.addEventListener("change", () => setLanguage(select.value)));
+  return {t, apply, error, setLanguage, get language() { return language; }};
 })();

@@ -52,6 +52,7 @@ function element(tag, className, text) {
 }
 
 function signedOut() {
+  PostPlusPreferences.closeNavigation();
   state.user = null;
   state.messages = [];
   state.previews.clear();

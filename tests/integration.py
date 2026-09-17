@@ -214,6 +214,10 @@ def run(s):
     assert s.http("admin", "POST", "/api/login", {"username": bob, "password": PASSWORD})[0] == 403
     for service in ("web", "admin"):
         assert s.http(service, "GET", "/favicon.svg")[0] == 200
+        for asset, media in (("preferences.js", "application/javascript"),
+                             ("preferences.css", "text/css"), ("icons.svg", "image/svg+xml")):
+            status, asset_headers, content = s.http(service, "GET", "/" + asset)
+            assert status == 200 and content and asset_headers.get("Content-Type", "").startswith(media), (service, asset, status)
     assert s.http("admin", "GET", "/")[0] == 200
     assert s.http("admin", "GET", "/api/messages")[0] == 404
     assert s.http("admin", "POST", "/api/send", {})[0] == 404
@@ -310,6 +314,8 @@ def main():
         subprocess.run([os.sys.executable, str(ROOT / "tests/clean_data_integration.py"),
                         "--bin-dir", str(binaries)], check=True)
         subprocess.run([os.sys.executable, str(ROOT / "tests/mailbox_web_integration.py"),
+                        "--bin-dir", str(binaries)], check=True)
+        subprocess.run([os.sys.executable, str(ROOT / "tests/password_policy_integration.py"),
                         "--bin-dir", str(binaries)], check=True)
         subprocess.run([os.sys.executable, str(ROOT / "tests/tls_transfer_integration.py"),
                         "--bin-dir", str(binaries)], check=True)

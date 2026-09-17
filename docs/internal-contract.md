@@ -8,12 +8,18 @@ Config is JSON. `Config::load` accepts `--config PATH` (default config/postplus.
 
 ## Auth
 
-- create: username (full normalized email), password, admin(bool) -> ok, username. Reject duplicate, short password (<12).
+- create: username (full normalized email), password, admin(bool) -> ok, username. Reject duplicates and passwords that fail the current account policy.
 - verify: username, password, session(optional bool) -> ok, username, admin. Invalid credentials -> ok:false. With session:true, successful verification also returns credential_version for server-side session validation; it must not be exposed through the browser API.
 - session_check: username, credential_version -> ok:true, valid:bool, admin:bool. Validates the stored credential version against the current account. Password changes replace the version; both browser services reject stale versions or changed roles on the next authenticated request.
 - exists: username -> ok:true, exists:bool.
 - list -> ok:true, users:[{username,admin}].
-- change_password: username,password -> ok.
+- change_password: username,password -> ok. Applies the same live password policy as create.
+- password_policy_get -> ok, policy, revision, max_password_bytes, length_unit (`unicode_code_points`), restart_required:false.
+- password_policy_set: full policy object, revision -> same shape as password_policy_get. The object contains min_length (integer 8..128, at most the configured byte cap) and boolean require_uppercase/require_lowercase/require_digit/require_symbol. Missing/unknown/mistyped fields reject with code `invalid_password_policy` and an errors array; stale revisions reject with `password_policy_conflict` and the current policy/revision.
+
+Authentication schema version 2 adds a singleton password-policy table with default minimum 12 and all diversity flags false. The migration preserves existing users and hashes. Policy/revision writes are transactional, affect subsequent create/change_password operations without restarting, and never invalidate existing passwords on verify. New password writes recheck the current policy inside the database write transaction after password hashing to prevent a concurrent policy update being bypassed.
+
+Minimum length counts UTF-8 Unicode code points. Optional categories require ASCII `A–Z`, `a–z`, `0–9`, and printable ASCII punctuation respectively; whitespace and non-ASCII characters do not satisfy a diversity category. Passwords are never trimmed or normalized. Rejection uses `code: "password_policy_violation"`, `violations`, and the current policy metadata. Violation names are min_length, max_password_bytes, require_uppercase, require_lowercase, require_digit, require_symbol, and invalid_utf8. The [browser API reference](api.md#account-password-policy) defines full response examples. All policy RPCs require the existing shared service token; only the administration service exposes them to a browser, with administrator and CSRF checks.
 
 ## Storage
 

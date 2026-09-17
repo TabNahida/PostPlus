@@ -66,9 +66,8 @@ std::string username_field(const Json& value) {
 }
 
 std::string password_field(const Json& value) {
-    auto password = field(value, "password", 1024);
-    if (password.size() < 12) throw ApiError(400, "Passwords must contain at least 12 characters.");
-    return password;
+    // The auth service applies the live policy to every creation/reset path.
+    return field(value, "password", 4096);
 }
 
 void require_ok(const Json& value, const std::string& message, int status = 503) {
@@ -190,6 +189,9 @@ public:
             load_static(root, "/acme.js", "acme.js", "application/javascript; charset=utf-8");
         } else load_static(root, "/app.js", "app.js", "application/javascript; charset=utf-8");
         load_static(root, "/size.js", "size.js", "application/javascript; charset=utf-8");
+        load_static(root, "/preferences.js", "preferences.js", "application/javascript; charset=utf-8");
+        load_static(root, "/preferences.css", "preferences.css", "text/css; charset=utf-8");
+        load_static(root, "/icons.svg", "icons.svg", "image/svg+xml");
         load_static(root, "/favicon.svg", "favicon.svg", "image/svg+xml");
         load_static(root, "/i18n.js", "i18n.js", "application/javascript; charset=utf-8");
         load_static(root, "/style.css", "style.css", "text/css; charset=utf-8");
@@ -318,7 +320,7 @@ private:
         allow_login(request);
         auto input = request_json(request);
         auto username = username_field(input);
-        auto password = field(input, "password", 1024);
+        auto password = field(input, "password", 4096);
         auto user = rpc(config_, "auth", {{"op", "verify"}, {"username", username}, {"password", password}, {"session", true}});
         if (!user.value("ok",false)) log(service_name,"sign-in failed for " + username + " from " + request.peer_address,"warn");
         require_ok(user, "The email address or password is incorrect.", 401);
@@ -419,6 +421,24 @@ private:
         if (request.path.starts_with("/api/admin/")) {
             if (!admin_only) throw ApiError(404,"API route not found.");
             if (!session.admin) throw ApiError(403, "Administrator access is required.");
+            if (path == "/api/admin/password-policy") {
+                Json command = {{"op", "password_policy_get"}};
+                if (request.method == "POST") {
+                    command = request_json(request);
+                    if (command.contains("op")) throw ApiError(400, "Unexpected password policy field: op");
+                    command["op"] = "password_policy_set";
+                } else if (request.method != "GET") throw ApiError(405, "Use GET or POST.");
+                auto result = rpc(config_, "auth", command);
+                if (!result.value("ok", false)) {
+                    const auto code = result.value("code", std::string{});
+                    if (code == "invalid_password_policy") return json_response(result, 400);
+                    if (code == "password_policy_conflict") return json_response(result, 409);
+                    require_ok(result, "Unable to load or save the account password policy.");
+                }
+                if (request.method == "POST") log(service_name, "administrator " + session.username +
+                    " saved account password policy revision " + std::to_string(result.at("revision").get<std::int64_t>()));
+                return json_response(result);
+            }
             if(path.starts_with("/api/admin/acme/")) {
                 if(request.method=="GET" && path=="/api/admin/acme/terms") return json_response(acme_->terms(parameter("directory","staging")));
                 if(request.method=="GET" && path=="/api/admin/acme/status") return json_response(acme_->status(parameter("job_id")));
@@ -495,6 +515,7 @@ private:
                     throw ApiError(400, "Account addresses must use the configured server domain.");
                 const auto password = password_field(input);
                 auto result = rpc(config_, "auth", {{"op", "create"}, {"username", username}, {"password", password}, {"admin", input.value("admin", false)}});
+                if (result.value("code", std::string{}) == "password_policy_violation") return json_response(result, 400);
                 require_ok(result, "Unable to create account. This address may already exist.", 409);
                 log(service_name,"administrator " + session.username + " created account " + username);
                 return json_response(result, 201);
@@ -504,6 +525,7 @@ private:
                 const auto username = username_field(input);
                 const auto password = password_field(input);
                 auto result = rpc(config_, "auth", {{"op", "change_password"}, {"username", username}, {"password", password}});
+                if (result.value("code", std::string{}) == "password_policy_violation") return json_response(result, 400);
                 require_ok(result, "Unable to change password.", 400);
                 log(service_name,"administrator " + session.username + " changed password for " + username);
                 std::lock_guard lock(mutex_);

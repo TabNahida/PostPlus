@@ -1,5 +1,6 @@
 #include <postplus/core.hpp>
 #include <postplus/data_lock.hpp>
+#include <postplus/password_policy.hpp>
 #include <openssl/evp.h>
 #include <openssl/rand.h>
 #include <sqlite3.h>
@@ -33,6 +34,10 @@ public:
         if (sqlite3_bind_int(value_, index, value) != SQLITE_OK)
             throw std::runtime_error("authentication database binding failed");
     }
+    void integer64(int index, std::int64_t value) {
+        if (sqlite3_bind_int64(value_, index, value) != SQLITE_OK)
+            throw std::runtime_error("authentication database binding failed");
+    }
     int step() { return sqlite3_step(value_); }
     void done() {
         if (step() != SQLITE_DONE) throw std::runtime_error("authentication database update failed");
@@ -43,9 +48,28 @@ public:
         return ptr ? std::string(ptr, static_cast<std::size_t>(count)) : std::string{};
     }
     int integer(int column) const { return sqlite3_column_int(value_, column); }
+    std::int64_t integer64(int column) const { return sqlite3_column_int64(value_, column); }
 private:
     sqlite3* db_;
     sqlite3_stmt* value_ = nullptr;
+};
+
+class Transaction {
+public:
+    explicit Transaction(sqlite3* db) : db_(db) {
+        if (sqlite3_exec(db_, "BEGIN IMMEDIATE", nullptr, nullptr, nullptr) != SQLITE_OK)
+            throw std::runtime_error("cannot begin authentication database update");
+    }
+    ~Transaction() { if (active_) sqlite3_exec(db_, "ROLLBACK", nullptr, nullptr, nullptr); }
+    void commit() {
+        if (sqlite3_exec(db_, "COMMIT", nullptr, nullptr, nullptr) != SQLITE_OK)
+            throw std::runtime_error("cannot commit authentication database update");
+        active_ = false;
+    }
+    Transaction(const Transaction&) = delete;
+private:
+    sqlite3* db_;
+    bool active_ = true;
 };
 
 std::string required_string(const Json& request, const char* key, std::size_t maximum) {
@@ -107,13 +131,27 @@ public:
         try {
             sqlite3_busy_timeout(db_, 5000);
             execute("PRAGMA journal_mode=WAL; PRAGMA synchronous=FULL; PRAGMA trusted_schema=OFF;");
-            Statement version(db_, "PRAGMA user_version");
-            if (version.step() != SQLITE_ROW || version.integer(0) > 1)
-                throw std::runtime_error("unsupported authentication database version");
-            execute("CREATE TABLE IF NOT EXISTS users ("
-                "username TEXT PRIMARY KEY, salt BLOB NOT NULL, password_hash BLOB NOT NULL,"
-                "iterations INTEGER NOT NULL, admin INTEGER NOT NULL CHECK(admin IN (0,1)),"
-                "created_at INTEGER NOT NULL DEFAULT (unixepoch())); PRAGMA user_version=1;");
+            {
+                Transaction migration(db_);
+                {
+                    Statement version(db_, "PRAGMA user_version");
+                    if (version.step() != SQLITE_ROW || version.integer(0) > 2)
+                        throw std::runtime_error("unsupported authentication database version");
+                }
+                execute("CREATE TABLE IF NOT EXISTS users ("
+                    "username TEXT PRIMARY KEY, salt BLOB NOT NULL, password_hash BLOB NOT NULL,"
+                    "iterations INTEGER NOT NULL, admin INTEGER NOT NULL CHECK(admin IN (0,1)),"
+                    "created_at INTEGER NOT NULL DEFAULT (unixepoch()));"
+                    "CREATE TABLE IF NOT EXISTS password_policy ("
+                    "id INTEGER PRIMARY KEY CHECK(id=1), min_length INTEGER NOT NULL CHECK(min_length BETWEEN 8 AND 128),"
+                    "require_uppercase INTEGER NOT NULL CHECK(require_uppercase IN (0,1)),"
+                    "require_lowercase INTEGER NOT NULL CHECK(require_lowercase IN (0,1)),"
+                    "require_digit INTEGER NOT NULL CHECK(require_digit IN (0,1)),"
+                    "require_symbol INTEGER NOT NULL CHECK(require_symbol IN (0,1)),"
+                    "revision INTEGER NOT NULL CHECK(revision BETWEEN 1 AND 9007199254740991));"
+                    "INSERT OR IGNORE INTO password_policy VALUES(1,12,0,0,0,0,1); PRAGMA user_version=2;");
+                migration.commit();
+            }
 #ifndef _WIN32
             std::filesystem::permissions(directory / "auth.sqlite3", std::filesystem::perms::owner_read | std::filesystem::perms::owner_write);
 #endif
@@ -128,10 +166,20 @@ public:
     Json handle(const Json& request) {
         const auto operation = required_string(request, "op", 32);
         if (operation == "verify") return verify(request);
+        if (operation == "password_policy_get") {
+            std::lock_guard guard(mutex_);
+            return policy_view();
+        }
+        if (operation == "password_policy_set") return save_policy(request);
         if (operation == "create" || operation == "change_password") {
             auto username = username_from(request);
-            auto password = required_string(request, "password", static_cast<std::size_t>(max_password_));
-            if (password.size() < 12) throw std::invalid_argument("password must contain at least 12 bytes");
+            if (!request.contains("password") || !request.at("password").is_string())
+                throw std::invalid_argument("missing or invalid password");
+            const auto password = request.at("password").get<std::string>();
+            {
+                std::lock_guard guard(mutex_);
+                if (const auto failure = check_password(password)) return *failure;
+            }
             bool admin = false;
             if (request.contains("admin")) {
                 if (!request.at("admin").is_boolean()) throw std::invalid_argument("admin must be boolean");
@@ -140,6 +188,10 @@ public:
             auto salt_value = salt();
             auto hash = password_hash(password, salt_value, rounds_);
             std::lock_guard guard(mutex_);
+            Transaction transaction(db_);
+            // A policy saved while hashing must also govern this write. The
+            // transaction protects the check even if another auth process writes.
+            if (const auto failure = check_password(password)) return *failure;
             if (operation == "create") {
                 Statement insert(db_, "INSERT INTO users(username,salt,password_hash,iterations,admin) VALUES(?,?,?,?,?)");
                 insert.text(1, username); insert.bytes(2, salt_value); insert.bytes(3, hash);
@@ -153,6 +205,7 @@ public:
                 update.done();
                 if (sqlite3_changes(db_) != 1) return {{"ok", false}, {"error", "user does not exist"}};
             }
+            transaction.commit();
             log("auth",(operation == "create" ? "account created: " : "password changed: ") + username);
             return {{"ok", true}, {"username", username}};
         }
@@ -188,6 +241,68 @@ public:
         return {{"ok", false}, {"error", "unknown authentication operation"}};
     }
 private:
+    // Call only while holding mutex_; this always reads the persisted revision.
+    Json policy_view() {
+        Statement query(db_, "SELECT min_length,require_uppercase,require_lowercase,require_digit,require_symbol,revision "
+                             "FROM password_policy WHERE id=1");
+        if (query.step() != SQLITE_ROW) throw std::runtime_error("cannot read account password policy");
+        PasswordPolicy policy{query.integer(0), query.integer(1) != 0, query.integer(2) != 0,
+                              query.integer(3) != 0, query.integer(4) != 0};
+        return {{"ok", true}, {"policy", password_policy_json(policy)}, {"revision", query.integer64(5)},
+                {"max_password_bytes", max_password_}, {"length_unit", "unicode_code_points"}, {"restart_required", false}};
+    }
+
+    std::optional<Json> check_password(std::string_view password) {
+        auto view = policy_view();
+        auto violations = password_violations(password, parse_password_policy(view.at("policy")), static_cast<std::size_t>(max_password_));
+        if (violations.empty()) return std::nullopt;
+        view["ok"] = false;
+        view["code"] = "password_policy_violation";
+        view["error"] = "Password does not meet the account password policy.";
+        view["violations"] = std::move(violations);
+        return view;
+    }
+
+    Json save_policy(const Json& request) {
+        auto errors = password_policy_errors(request.value("policy", Json()), max_password_);
+        for (const auto& item : request.items()) {
+            if (item.key() != "op" && item.key() != "revision" && item.key() != "policy")
+                errors.push_back({{"field", item.key()}, {"code", "unknown_field"}});
+        }
+        constexpr std::int64_t max_revision = INT64_C(9007199254740991);
+        if (!request.contains("revision")) errors.push_back({{"field", "revision"}, {"code", "required"}});
+        else if (!request.at("revision").is_number_integer()) errors.push_back({{"field", "revision"}, {"code", "invalid_type"}});
+        else if ((request.at("revision").is_number_unsigned() && request.at("revision").get<std::uint64_t>() > static_cast<std::uint64_t>(max_revision)) ||
+                 request.at("revision").get<std::int64_t>() < 1 || request.at("revision").get<std::int64_t>() > max_revision)
+            errors.push_back({{"field", "revision"}, {"code", "out_of_range"}, {"min", 1}, {"max", max_revision}});
+        if (!errors.empty()) return {{"ok", false}, {"code", "invalid_password_policy"},
+            {"error", "Check the password policy fields."}, {"errors", std::move(errors)}};
+        const auto policy = parse_password_policy(request.at("policy"));
+        const auto revision = request.at("revision").get<std::int64_t>();
+        std::lock_guard guard(mutex_);
+        Transaction transaction(db_);
+        auto current = policy_view();
+        if (revision != current.at("revision").get<std::int64_t>()) {
+            current["ok"] = false;
+            current["code"] = "password_policy_conflict";
+            current["error"] = "Password policy changed. Reload it before saving again.";
+            return current;
+        }
+        // An unchanged save is idempotent and does not advance the revision.
+        if (current.at("policy") == request.at("policy")) return current;
+        if (revision == max_revision) throw std::runtime_error("account password policy revision exhausted");
+        Statement update(db_, "UPDATE password_policy SET min_length=?,require_uppercase=?,require_lowercase=?,require_digit=?,require_symbol=?,"
+                              "revision=revision+1 WHERE id=1 AND revision=?");
+        update.integer(1, policy.min_length); update.integer(2, policy.require_uppercase ? 1 : 0);
+        update.integer(3, policy.require_lowercase ? 1 : 0); update.integer(4, policy.require_digit ? 1 : 0);
+        update.integer(5, policy.require_symbol ? 1 : 0); update.integer64(6, revision); update.done();
+        if (sqlite3_changes(db_) != 1) throw std::runtime_error("cannot save account password policy");
+        current = policy_view();
+        transaction.commit();
+        log("auth", "account password policy changed to revision " + std::to_string(revision + 1));
+        return current;
+    }
+
     Json verify(const Json& request) {
         const auto username = username_from(request);
         const auto password = required_string(request, "password", static_cast<std::size_t>(max_password_));

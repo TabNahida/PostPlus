@@ -71,6 +71,8 @@ An entered relay password is stored in a new private file; blank input preserves
 
 Both browser services validate the session's credential version and administrator role through authentication RPC on authenticated requests. Password changes, including CLI changes, invalidate existing sessions on their next request across both processes. This check avoids repeating password hashing for every request, but means authenticated browser operations require the auth service to remain available.
 
+Account password policy is a live authentication-database setting, independent of the server configuration file. Administrators can choose a minimum of 8–128 Unicode code points and optional ASCII character categories. The default remains 12 with no mandatory categories. A transactional revision prevents lost edits, and creation/reset operations recheck the policy in the write transaction after hashing. Policy changes do not restart services or invalidate existing credentials or sessions; the new rules apply when a password is created or reset. The version-2 authentication schema migration adds this policy without rewriting user records.
+
 Data, web-root, and log-directory paths are displayed read-only after installation. Service-token configuration is not exposed for Web editing. Offline data migration must preserve accounts, mailboxes, queue state, and permissions together. Changing a mail domain does not rename accounts or migrate their mail. Detailed field behavior is in the [configuration reference](configuration.md).
 
 ## Receiving and delivering mail

@@ -201,12 +201,17 @@ class NativeServer:
                 if match:
                     self.token = match.group(1)
                     line = line.replace(self.token, "[REDACTED]")
-                    self.setup_ready.set()
-                if "all services are ready" in line:
-                    self.services_ready.set()
                 self.lines.append(line)
                 output.write(line)
                 output.flush()
+                # The password appears before the rest of the setup banner and
+                # before the listener is bound. Publish readiness only after its
+                # listening line is captured, so callers can inspect all output
+                # and connect without depending on process/thread scheduling.
+                if self.token and "[web] [info] listening on " in line:
+                    self.setup_ready.set()
+                if "all services are ready" in line:
+                    self.services_ready.set()
 
     def wait(self, event, timeout=40):
         deadline = time.monotonic() + timeout
