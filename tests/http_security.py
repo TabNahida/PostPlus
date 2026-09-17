@@ -16,12 +16,17 @@ import traceback
 from integration import PASSWORD, ROOT, Suite
 
 
-def receive_closed(sock, maximum=65536):
-    """Require a complete response and graceful EOF, including on Windows."""
+def receive_closed(sock, maximum=65536, *, allow_reset=False):
+    """Require EOF; timeout probes may also accept an explicit TCP reset."""
     chunks = []
     size = 0
     while True:
-        chunk = sock.recv(8192)
+        try:
+            chunk = sock.recv(8192)
+        except ConnectionResetError:
+            if not allow_reset:
+                raise
+            return b"".join(chunks)
         if not chunk:
             return b"".join(chunks)
         size += len(chunk)
@@ -161,7 +166,11 @@ def slow_headers(suite):
         try:
             healthy(suite)  # A slow client must not monopolize the listener.
             sock.settimeout(max(0.1, 4 - (time.monotonic() - start)))
-            response = receive_closed(sock)
+            # The writer deliberately keeps sending after the request deadline.
+            # Closing with those unread bytes can produce RST on macOS. Either
+            # EOF or RST proves deadline enforcement; socket timeouts still fail,
+            # and any returned HTTP bytes must form a complete response below.
+            response = receive_closed(sock, allow_reset=True)
             elapsed = time.monotonic() - start
             assert len(sent) >= 2, "the request closed before exercising repeated header reads"
             assert elapsed < 4, f"HTTP headers reset the whole-request timeout: {elapsed:.2f}s"
