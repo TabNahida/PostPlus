@@ -132,7 +132,7 @@ def run(s):
         while time.monotonic() < deadline:
             assert server.process.poll() is None, "quiet supervisor failed"
             try:
-                if http(s.ports["admin"], "GET", "/health")[0] == 200:
+                if http(s.ports["admin"], "GET", "/health")[0] == 200 and any("Webmail:" in line for line in server.lines):
                     break
             except OSError:
                 time.sleep(0.1)
