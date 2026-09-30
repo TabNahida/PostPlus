@@ -16,9 +16,7 @@ BINARIES = ("postplus", "postplus-admin", "postplus-auth", "postplus-storage",
             "postplus-smtp", "postplus-pop3", "postplus-imap", "postplus-web")
 
 
-def quote(value, executable=False):
-    if executable:
-        value = value.replace("$", "$$")
+def quote(value):
     return '"' + value.replace("\\", "\\\\").replace('"', '\\"').replace("%", "%%") + '"'
 
 
@@ -32,9 +30,9 @@ def main():
         print("SKIP systemd installer test: Linux required")
         return
     assert run("--help").returncode == 0
-    with tempfile.TemporaryDirectory(prefix='postplus systemd %$ "') as temporary:
+    with tempfile.TemporaryDirectory(prefix='postplus systemd %$ ') as temporary:
         root = Path(temporary)
-        install = root / 'release %$ "name'
+        install = root / 'release %$ name'
         working = root / 'work %$ "name'
         config_dir = working / "config"
         config = config_dir / 'postplus $ "name.json'
@@ -74,9 +72,9 @@ def main():
             verify = subprocess.run(["systemd-analyze", "verify", "--man=no", str(unit)],
                                     capture_output=True, text=True, timeout=15)
             assert verify.returncode == 0, (verify.stdout, verify.stderr, unit.read_text())
-        assert f"WorkingDirectory={quote(str(working.resolve()))}" in result.stdout
-        expected = (f"ExecStart={quote(str(install.resolve() / 'postplus'), True)} "
-                    f"--config {quote(str(config.resolve()), True)}")
+        assert "WorkingDirectory=" + str(working.resolve()).replace("%", "%%") + "/." in result.stdout
+        expected = (f"ExecStart=:{quote(str(install.resolve() / 'postplus'))} "
+                    f"--config {quote(str(config.resolve()))}")
         assert expected in result.stdout, result.stdout
         for setting in ("User=" + user, "Restart=on-failure", "KillMode=mixed",
                         "TimeoutStopSec=130s", "AmbientCapabilities=CAP_NET_BIND_SERVICE"):
@@ -84,6 +82,11 @@ def main():
         default = run(*base_options, "--dry-run", env=environment)
         assert default.returncode == 0, (default.stdout, default.stderr)
         assert "User=" + pwd.getpwuid(os.getuid()).pw_name in default.stdout
+
+        unsupported_install = root / 'unsupported "install'
+        unsupported_install.mkdir()
+        result = run("--install-dir", unsupported_install, "--config", config, "--dry-run")
+        assert result.returncode != 0 and "systemd cannot execute" in result.stderr
 
         config.write_text('{"domain": "example.test"}\n', encoding="utf-8")
         result = run(*options)

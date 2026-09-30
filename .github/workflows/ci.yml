@@ -31,6 +31,9 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: '22'
+      - name: Linux service installer checks
+        if: runner.os == 'Linux'
+        run: python tests/systemd_install_test.py
       - name: Configure
         run: xmake f -m ${{ matrix.mode }} -y
       - name: Build all services
@@ -41,9 +44,6 @@ jobs:
         run: node tests/web_test.js
       - name: Display settings and preference checks
         run: node tests/preferences_ui_test.js
-      - name: Linux service installer checks
-        if: runner.os == 'Linux'
-        run: python tests/systemd_install_test.py
       - name: Mailbox, protocol, setup, maintenance and supervisor integration
         run: python tests/integration.py --build-dir build --mode ${{ matrix.mode }}
       - name: Upload diagnostic logs

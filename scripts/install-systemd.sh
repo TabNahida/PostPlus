@@ -56,6 +56,9 @@ command -v stat >/dev/null || die 'stat is required'
 
 install_dir=$(realpath -e -- "$install_dir") || die "installation directory does not exist: $install_dir"
 [[ -d $install_dir ]] || die "installation path is not a directory: $install_dir"
+# systemd rejects these characters in executable paths even when quoted.
+[[ $install_dir != *'"'* && $install_dir != *"'"* && $install_dir != *'\'* && ! $install_dir =~ [[:cntrl:]] ]] ||
+    die 'systemd cannot execute from an installation path containing quotes, backslashes, or control characters'
 if [[ -z $working_dir ]]; then working_dir=$install_dir; fi
 working_dir=$(realpath -e -- "$working_dir") || die "working directory does not exist: $working_dir"
 [[ -d $working_dir ]] || die "working path is not a directory: $working_dir"
@@ -106,17 +109,20 @@ if [[ $(id -u) == 0 ]] && command -v runuser >/dev/null; then
         die "$service_user cannot write the configuration directory; settings updates require it"
 fi
 
-# systemd expands % specifiers in these settings. ExecStart also expands $vars.
-# Quote each argument and escape both expansion syntaxes so unusual paths work.
+# WorkingDirectory takes a literal path, not a quoted command-line argument.
+# The trailing /. preserves directory names ending in spaces or backslashes.
+unit_directory() {
+    local escaped=${1//%/%%}
+    printf '%s/.' "$escaped"
+}
+
+# Quote ExecStart arguments and escape systemd's % specifiers. The : prefix
+# disables environment expansion so literal $ characters survive in all paths.
 unit_quote() {
     local escaped=${1//\\/\\\\}
     escaped=${escaped//\"/\\\"}
     escaped=${escaped//%/%%}
     printf '"%s"' "$escaped"
-}
-exec_quote() {
-    local escaped=${1//\$/\$\$}
-    unit_quote "$escaped"
 }
 
 unit_file=/etc/systemd/system/postplus.service
@@ -130,8 +136,8 @@ After=network-online.target
 [Service]
 Type=exec
 User=$service_user
-WorkingDirectory=$(unit_quote "$working_dir")
-ExecStart=$(exec_quote "$install_dir/postplus") --config $(exec_quote "$config_path")
+WorkingDirectory=$(unit_directory "$working_dir")
+ExecStart=:$(unit_quote "$install_dir/postplus") --config $(unit_quote "$config_path")
 Restart=on-failure
 RestartSec=5s
 KillMode=mixed
