@@ -12,7 +12,8 @@ let acmeControl=null;
 let passwordPolicyData=null, passwordPolicyVersion=0, userDialogVersion=0, policySaving=false;
 let noticeTimer;
 const accountAddress=PostPlusAddress.create($("new-email"),$("new-email-domain"));
-const mailDomainReady=api("/api/public/config",{quiet:true}).then(data=>{accountAddress.setDomain(data.domain);return true;}).catch(()=>false);
+const loginAddress=PostPlusAddress.create($("login-email"),$("login-domain"));
+const mailDomainReady=api("/api/public/config",{quiet:true}).then(data=>{accountAddress.setDomain(data.domain);loginAddress.setDomain(data.domain);return true;}).catch(()=>false);
 
 function showNotice(message, error = false) {
   clearTimeout(noticeTimer);
@@ -115,7 +116,8 @@ $("login-form").addEventListener("submit", (event) => {
   busy(event.currentTarget, async () => {
     formError("login-error");
     try {
-      const user = await api("/api/login", { method: "POST", body: { username: $("login-email").value.trim(), password: $("login-password").value } });
+      await mailDomainReady;
+      const user = await api("/api/login", { method: "POST", body: { username: loginAddress.address(), password: $("login-password").value } });
       await signedIn(user);
     } catch (error) { formError("login-error", error.message); }
   });

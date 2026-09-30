@@ -28,7 +28,7 @@ If you already have a built distribution, keep the launcher, every `postplus-*` 
 
 ## 2. Open and unlock setup
 
-On an unconfigured installation, the terminal prints a **setup required** notice, a browser address, and a **one-time setup password**. The normal address is:
+On an unconfigured installation, an interactive terminal first asks whether setup should listen on `127.0.0.1` (local access) or `0.0.0.0` (remote access). Choosing remote access also asks for the server hostname or IP used by your browser. The terminal then prints a **setup required** notice, a browser address, and a **one-time setup password**. The normal local address is:
 
 ```text
 http://127.0.0.1:8081/
@@ -52,7 +52,15 @@ xmake run postplus --config "config/trial.json" --setup-port 8082
 
 ### A remote Linux or Windows server
 
-`127.0.0.1` always means the computer where the browser runs. Setup listens on the server’s loopback address by default. If the server has no browser, use SSH port forwarding from your own computer:
+`127.0.0.1` always means the computer where the browser runs. To open setup directly on a remote server, choose `0.0.0.0` at first launch and enter the server's reachable hostname or IP. You can also select it explicitly:
+
+```sh
+./postplus --setup-bind 0.0.0.0 --setup-host SERVER-IP
+```
+
+Replace `SERVER-IP` with the address used by your browser, then open the printed URL and enter the one-time password. No existing certificate is required. Remote HTTP setup sends credentials without encryption; use a trusted network or configure setup HTTPS below when encryption is needed.
+
+For access through SSH, keep the loopback listener and forward its port from your own computer:
 
 ```sh
 ssh -N -L 8081:127.0.0.1:8081 server-user@server-address
@@ -64,13 +72,13 @@ No public firewall rule is needed for setup over this tunnel. The tunnel can als
 
 ### Direct HTTPS setup on a remote server
 
-SSH forwarding remains the simplest way to configure a fresh remote installation. If you already have a certificate for a reachable setup hostname, you can expose the temporary wizard explicitly:
+If you already have a certificate for a reachable setup hostname, you can enable HTTPS for the temporary wizard:
 
 ```sh
 xmake run postplus --setup-bind 0.0.0.0 --setup-host setup.example.com --setup-port 8081 --setup-tls-certificate /srv/tls/setup/fullchain.pem --setup-tls-private-key /srv/tls/setup/privkey.pem
 ```
 
-Use the HTTPS URL printed by PostPlus and the separate one-time password. Replace the hostname and paths with your own; the browser must trust the certificate and its hostname. A wildcard bind requires `--setup-host`, and any non-loopback setup listener requires both TLS files. Restrict the setup port to your administration network in your firewall. These flags control only the temporary wizard; configure the permanent administration and Webmail listeners in the form. If you do not yet have a certificate, use the SSH tunnel first, then request a certificate as described below.
+Use the HTTPS URL printed by PostPlus and the separate one-time password. Replace the hostname and paths with your own; the browser must trust the certificate and its hostname. A wildcard bind requires `--setup-host`; both TLS files must be supplied together when enabling HTTPS. These flags control only the temporary wizard; configure the permanent administration and Webmail listeners in the form. If you do not yet have a certificate, use HTTP setup on a trusted network or an SSH tunnel, then request a certificate as described below.
 
 ## 3. Complete the first-run form
 
@@ -102,7 +110,7 @@ The generated internal service token lives in a private file referenced by `serv
 5. Compose a message to `bob@localhost`, add a subject and text, and send it.
 6. Sign out, sign in as Bob, and refresh the inbox. Delivery is queued, so a message can take a short time to appear.
 
-Webmail has no registration page. Every account must be created by an administrator. The account form and Webmail login show the fixed `@domain`, so enter only the name before it. Pasting a complete address on the same domain also works. Mail clients, the administrator login, and API calls use the full email address. The administrator can also use Webmail by signing in separately.
+Webmail has no registration page. Every account must be created by an administrator. Setup, account creation, administration login, and Webmail login show the fixed `@domain`, so enter only the name before it. Pasting a complete address on the same domain also works. Mail clients and API calls use the full email address. The administrator can also use Webmail by signing in separately.
 
 Use **Delivery queue** to inspect delayed or quarantined mail and **Service logs** to see errors. Sent copies appear when Webmail submits mail successfully; final delivery can happen later.
 
@@ -220,6 +228,11 @@ For full antivirus scanning, separately install ClamAV, maintain its signatures,
 
 ## 7. Stop, back up, and recover
 
+On Linux, a completed setup can run as a systemd service. Stop the terminal
+instance, then run `sudo bash scripts/install-systemd.sh` from the extracted
+installation. See the [service guide](systemd.md) for prerequisites, options,
+logs, and `systemctl` commands.
+
 Press **Ctrl+C** in the launcher terminal and wait until the group exits. For a consistent offline backup, copy the entire data directory, configuration, referenced service-token file, and TLS credentials to protected storage. Do not copy only live `.sqlite3` files: recent changes can be in SQLite WAL files. See [Backup and recovery](architecture.md#backup-and-recovery).
 
 After restoring or making a manual change, run PostPlus with the same explicit `--config` path and inspect the terminal. Keep the old config or the save-generated backup until the new configuration has started successfully. To recover from an unreachable admin listener, stop PostPlus and correct `admin_bind`, `ports.admin`, or TLS paths in the file, then restart.
@@ -257,7 +270,7 @@ The utility removes only the known authentication/mail SQLite database files and
 | --- | --- |
 | No first-run prompt | Check the configuration path printed/used by the launcher. An initialized installation starts normally; use its admin address. Use a separate config and data directory for a fresh trial. |
 | Setup password rejected | Use the password from the currently running launcher. Restarting setup generates a new one. Paste it without added spaces. |
-| Setup works on the server but not another PC | Setup is loopback-only by default. Use SSH forwarding or explicitly configure its HTTPS listener; `127.0.0.1` in your browser refers to your PC. |
+| Setup works on the server but not another PC | Choose `0.0.0.0` at first launch or pass `--setup-bind 0.0.0.0 --setup-host SERVER-IP`. Check that the setup port is reachable; `127.0.0.1` in your browser refers to your PC. SSH forwarding also works. |
 | Port unavailable / address already in use | Another program or PostPlus instance may be using the port. Stop that instance or choose a free port. Admin and Webmail must have distinct ports. |
 | `setup web asset is missing` | Build again, keep the bundled `web` folder beside the executables, or pass `--web-root` pointing at this repository's `web` folder. |
 | Service token missing or invalid | A configured token-file path must be readable and contain the installation's token. A nonempty token environment variable overrides the file. Restore the correct secret; do not replace an established data directory to resolve this. |

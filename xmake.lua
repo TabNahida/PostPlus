@@ -1,5 +1,5 @@
 set_project("PostPlus")
-set_version("0.1.0")
+set_version("0.1.1")
 set_xmakever("2.9.8")
 set_languages("c++20")
 set_warnings("allextra")
@@ -146,5 +146,6 @@ xpack("postplus")
                 "postplus-transfer", "postplus-ctl", "postplus-clean-data")
     add_installfiles("README.md", "LICENSE", "THIRD_PARTY_NOTICES.md")
     -- Explicit allowlist: never include the local configuration or mail data.
-    add_installfiles("(web/**)", "(docs/**)", "(licenses/**)", "(config/postplus.example.json)")
+    add_installfiles("(web/**)", "(docs/**)", "(licenses/**)", "(config/postplus.example.json)",
+                     "(scripts/install-systemd.sh)")
 xpack_end()

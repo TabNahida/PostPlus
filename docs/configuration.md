@@ -20,7 +20,7 @@ On Windows, for example:
 
 A missing file opens setup. A regular JSON configuration without an active service-token environment value, without a `service_token_file` path, and without `setup_complete: true` can enter setup to finish an uninitialized installation. An established installation with a broken credential file fails explicitly; it is not silently reinitialized. Correct malformed or unreadable configurations before trying again.
 
-Setup prints its temporary password only in the terminal and listens on `127.0.0.1:8081` by default. `--setup-port` changes that temporary listener. The final administration port is the separate `ports.admin` setting; Webmail uses `ports.web`. Setup completion preserves the selected data directory of an existing configuration and saves a private backup before replacing it.
+Setup prints its temporary password only in the terminal. On an interactive first launch, choose `127.0.0.1` for local setup or `0.0.0.0` for remote setup, then enter the browser-facing hostname/IP for remote access. Non-interactive launches default to `127.0.0.1:8081`. `--setup-port` changes that temporary listener. The final administration port is the separate `ports.admin` setting; Webmail uses `ports.web`. Setup completion preserves the selected data directory of an existing configuration and saves a private backup before replacing it.
 
 ### First-run command-line options
 
@@ -28,7 +28,7 @@ Setup listener options apply only while the wizard is open. They are not configu
 
 | Option | Meaning |
 | --- | --- |
-| `--setup-bind IP` | IPv4/IPv6 listening address; default `127.0.0.1`. |
+| `--setup-bind IP` | IPv4/IPv6 listening address. Skips the interactive address choice; non-interactive default is `127.0.0.1`. |
 | `--setup-port PORT` | Temporary listening port, 1–65535; default 8081. |
 | `--setup-host HOST` | Advertised hostname/IP without scheme or port. Required with `0.0.0.0` or `::`. Host/Origin checks accept this host. |
 | `--setup-tls-certificate PATH` | PEM chain for the wizard's HTTPS listener. |
@@ -38,14 +38,20 @@ Setup listener options apply only while the wizard is open. They are not configu
 xmake run postplus --setup-bind 127.0.0.1 --setup-port 9081
 ```
 
-For remote setup with an existing certificate:
+For direct remote setup without an existing certificate:
+
+```sh
+postplus --setup-bind 0.0.0.0 --setup-host mail.example.com
+```
+
+For optional HTTPS setup with an existing certificate:
 
 ```sh
 postplus --setup-bind 0.0.0.0 --setup-port 9443 --setup-host mail.example.com \
   --setup-tls-certificate /srv/certs/fullchain.pem --setup-tls-private-key /srv/certs/privkey.pem
 ```
 
-Remote setup requires HTTPS to protect the temporary setup password and administrator credentials. Without an existing certificate, keep the loopback listener and use an SSH tunnel (`ssh -L 8081:127.0.0.1:8081 user@server`), then open the printed local URL. You can request a certificate inside that setup session. Configure the permanent service addresses separately in the wizard.
+Remote HTTP setup does not require a certificate. HTTP sends the temporary setup password and administrator credentials without encryption; use a trusted network, the optional HTTPS listener, or an SSH tunnel (`ssh -L 8081:127.0.0.1:8081 user@server`) when encryption is needed. You can request a certificate inside the wizard. Configure the permanent service addresses separately in the form; their network TLS requirements still apply.
 
 ### Reset mail data
 

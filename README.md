@@ -59,12 +59,12 @@ xmake build -y
 xmake run postplus
 ```
 
-On an unconfigured installation, the terminal tells you that setup is required and prints:
+On an unconfigured installation, an interactive terminal lets you choose `127.0.0.1` for local setup or `0.0.0.0` for remote setup. Remote setup asks for the server hostname or IP used by your browser. Without an interactive terminal, setup defaults to loopback; pass `--setup-bind` explicitly to select another address. The terminal then tells you that setup is required and prints:
 
 - The **setup address**, normally `http://127.0.0.1:8081/`.
 - A random **one-time setup password**, used to unlock the setup page.
 
-Open that address on the server machine, enter the setup password, then choose your domain and create a permanent administrator password. For a first local trial, keep the loopback addresses and select local development mode. Save the form to start the services.
+Open that address, enter the setup password, then choose your domain and create a permanent administrator password. For direct remote setup without an existing certificate, run `./postplus --setup-bind 0.0.0.0 --setup-host SERVER-IP`. For a first local trial, keep the loopback addresses and select local development mode. Save the form to start the services.
 
 | Interface | Local development default |
 | --- | --- |
@@ -90,7 +90,7 @@ The native launcher starts and monitors all service processes. A standalone inst
 
 Storage-size fields offer byte, KiB, MiB, GiB, and TiB selectors while configuration files retain exact integer byte values. Per-user quotas in **User accounts → Storage quota** take effect immediately; global settings apply after a manual restart.
 
-Open **Settings** near your account for language and appearance preferences. **User accounts → Account password policy** controls new accounts and password resets, with an eight-character default minimum and optional character requirements. Changes take effect immediately; existing passwords and saved policies continue to work. When creating a mailbox or signing in to Webmail, enter the name before the displayed `@domain`.
+Open **Settings** near your account for language and appearance preferences. **User accounts → Account password policy** controls new accounts and password resets, with an eight-character default minimum and optional character requirements. Changes take effect immediately; existing passwords and saved policies continue to work. Setup, account creation, administration login, and Webmail login fill in `@domain` automatically; enter the mailbox name before it.
 
 Most day-to-day options are available in **Administration → Server settings**: listener addresses and ports, TLS, relay delivery, filtering, resource limits, sessions, and logging. Saving validates the configuration, creates a backup, and shows the addresses that will apply after restart. The current services keep running. When ready, press **Ctrl+C** in the launcher terminal, wait for shutdown, then run the same launch command to apply the saved settings.
 
@@ -160,7 +160,7 @@ tests/                 C++ tests, web checks, and integration suites
 - Outbound delivery uses an SMTP relay. Direct MX delivery, SPF/DKIM/DMARC processing, DSN generation, multiple domains, and multi-host high availability are not implemented.
 - SMTP queues mail transactionally. Local delivery is idempotent; retrying outbound mail after an interrupted acknowledgement can produce a duplicate.
 - Sessions use bounded worker pools, SQLite serializes writes, and delivery uses one worker. Capacity for hundreds or thousands of active users requires representative workload testing and further development.
-- OS service installation, automatic boot integration, automatic certificate renewal, and DNS automation are not bundled.
+- Linux installations can use the bundled [systemd installer](docs/systemd.md) after setup for automatic startup and restart on failure. Automatic certificate renewal and DNS automation are not bundled.
 
 Protocol compatibility and security are the development priorities. Contributions should include focused verification; [internal RPC contracts](docs/internal-contract.md) describe service integration.
 

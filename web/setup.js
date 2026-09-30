@@ -10,6 +10,7 @@
   let unlocking = false;
   let acmeControl = null;
   let saving = false;
+  const adminAddress = PostPlusAddress.create($("setup-admin"),$("setup-admin-domain"));
   const portLabels = {smtp:"SMTP",pop3:"POP3",imap:"IMAP",web:"Webmail",admin:"Administration",auth:"Authentication",storage:"Mail storage",filter:"Mail filter",transfer:"Mail transfer",delivery_lock:"Delivery lock"};
   for (const [service, label] of Object.entries(portLabels)) {
     const group = document.createElement("div");
@@ -50,10 +51,8 @@
   }
   $("setup-mode").addEventListener("change", () => modeChanged(true));
   $("setup-brand").addEventListener("click", event => event.preventDefault());
-  let adminEdited = false;
-  $("setup-admin").addEventListener("input", () => { adminEdited = true; });
   $("setup-domain").addEventListener("input", () => {
-    if (!adminEdited) $("setup-admin").value = `admin@${$("setup-domain").value.trim().toLowerCase()}`;
+    adminAddress.setDraftDomain($("setup-domain").value);
   });
   $("setup-form").addEventListener("input", event => event.target.removeAttribute("aria-invalid"));
   document.addEventListener("postplus:language", () => {render(); advancedEditor?.translate(); acmeControl?.translate();});
@@ -92,6 +91,8 @@
     for (const control of event.currentTarget.querySelectorAll("[name]")) {
       payload[control.name] = control.type === "number" ? Number(control.value) : (control.type === "password" ? control.value : control.value.trim());
     }
+    try { payload.admin_username = adminAddress.address(); }
+    catch (error) { $("setup-admin").setAttribute("aria-invalid","true");fail({key:error.message});$("setup-admin").focus();return; }
     payload.allow_insecure_auth = $("setup-mode").value === "local";
     if (payload.allow_insecure_auth) { payload.tls_certificate = ""; payload.tls_private_key = ""; }
     payload.ports = Object.fromEntries(Object.keys(portLabels).map(service => [service, Number($(`setup-port-${service}`).value)]));
@@ -140,6 +141,7 @@
       for (const control of $("setup-form").querySelectorAll("[name]")) {
         if (control.name !== "admin_password" && Object.hasOwn(defaults,control.name)) control.value = defaults[control.name];
       }
+      adminAddress.setDraftDomain($("setup-domain").value);
       for (const service of Object.keys(portLabels)) $(`setup-port-${service}`).value = defaults.ports[service];
       $("setup-data-dir").readOnly = completing_existing;
       const exclude = new Set([...$("setup-form").querySelectorAll("[name]")].map(control => control.name));

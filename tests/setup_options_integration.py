@@ -2,16 +2,68 @@
 import argparse
 import os
 from pathlib import Path
+import re
 import secrets
 import socket
 import ssl
 import subprocess
+import threading
 import time
 from integration import ROOT
-from setup_integration import NativeServer, assert_ports_closed, http
+from setup_integration import NativeServer, assert_ports_closed, http, request_stop
+
+
+def interactive_remote_choice(binaries, directory):
+    if os.name == "nt":
+        return  # POSIX pseudoterminals let the test exercise the console prompt.
+    import pty
+    master, slave=pty.openpty()
+    with socket.socket() as reservation:
+        reservation.bind(("127.0.0.1",0))
+        port=reservation.getsockname()[1]
+    binary=binaries/"postplus"
+    config=directory/"interactive.json"
+    process=None
+    reader=None
+    try:
+        process=subprocess.Popen([str(binary),"--config",str(config),"--setup-port",str(port),
+                                  "--web-root",str(ROOT/"web")],cwd=directory,stdin=slave,
+                                 stdout=subprocess.PIPE,stderr=subprocess.STDOUT,text=True,
+                                 encoding="utf-8",errors="replace")
+        os.close(slave)
+        slave=-1
+        os.write(master,b"2\n127.0.0.1\n")
+        lines=[]
+        ready=threading.Event()
+        def read_output():
+            for line in process.stdout:
+                lines.append(re.sub(r"(One-time setup password: )[0-9a-f]{64}",r"\1[REDACTED]",line))
+                if "[web] [info] listening on " in line:
+                    ready.set()
+        reader=threading.Thread(target=read_output,daemon=True)
+        reader.start()
+        assert ready.wait(30),"interactive setup did not start: " + "".join(lines[-12:])
+        assert any("Choose 1 or 2" in line for line in lines),lines
+        assert any(f"http://127.0.0.1:{port}/setup" in line for line in lines),lines
+        assert http(port,"GET","/setup",headers={"Host":f"127.0.0.1:{port}"})[0]==200
+        assert not config.exists()
+    finally:
+        if process is not None:
+            if process.poll() is None:
+                request_stop(process.pid)
+                try:process.wait(timeout=30)
+                except subprocess.TimeoutExpired:
+                    process.kill()
+                    process.wait(timeout=10)
+            if reader is not None:reader.join(timeout=3)
+            process.stdout.close()
+        if slave!=-1:os.close(slave)
+        os.close(master)
+    assert_ports_closed({"setup":port})
 
 
 def run(binaries, directory):
+    interactive_remote_choice(binaries,directory)
     with socket.socket() as reservation:
         reservation.bind(("127.0.0.1",0))
         port=reservation.getsockname()[1]
@@ -30,9 +82,37 @@ def run(binaries, directory):
         assert http(port,"POST","/api/setup/acme/start",{"directory":"http://127.0.0.1/"},headers)[0]==400
         assert http(port,"GET","/size.js",headers={"Host":f"localhost:{port}"})[0]==200
         assert http(port,"GET","/acme.js",headers={"Host":f"localhost:{port}"})[0]==200
-        for asset in ("preferences.js", "preferences.css", "icons.svg"):
+        for asset in ("preferences.js", "preferences.css", "icons.svg", "address.js"):
             assert http(port,"GET","/"+asset,headers={"Host":f"localhost:{port}"})[0]==200
     finally:server.close()
+
+    # A deliberate wildcard bind can serve the first-run wizard over HTTP,
+    # while its canonical Host, Origin, and one-time token still gate access.
+    with socket.socket() as reservation:
+        reservation.bind(("127.0.0.1",0))
+        remote_port=reservation.getsockname()[1]
+    remote_config=directory/"remote-http.json"
+    remote=NativeServer(binaries,remote_config,remote_port,directory,"remote-http",ROOT/"web",
+                        ["--setup-bind","0.0.0.0","--setup-host","127.0.0.1"])
+    try:
+        remote.wait(remote.setup_ready)
+        origin=f"http://127.0.0.1:{remote_port}"
+        headers={"Host":f"127.0.0.1:{remote_port}","Origin":origin,"X-Setup-Token":remote.token}
+        assert any(f"{origin}/setup" in line for line in remote.lines)
+        assert any("Remote HTTP setup is enabled" in line for line in remote.lines)
+        assert http(remote_port,"GET","/setup",headers=headers)[0]==200
+        status,_,response=http(remote_port,"GET","/api/setup",headers=headers)
+        assert status==200 and response["ok"] and response["defaults"]["bind"]=="127.0.0.1",response
+        status,_,response=http(remote_port,"POST","/api/setup",{},headers)
+        assert status==400 and response["code"]=="invalid_domain",response
+        for rejected in ({**headers,"Host":f"localhost:{remote_port}"},
+                         {**headers,"Origin":f"http://localhost:{remote_port}"},
+                         {**headers,"X-Setup-Token":"wrong"}):
+            status,_,response=http(remote_port,"GET","/api/setup",headers=rejected)
+            assert status==403 and response["ok"] is False,(rejected,status,response)
+        assert not remote_config.exists() and not remote.services_ready.is_set()
+    finally:remote.close()
+    assert_ports_closed({"setup":remote_port})
 
     # Test remote-bind setup using the existing local certificate and a scoped
     # trust context. The client verifies the certificate chain and localhost name.
@@ -90,7 +170,7 @@ def run(binaries, directory):
                               capture_output=True,text=True,timeout=10)
         assert result.returncode!=0,(arguments,result.stdout,result.stderr)
     assert not (directory/"invalid.json").exists()
-    print("PASS custom HTTP/HTTPS setup bind/port/hostname, verified TLS, Host/Origin/token checks and CLI validation",flush=True)
+    print("PASS local and remote HTTP/HTTPS setup, verified TLS, Host/Origin/token checks and CLI validation",flush=True)
 
 
 if __name__=="__main__":

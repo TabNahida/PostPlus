@@ -292,7 +292,7 @@ async function checkCertificateControls() {
   assert.match(error.textContent,/Check the challenge port/,"Job failure handling uses the backend's code property");
   component.dispose();assert.equal(timers.size,0);
 }
-checkCertificateControls().then(checkMaintenanceControls).then(()=>{
+checkCertificateControls().then(checkSetupAddressFlow).then(checkMaintenanceControls).then(()=>{
   console.log(`Web checks passed: language defaults, persistence, API errors, ${checkedLabels} translated labels, typed settings, exact size units, certificate controls, secret preservation, portal separation, and script syntax.`);
 }).catch(error=>{console.error(error);process.exitCode=1;});
 
@@ -313,7 +313,66 @@ assert.equal(nameInput.value,"legacy");assert.equal(domainLabel.textContent,"@ol
 assert.equal(mailbox.address(),"legacy@old.example");assert.equal(nameInput.readOnly,true);
 mailbox.setAddress();assert.equal(domainLabel.textContent,"@example.com");assert.equal(nameInput.readOnly,false);
 assert.throws(()=>mailbox.setDomain("<img src=x>"),/unreadable response/);
+nameInput.value="Alice";
+mailbox.setDraftDomain(" New.EXAMPLE ");
+assert.equal(domainLabel.textContent,"@new.example","Setup shows the domain as it is edited");
+assert.equal(nameInput.value,"Alice","Changing the setup domain preserves the chosen mailbox name");
+assert.equal(mailbox.address(),"alice@new.example");
+nameInput.value=" Alice@NEW.example ";
+assert.equal(mailbox.address(),"alice@new.example","Browser autofill still accepts a full address");
+assert.equal(nameInput.value,"Alice");
+mailbox.setDraftDomain("bad domain");
+assert.throws(()=>mailbox.address(),/valid ASCII mail domain/);
+mailbox.setDraftDomain("good.example");
+nameInput.value="bad name";
+assert.throws(()=>mailbox.address(),/displayed domain/);
 console.log("Mailbox address checks passed: fixed domain, pasted addresses, foreign-domain rejection, and legacy password-reset identity.");
+
+async function checkSetupAddressFlow() {
+  const html=fs.readFileSync(path.join(root,"web/setup.html"),"utf8");
+  assert.match(html,/src="\/address\.js"/);
+  assert.match(html,/id="setup-admin-domain"/);
+  const controls=new Map(),portNames=["smtp","pop3","imap","web","admin","auth","storage","filter","transfer","delivery_lock"];
+  class SetupControl extends Control {
+    constructor(tag="div"){super(tag);this.hidden=false;}
+    querySelectorAll(selector){
+      if(this!==id("setup-form"))return [];
+      const named=["setup-domain","setup-admin","setup-data-dir","setup-bind","setup-password","setup-certificate","setup-key"].map(id);
+      return selector==="[name]"?named:selector==="input"?[...named,id("setup-password-confirm")]:[];
+    }
+    scrollIntoView(){}
+  }
+  function id(name){if(!controls.has(name))controls.set(name,new SetupControl());return controls.get(name);}
+  for(const [control,name] of [["setup-domain","domain"],["setup-admin","admin_username"],["setup-data-dir","data_dir"],["setup-bind","bind"],["setup-password","admin_password"],["setup-certificate","tls_certificate"],["setup-key","tls_private_key"]])id(control).name=name;
+  id("setup-password").type="password";
+  id("setup-password-confirm").type="password";
+  id("setup-mode").value="local";
+  const ports=Object.fromEntries(portNames.map((service,index)=>[service,2500+index]));
+  const defaults={domain:"localhost",admin_username:"admin@localhost",data_dir:"/srv/postplus",bind:"127.0.0.1",allow_insecure_auth:true,ports};
+  const requests=[];
+  const sandbox={window:{},document:{getElementById:id,createElement:tag=>new SetupControl(tag),addEventListener(){},title:""},
+    PostPlusI18n:fresh.i18n,PostPlusAddress:addressSandbox.window.PostPlusAddress,
+    PostPlusAcme:{create:()=>({dispose(){},translate(){}})},PostPlusSettings:{create:()=>({read:()=>({}),clearSecrets(){},highlight(){},translate(){}})},
+    URL,URLSearchParams,location:{hash:"#token=secret",pathname:"/setup",search:""},history:{replaceState(){}},
+    fetch:async(route,options)=>{requests.push({route,options});return {ok:true,json:async()=>options.method==="POST"?{ok:true,web_url:"http://localhost:8080/",admin_url:"http://localhost:8081/"}:{ok:true,defaults,schema:[]}};}};
+  vm.runInNewContext(fs.readFileSync(path.join(root,"web/setup.js"),"utf8"),sandbox);
+  for(let index=0;index<12;index++)await Promise.resolve();
+  assert.equal(id("setup-admin").value,"admin","The setup default is shown as a mailbox name");
+  assert.equal(id("setup-admin-domain").textContent,"@localhost");
+  id("setup-domain").value="Example.COM";id("setup-domain").callbacks.input();
+  assert.equal(id("setup-admin-domain").textContent,"@example.com","The suffix tracks a changed setup domain");
+  assert.equal(id("setup-admin").value,"admin");
+  id("setup-password").value="test-passphrase";id("setup-password-confirm").value="test-passphrase";
+  id("setup-admin").value="alice@wrong.example";
+  await id("setup-form").callbacks.submit({preventDefault(){},currentTarget:id("setup-form")});
+  assert.equal(requests.filter(call=>call.options.method==="POST").length,0,"A different domain cannot reach setup submission");
+  id("setup-admin").value="Alice@EXAMPLE.COM";
+  await id("setup-form").callbacks.submit({preventDefault(){},currentTarget:id("setup-form")});
+  const posted=requests.find(call=>call.options.method==="POST");
+  assert.ok(posted,"Setup submits with an address on the selected domain");
+  assert.equal(JSON.parse(posted.options.body).admin_username,"alice@example.com");
+  assert.equal(id("setup-admin").value,"Alice","Browser autofill is normalized to the mailbox name");
+}
 
 async function checkMaintenanceControls() {
   const controls=new Map(),calls=[],timers=new Map();let timerId=0;
@@ -357,4 +416,19 @@ async function checkMaintenanceControls() {
   assert.equal(id("backup-download").hidden,false);assert.equal(id("backup-create").disabled,false);
   assert.equal(id("backup-download").href,"http://localhost:8081/api/admin/backup/download?job_id=test-backup");
   assert.match(id("backup-status").textContent,/Backup ready/);
+  calls.length=0;
+  sandbox.request=async(route,options)=>{calls.push({route,options});return {ok:true,username:"admin@localhost",admin:true};};
+  vm.runInContext('api=request;signedIn=async()=>{};',sandbox);
+  id("login-email").value="Admin@LOCALHOST";id("login-password").value="test-password";
+  assert.equal(id("login-domain").textContent,"@localhost");
+  id("login-form").callbacks.submit({preventDefault(){},currentTarget:id("login-form")});
+  for(let index=0;index<8;index++)await Promise.resolve();
+  assert.equal(calls[0].route,"/api/login");
+  assert.equal(calls[0].options.body.username,"admin@localhost","Administrator login reconstructs the configured domain");
+  assert.equal(id("login-email").value,"Admin","Full address autofill leaves only the mailbox name visible");
+  calls.length=0;id("login-email").value="admin@other.example";
+  id("login-form").callbacks.submit({preventDefault(){},currentTarget:id("login-form")});
+  for(let index=0;index<8;index++)await Promise.resolve();
+  assert.equal(calls.length,0,"Administrator login rejects a different domain before requesting authentication");
+  assert.match(id("login-error").textContent,/displayed domain/);
 }

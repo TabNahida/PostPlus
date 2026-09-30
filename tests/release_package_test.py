@@ -93,7 +93,7 @@ def verify_inventory(root, platform):
     suffix = ".exe" if platform == "windows" else ""
     expected = {name + suffix for name in BINARIES}
     document_files = [ROOT / name for name in ("README.md", "LICENSE", "THIRD_PARTY_NOTICES.md",
-                                               "config/postplus.example.json")]
+                                               "config/postplus.example.json", "scripts/install-systemd.sh")]
     for directory in ("docs", "web", "licenses"):
         document_files.extend(path for path in (ROOT / directory).rglob("*") if path.is_file())
     for source in document_files:
@@ -120,7 +120,7 @@ def native_smoke(root, directory):
     server = NativeServer(root, config_path, ports["admin"], directory, "release-package")
     try:
         server.wait(server.setup_ready)
-        for path in ("/setup", "/i18n.js", "/preferences.js", "/preferences.css", "/favicon.svg"):
+        for path in ("/setup", "/i18n.js", "/address.js", "/preferences.js", "/preferences.css", "/favicon.svg"):
             status, _, body = http(ports["admin"], "GET", path)
             assert status == 200 and body, path
         headers = {"X-Setup-Token": server.token}
@@ -142,6 +142,12 @@ def native_smoke(root, directory):
         request_stop(server.process.pid)
         assert server.process.wait(timeout=45) == 0
         assert_ports_closed(ports)
+        if sys.platform.startswith("linux"):
+            preview = subprocess.run(["bash", str(root / "scripts/install-systemd.sh"),
+                                      "--config", str(config_path), "--dry-run"],
+                                     cwd=root, capture_output=True, text=True, timeout=15, check=True)
+            assert "Restart=on-failure" in preview.stdout
+            assert "postplus.service" in preview.stdout
     finally:
         server.close()
 

@@ -8,6 +8,7 @@
 #include <algorithm>
 #include <charconv>
 #include <csignal>
+#include <cstdio>
 #include <cstdlib>
 #include <fstream>
 #include <iostream>
@@ -15,7 +16,10 @@
 #include <stdexcept>
 #include <thread>
 #ifdef _WIN32
+#include <io.h>
 #include <windows.h>
+#else
+#include <unistd.h>
 #endif
 
 namespace postplus {
@@ -60,6 +64,7 @@ struct Options {
     int setup_port = 8081;
     std::string setup_bind = "127.0.0.1", setup_host;
     std::filesystem::path setup_certificate, setup_key;
+    bool setup_bind_explicit = false;
     bool help = false;
 };
 
@@ -73,7 +78,7 @@ Options parse_options(int argc, char** argv) {
         if (++i >= argc) throw std::invalid_argument(std::string(argument) + " requires a value");
         if (argument == "--config") options.config = std::filesystem::path(argv[i]);
         else if (argument == "--web-root") options.web_root = std::filesystem::path(argv[i]);
-        else if (argument == "--setup-bind") options.setup_bind = argv[i];
+        else if (argument == "--setup-bind") { options.setup_bind = argv[i]; options.setup_bind_explicit = true; }
         else if (argument == "--setup-host") options.setup_host = argv[i];
         else if (argument == "--setup-tls-certificate") options.setup_certificate = std::filesystem::absolute(argv[i]);
         else if (argument == "--setup-tls-private-key") options.setup_key = std::filesystem::absolute(argv[i]);
@@ -85,6 +90,36 @@ Options parse_options(int argc, char** argv) {
         }
     }
     return options;
+}
+
+bool stdin_is_terminal() {
+#ifdef _WIN32
+    return _isatty(_fileno(stdin)) != 0;
+#else
+    return isatty(fileno(stdin)) != 0;
+#endif
+}
+
+void choose_setup_listener(Options& options) {
+    if (!stdin_is_terminal()) return;
+    if (!options.setup_bind_explicit) {
+        std::cout << "\nFirst-time setup listening address:\n"
+                     "  1) 127.0.0.1 (this computer only)\n"
+                     "  2) 0.0.0.0 (allow remote setup)\n"
+                     "Choose 1 or 2 [1]: " << std::flush;
+        std::string choice;
+        if (!std::getline(std::cin, choice)) throw std::invalid_argument("setup listening address selection cancelled");
+        choice = trim(choice);
+        if (choice == "2" || choice == "0.0.0.0") options.setup_bind = "0.0.0.0";
+        else if (!choice.empty() && choice != "1" && choice != "127.0.0.1")
+            throw std::invalid_argument("choose 1 or 2 for the setup listening address");
+    }
+    if (options.setup_bind == "0.0.0.0" && options.setup_host.empty()) {
+        std::cout << "Hostname or IP used to open the remote setup page: " << std::flush;
+        if (!std::getline(std::cin, options.setup_host)) throw std::invalid_argument("setup hostname selection cancelled");
+        options.setup_host = trim(options.setup_host);
+        if (options.setup_host.empty()) throw std::invalid_argument("a remote setup hostname or IP is required");
+    }
 }
 
 void ensure_alive(ProcessGroup& children) {
@@ -253,7 +288,7 @@ int run(int argc, char** argv) {
                      "  --config PATH       Configuration file (default: config/postplus.json)\n"
                      "  --web-root PATH     Web assets for first-run setup (default: executable/web, then ./web)\n"
                      "  --setup-port PORT   Setup page port (default: 8081)\n"
-                     "  --setup-bind IP     Setup listening IP (default: 127.0.0.1)\n"
+                     "  --setup-bind IP     Setup listening IP (interactive on first launch; otherwise 127.0.0.1)\n"
                      "  --setup-host HOST   Setup URL hostname; required for a wildcard bind\n"
                      "  --setup-tls-certificate PATH  Setup HTTPS certificate chain (PEM)\n"
                      "  --setup-tls-private-key PATH  Setup HTTPS private key (PEM)\n"
@@ -261,7 +296,9 @@ int run(int argc, char** argv) {
                      "A missing or uninitialized configuration opens browser setup and prints\n"
                      "its URL and one-time password. An initialized configuration starts all\n"
                      "services. Restart manually to apply saved settings. Ctrl+C stops them.\n"
-                     "Setup listener options are command-line only; remote setup requires HTTPS.\n";
+                     "A terminal prompts for the first-run setup address. For unattended remote\n"
+                     "setup, specify --setup-bind 0.0.0.0 and --setup-host HOST. Setup HTTPS\n"
+                     "is optional; use a trusted network when configuring over HTTP.\n";
         return 0;
     }
     std::signal(SIGINT, stop_signal);
@@ -296,6 +333,7 @@ int run(int argc, char** argv) {
         }
     }
     if (needs_setup) {
+        choose_setup_listener(options);
         if (!run_setup({options.config, options.web_root, options.setup_port, incomplete_configuration,
                        options.setup_bind,options.setup_host,options.setup_certificate,options.setup_key},
                        [&](const Config& staged, const std::string& username, const std::string& password) {

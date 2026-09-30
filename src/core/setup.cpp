@@ -319,7 +319,6 @@ bool run_setup(const SetupOptions& options, SetupProvision provision) {
     const auto address = asio::ip::make_address(options.bind);
     const bool local=address.is_loopback(), https=!options.tls_certificate.empty();
     if(https!=!options.tls_private_key.empty()) throw std::invalid_argument("provide both setup TLS certificate and private key");
-    if(!local && !https) throw std::invalid_argument("remote setup requires --setup-tls-certificate and --setup-tls-private-key; use a loopback SSH tunnel for first-time certificate setup");
     if(address.is_unspecified() && options.host.empty()) throw std::invalid_argument("--setup-host is required with a wildcard --setup-bind");
     std::string host=options.host.empty()?address.to_string():lower(options.host);
     std::error_code host_error;
@@ -341,6 +340,7 @@ bool run_setup(const SetupOptions& options, SetupProvision provision) {
         {"setup.html", "text/html; charset=utf-8"}, {"setup.js", "application/javascript; charset=utf-8"},
         {"i18n.js", "application/javascript; charset=utf-8"}, {"settings.js", "application/javascript; charset=utf-8"},
         {"size.js", "application/javascript; charset=utf-8"}, {"acme.js", "application/javascript; charset=utf-8"},
+        {"address.js", "application/javascript; charset=utf-8"},
         {"preferences.js", "application/javascript; charset=utf-8"}, {"preferences.css", "text/css; charset=utf-8"},
         {"icons.svg", "image/svg+xml"},
         {"favicon.svg", "image/svg+xml"}, {"style.css", "text/css; charset=utf-8"}}) {
@@ -477,7 +477,9 @@ bool run_setup(const SetupOptions& options, SetupProvision provision) {
               << "Open this configuration page: " << scheme << authority << "/setup\n"
               << "One-time setup password: " << token << "\n"
               << "Use this password to unlock setup, then choose your administrator account and password.\n"
-              << (local ? "Setup is available only on this computer. " : "Remote HTTPS setup is enabled. ")
+              << (local ? "Setup is available only on this computer. " :
+                  https ? "Remote HTTPS setup is enabled. " :
+                          "Remote HTTP setup is enabled; use a trusted network. ")
               << "This password expires after setup or server shutdown.\n" << std::endl;
     serve_http(listener, "web", handler, false, preflight, [&] {
         const auto deadline = stop_after.load();

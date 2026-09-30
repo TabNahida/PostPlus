@@ -25,25 +25,25 @@ SHA-256 value against its entry before extracting it:
 
 ```powershell
 # Windows PowerShell
-Get-FileHash .\postplus-0.1.0-windows-x64.zip -Algorithm SHA256
-Expand-Archive .\postplus-0.1.0-windows-x64.zip -DestinationPath .
-Set-Location .\postplus-0.1.0
+Get-FileHash .\postplus-0.1.1-windows-x64.zip -Algorithm SHA256
+Expand-Archive .\postplus-0.1.1-windows-x64.zip -DestinationPath .
+Set-Location .\postplus-0.1.1
 .\postplus.exe
 ```
 
 ```sh
 # Linux
-sha256sum postplus-0.1.0-linux-x86_64.tar.gz
-tar -xzf postplus-0.1.0-linux-x86_64.tar.gz
-cd postplus-0.1.0
+sha256sum postplus-0.1.1-linux-x86_64.tar.gz
+tar -xzf postplus-0.1.1-linux-x86_64.tar.gz
+cd postplus-0.1.1
 ./postplus
 ```
 
 ```sh
 # macOS
-shasum -a 256 postplus-0.1.0-macosx-arm64.tar.gz
-tar -xzf postplus-0.1.0-macosx-arm64.tar.gz
-cd postplus-0.1.0
+shasum -a 256 postplus-0.1.1-macosx-arm64.tar.gz
+tar -xzf postplus-0.1.1-macosx-arm64.tar.gz
+cd postplus-0.1.1
 ./postplus
 ```
 
@@ -53,6 +53,12 @@ The [getting started guide](getting-started.md) and
 [中文入门指南](getting-started.zh-CN.md) explain the configuration process.
 Use `./postplus --setup-port 9081` (Windows: `.\postplus.exe --setup-port 9081`)
 if the first-run administration port is already in use.
+
+An interactive first launch offers local or remote setup. For direct remote
+HTTP setup, run `./postplus --setup-bind 0.0.0.0 --setup-host SERVER-IP`;
+setup TLS files are optional. Linux users can install their completed setup
+as a service using `sudo bash scripts/install-systemd.sh`; see the
+[systemd guide](systemd.md) for prerequisites and options.
 
 ## Reproduce an archive
 
