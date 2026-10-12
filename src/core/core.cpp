@@ -1,13 +1,14 @@
 #include <postplus/core.hpp>
 #include <postplus/process.hpp>
 #include <postplus/trust.hpp>
+#include <postplus/dkim.hpp>
 #include <asio/ssl.hpp>
 #include <openssl/crypto.h>
 #include <openssl/evp.h>
+#include <openssl/err.h>
 #include <openssl/rand.h>
 #include <openssl/ssl.h>
 #include <algorithm>
-#include <array>
 #include <array>
 #include <atomic>
 #include <charconv>
@@ -112,7 +113,7 @@ Config Config::from_file(const std::filesystem::path& path) {
     if (!file) throw std::runtime_error("cannot open config: " + config.source.string());
     file >> config.values;
     if (!config.values.is_object()) throw std::invalid_argument("config must be a JSON object");
-    for (const auto* key : {"data_dir", "web_root", "tls_certificate", "tls_private_key", "log_dir", "service_token_file", "smarthost_password_file"}) {
+    for (const auto* key : {"data_dir", "web_root", "tls_certificate", "tls_private_key", "log_dir", "service_token_file", "smarthost_password_file", "dkim_private_key"}) {
         auto value = config.text(key);
         if (value.empty()) continue;
         auto resolved = std::filesystem::path(value);
@@ -126,12 +127,30 @@ Config Config::from_file(const std::filesystem::path& path) {
     if (config.number("max_connections", 32) < 1 || config.number("max_connections", 32) > 1024) throw std::invalid_argument("max_connections must be 1..1024");
     if (config.number("timeout_seconds", 30) < 1 || config.number("timeout_seconds", 30) > 300) throw std::invalid_argument("timeout_seconds must be 1..300");
     if (!valid_address("postmaster@" + config.text("domain", "localhost"))) throw std::invalid_argument("invalid domain");
+    const auto outbound = config.outbound_mode();
+    if (outbound != "disabled" && outbound != "direct" && outbound != "relay") throw std::invalid_argument("outbound_mode must be disabled, direct, or relay");
+    const auto hostname = config.mail_hostname();
+    if (!valid_address("postmaster@" + hostname)) throw std::invalid_argument("invalid mail_hostname");
+    if (outbound == "relay" && config.text("smarthost_host").empty()) throw std::invalid_argument("relay mode requires smarthost_host");
+    if (outbound == "direct" && (!valid_dkim_domain(hostname) || !valid_dkim_domain(config.text("domain")) || config.text("dkim_private_key").empty())) throw std::invalid_argument("direct delivery requires public mail_hostname, domain and dkim_private_key");
+    if (!valid_dkim_selector(config.text("dkim_selector","postplus"))) throw std::invalid_argument("invalid dkim_selector");
+    if (outbound=="direct" && config.text("domain").size()+config.text("dkim_selector","postplus").size()+12>253) throw std::invalid_argument("DKIM record name is too long");
+    if (outbound=="relay" && !config.text("dkim_private_key").empty() && !valid_dkim_record_name(config.text("domain"),config.text("dkim_selector","postplus"))) throw std::invalid_argument("configured DKIM signing requires a public domain and valid selector");
+    if (!config.text("dkim_private_key").empty()) (void)load_dkim_private_key(config.text("dkim_private_key"));
+    const auto budget = config.number("direct_timeout_seconds",120);
+    if (budget < 1 || budget > 300) throw std::invalid_argument("direct_timeout_seconds must be 1..300");
+    const auto direct_tls = config.text("direct_tls","starttls");
+    if (direct_tls != "starttls" && direct_tls != "required") throw std::invalid_argument("direct_tls must be starttls or required");
+    const auto retry_age=config.number("delivery_max_age_seconds",432000);
+    if (retry_age<60 || retry_age>604800) throw std::invalid_argument("delivery_max_age_seconds must be 60..604800");
     (void)config.token();
     return config;
 }
 std::string Config::text(const std::string& key, const std::string& fallback) const { return values.value(key, fallback); }
 int Config::number(const std::string& key, int fallback) const { return values.value(key, fallback); }
 bool Config::flag(const std::string& key, bool fallback) const { return values.value(key, fallback); }
+std::string Config::outbound_mode() const { return text("outbound_mode", text("smarthost_host").empty() ? "disabled" : "relay"); }
+std::string Config::mail_hostname() const { return text("mail_hostname",outbound_mode()=="direct"?"mail."+text("domain"):text("domain","localhost")); }
 int Config::port(const std::string& service) const {
     static const std::map<std::string, int> defaults{{"auth",18081},{"storage",18082},{"filter",18083},{"transfer",18084},{"smtp",2525},{"pop3",1110},{"imap",1143},{"web",8080},{"admin",8081}};
     int port_value = defaults.at(service);
@@ -238,6 +257,9 @@ void Connection::connect(const std::string& host, int port) {
     });
     impl_->wait([&](auto done) { asio::async_connect(impl_->socket, endpoints, [done](std::error_code ec, const auto&) { done(ec); }); });
 }
+void Connection::connect(const tcp::endpoint& endpoint) {
+    impl_->wait([&](auto done) { impl_->socket.async_connect(endpoint,done); });
+}
 std::string Connection::line(std::size_t limit) {
     // A slow byte stream must not reset the deadline for the same logical line.
     impl_->operation_deadline = std::chrono::steady_clock::now() + impl_->timeout;
@@ -282,8 +304,13 @@ void Connection::start_tls_client(const std::string& hostname) {
     if (encrypted() || !impl_->buffer.empty()) throw std::runtime_error("invalid TLS transition");
     impl_->tls_context = std::make_unique<asio::ssl::context>(asio::ssl::context::tls_client);
     SSL_CTX_set_min_proto_version(impl_->tls_context->native_handle(), TLS1_2_VERSION);
-    impl_->tls_context->set_default_verify_paths();
+    // A release may run without the package builder's OpenSSL default paths.
+    // Native/distribution roots can still provide a valid trust store; the
+    // handshake below always verifies the chain and hostname.
+    std::error_code default_paths_error;
+    impl_->tls_context->set_default_verify_paths(default_paths_error);
     add_platform_trust_roots(SSL_CTX_get_cert_store(impl_->tls_context->native_handle()));
+    ERR_clear_error();
     impl_->tls_context->set_verify_mode(asio::ssl::verify_peer);
     impl_->tls = std::make_unique<asio::ssl::stream<tcp::socket&>>(impl_->socket, *impl_->tls_context);
     impl_->tls->set_verify_callback(asio::ssl::host_name_verification(hostname));
@@ -506,7 +533,7 @@ void serve_rpc(const Config& config, const std::string& service, std::function<J
     });
 }
 Json rpc(const Config& config, const std::string& service, const Json& request) {
-    const int timeout = service == "transfer" ? config.number("smarthost_timeout_seconds",30) + 10 : config.number("timeout_seconds",30);
+    const int timeout = service == "transfer" ? (config.outbound_mode()=="direct" ? config.number("direct_timeout_seconds",120) : config.number("smarthost_timeout_seconds",30)) + 10 : config.number("timeout_seconds",30);
     Connection connection{std::chrono::seconds(timeout)};
     connection.connect("127.0.0.1", config.port(service));
     const auto body = wire_encode(request).dump();

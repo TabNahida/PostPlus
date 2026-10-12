@@ -531,6 +531,11 @@ private:
                     return json_response(save_settings(config_, request_json(request)));
                 }
             }
+            if(request.path=="/api/admin/dkim" && request.method=="POST") {
+                std::lock_guard lock(maintenance_mutex_);
+                if(shutting_down_ || backups_->busy()) throw ApiError(409,"Wait for the backup or shutdown operation to finish before saving configuration.");
+                return json_response(prepare_dkim(Config::from_file(config_.source),request_json(request)));
+            }
             if (request.method == "GET" && (request.path == "/api/admin/logs" || request.path.starts_with("/api/admin/logs?")))
                 return json_response(log_query(config_,request.path));
             if (request.method == "GET" && request.path == "/api/admin/users") {
@@ -596,8 +601,8 @@ HttpResponse Web::send_mail(const HttpRequest& request, const WebSession& sessio
             const auto exists = rpc(config_, "auth", {{"op", "exists"}, {"username", recipient}});
             require_ok(exists, "Unable to validate recipients.");
             if (!exists.value("exists", false)) throw ApiError(400, "A local recipient account does not exist: " + recipient);
-        } else if (config_.text("smarthost_host").empty()) {
-            throw ApiError(400, "External delivery is unavailable until an administrator configures a smarthost.");
+        } else if (config_.outbound_mode()=="disabled") {
+            throw ApiError(400, "External delivery is disabled. Ask an administrator to enable direct delivery or an SMTP relay.");
         }
         recipients.push_back(std::move(recipient));
     }

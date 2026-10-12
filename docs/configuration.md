@@ -182,9 +182,29 @@ The web form provides B, KiB, MiB, GiB, and TiB selectors. Configuration files a
 
 Lowering a limit does not remove existing mail or shrink databases. New writes can fail once a mailbox or queue reaches its limit. Monitor queue age, free disk space, authentication latency, and memory before raising concurrency substantially. The current implementation has a single delivery worker and serialized SQLite writes.
 
+## Built-in direct delivery and DKIM
+
+Select **Outgoing delivery mode → direct** to send without a relay. PostPlus resolves recipient MX records, connects to public destination addresses on TCP 25, and signs outgoing mail with RSA-SHA256 DKIM (2048-bit key, relaxed/relaxed canonicalization). Null MX and nonexistent recipient domains fail permanently; absent MX falls back to the recipient domain's A/AAAA records. MX preference and alternate addresses are tried within a bounded deadline. Private, loopback and special-use destination addresses are rejected.
+
+| Field | Default | Meaning |
+| --- | --- | --- |
+| `outbound_mode` | `disabled` for new setups | `disabled`, `direct`, or `relay`. Older files without this field use relay when `smarthost_host` is present, otherwise disabled. |
+| `mail_hostname` | Mail domain for older files | Public SMTP EHLO hostname, normally `mail.example.com`. Publish its A/AAAA; ask your server provider to set matching PTR. |
+| `dkim_selector` | `postplus` | DNS selector, up to 63 letters, digits and hyphens. |
+| `dkim_private_key` | Empty | Private PEM path, relative to the configuration. Setup generates and persists it before showing its public TXT record. Never publish this file. |
+| `direct_tls` | `starttls` | Use verified STARTTLS when offered. `required` also defers delivery to destinations without STARTTLS. TLS negotiation failures do not retry in plaintext. |
+| `direct_timeout_seconds` | `120` | Total DNS and SMTP budget per recipient, 1–300 seconds. |
+| `delivery_max_age_seconds` | `432000` | Retry temporary failures for up to five days. Permanent failures and expired jobs remain in quarantine with a diagnostic. |
+
+In first-run setup, choose direct delivery, enter the actual outbound public IP addresses, generate the DKIM record, and publish the displayed SPF/DKIM/DMARC records. The generated key is reused across retries and restarts. Saved backups include the active DKIM key. Changing the domain or selector requires updating DNS before sending again.
+
+For an existing installation, use **Server settings → Outgoing mail → Generate / load DKIM public record** and save direct mode with a public mail hostname. The offline command `postplus-ctl dkim --config config/postplus.json` also prepares a key for the saved mail domain/selector and prints only its public record; enabling direct mode through settings selects that prepared key. Manual configuration must set `dkim_private_key` to the generated file beside the configuration.
+
+Allow outbound TCP 25 and DNS UDP/TCP 53 to the resolver (1.1.1.1). Configure PTR at the hosting provider and use an IP permitted to send mail. DNS matches alone do not prove deliverability or inbox placement. Authenticated submission is required for external recipients. Received messages are not DKIM/SPF/DMARC verified, and automatic DSN/bounce generation, DANE and MTA-STS are not implemented. An interrupted connection after DATA can leave acceptance unknown; the queue retries such failures and cannot guarantee exactly-once Internet delivery.
+
 ## Outgoing SMTP relay
 
-An empty relay host permits local-domain mail only. External recipients require a configured relay that accepts your sender domain.
+Select `outbound_mode: "relay"` to use an SMTP relay that accepts your sender domain. The relay can be hosted by you or a provider. Disabled outgoing delivery still permits Internet mail to existing accounts in your domain with correct DNS and reachable inbound TCP 25, and mail between local accounts.
 
 | Field | Default | Meaning |
 | --- | --- | --- |
@@ -200,7 +220,7 @@ The browser-only field `smarthost_password` writes a new secret file named `<con
 
 The saved password file is protected, but it is still a recoverable credential. Back it up securely. If your environment variable overrides it, changes to the saved value do not change the effective password until you unset/update that variable and restart the launcher.
 
-Outbound TLS checks certificate trust and hostname. `SSL_CERT_FILE` or `SSL_CERT_DIR` can configure OpenSSL's trust store. Domain verification and any SPF/DKIM policy supplied by your relay are external setup steps. PostPlus does not currently implement direct MX delivery, SPF, DKIM signing, or DMARC processing.
+Outbound TLS checks certificate trust and hostname. `SSL_CERT_FILE` or `SSL_CERT_DIR` can configure OpenSSL's trust store. Follow your relay's domain verification and SPF/DKIM instructions. An optional configured local DKIM key also signs messages sent through the relay.
 
 ## Mail filtering
 
@@ -293,6 +313,7 @@ The following is an illustrative **set of changes**, not a complete replacement 
   "allow_insecure_auth": false,
   "tls_certificate": "../certs/fullchain.pem",
   "tls_private_key": "../certs/privkey.pem",
+  "outbound_mode": "relay",
   "smarthost_host": "smtp.provider.example",
   "smarthost_port": 587,
   "smarthost_tls": "starttls",

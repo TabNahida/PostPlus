@@ -59,6 +59,18 @@ Avoid repeated production requests while diagnosing network problems. Use stagin
 
 ## Troubleshooting
 
+Loading the CA terms only makes an outbound HTTPS request to Let's Encrypt; it does not create configuration or certificate files, start the HTTP-01 listener or validate your domain's DNS. If this step fails, check outbound DNS resolution, TCP 443, the system clock and trusted CA roots before changing MX/DKIM records or public port 80.
+
+The original 0.1.1 setup endpoint can report a network/TLS error from this step as `cannot create or validate initial configuration files`. That message alone does not prove a filesystem problem. The corrected transport reports certificate-authority connectivity failures separately. Static OpenSSL builds also load the Linux system CA locations, in addition to OpenSSL's defaults and the native Windows/macOS trust stores.
+
+On Linux, install or update the distribution's `ca-certificates` package. For an existing 0.1.1 binary, point `SSL_CERT_FILE` at the actual system PEM CA bundle before launching PostPlus, for example on Ubuntu/Debian:
+
+```sh
+SSL_CERT_FILE=/etc/ssl/certs/ca-certificates.crt ./postplus
+```
+
+On other distributions, use their actual bundle path, such as `/etc/pki/tls/certs/ca-bundle.crt`. For a systemd installation, set the environment in the service configuration and restart it. This selects trusted CA roots; it does not bypass certificate or hostname verification. Once terms load, continue with A/AAAA and public TCP 80 checks for HTTP-01.
+
 | Message or symptom | What to check |
 | --- | --- |
 | Cannot listen for HTTP-01 | Port 80 may be occupied, or the process may lack permission to bind it. Check the local listener and firewall configuration. |
@@ -67,6 +79,7 @@ Avoid repeated production requests while diagnosing network problems. Use stagin
 | Terms changed | Load and read the newly published terms, then explicitly agree before retrying. |
 | Rate limit reached | Wait for the CA's limit to reset. Use staging for further tests. |
 | Certificate chain cannot be verified | Check the machine's trusted CA roots and system clock. Production downloads and issued chains are validated; TLS verification is never disabled. |
+| Cannot load certificate authority terms | Check outbound DNS and HTTPS access to `acme-staging-v02.api.letsencrypt.org` or `acme-v02.api.letsencrypt.org`, system CA certificates and the clock. This step does not use inbound port 80. |
 | Browser distrusts a staging certificate | This is expected. Request a production certificate after the staging test succeeds. |
 | New certificate is saved but clients see the old one | Apply and save the returned TLS paths, then restart PostPlus manually. |
 

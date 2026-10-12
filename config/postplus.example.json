@@ -40,6 +40,13 @@
     "admin": 8081
   },
   "smarthost_host": "",
+  "outbound_mode": "disabled",
+  "mail_hostname": "localhost",
+  "dkim_selector": "postplus",
+  "dkim_private_key": "",
+  "direct_tls": "starttls",
+  "direct_timeout_seconds": 120,
+  "delivery_max_age_seconds": 432000,
   "smarthost_port": 587,
   "smarthost_timeout_seconds": 30,
   "smarthost_tls": "starttls",

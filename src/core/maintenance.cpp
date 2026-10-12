@@ -1,4 +1,5 @@
 #include <postplus/maintenance.hpp>
+#include <postplus/dkim.hpp>
 #include <postplus/data_lock.hpp>
 #include <sqlite3.h>
 #include <algorithm>
@@ -220,8 +221,8 @@ constexpr std::string_view restore_instructions =
     "2. Extract this archive using tar into a private directory.\n"
     "3. Copy the matching PostPlus binaries and web directory from a release.\n"
     "4. Restrict access to the directory/files to the server operating-system user.\n"
-    "5. Review config/postplus.json: ports, bind addresses, relay and TLS settings.\n"
-    "   Paths for data, web assets, secrets and TLS files are portable.\n"
+    "5. Review config/postplus.json: ports, bind, outbound mode, DKIM and TLS.\n"
+    "   Paths for data, web assets, secrets and TLS/DKIM files are portable.\n"
     "   Existing service-token/relay environment variables still override files.\n"
     "6. Start postplus --config config/postplus.json. Verify accounts and mail.\n\n"
     "The databases share one snapshot point. Queued deliveries may be retried;\n"
@@ -244,6 +245,8 @@ void snapshot(const Config& live, const fs::path& directory, const std::atomic<b
     const auto token = saved.token();
     const auto relay = saved.relay_password();
     portable["smarthost_password_file"] = relay.empty() ? "" : "smarthost.secret";
+    const auto dkim=saved.text("dkim_private_key").empty()?std::string{}:load_dkim_private_key(saved.text("dkim_private_key"));
+    portable["dkim_private_key"]=dkim.empty()?"":"dkim/private-key.pem";
     std::string certificate, key;
     if (!saved.text("tls_certificate").empty()) {
         certificate = read_small(saved.text("tls_certificate"));
@@ -274,6 +277,7 @@ void snapshot(const Config& live, const fs::path& directory, const std::atomic<b
     archive.bytes("config/postplus.json", portable.dump(2) + "\n");
     archive.bytes("config/service-token.secret", token);
     if (!relay.empty()) archive.bytes("config/smarthost.secret", relay);
+    if (!dkim.empty()) archive.bytes("config/dkim/private-key.pem",dkim);
     if (!certificate.empty()) {
         archive.bytes("config/certificates/fullchain.pem", certificate);
         archive.bytes("config/certificates/private-key.pem", key);

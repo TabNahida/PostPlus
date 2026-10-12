@@ -1,7 +1,9 @@
 """Real online backup/restore, authorization, and native shutdown contracts."""
 import argparse
+import ctypes
 import io
 import json
+import os
 from pathlib import Path
 import secrets
 import sqlite3
@@ -57,7 +59,14 @@ def run(s):
     private_key = ROOT / "tests/fixtures/localhost-test-only.key"
     relay_secret = s.directory / "relay.secret"
     relay_secret.write_text("saved-relay-test-secret", encoding="utf-8")
+    # Prepare a managed private DKIM key through the protected public-record API.
+    status, _, public_key = s.http("admin", "POST", "/api/admin/dkim",
+                                  {"domain": "example.com", "selector": "postplus"}, authorized)
+    assert status == 200 and "PRIVATE KEY" not in json.dumps(public_key), public_key
+    dkim_key = next(s.directory.glob("postplus.dkim-*.pem"))
+    assert_private(dkim_key)
     s.config.update(tls_certificate=str(certificate), tls_private_key=str(private_key),
+                    dkim_private_key=str(dkim_key),
                     smarthost_password_file=str(relay_secret), smarthost_password_env="POSTPLUS_MAINTENANCE_TEST_RELAY")
     s.save()
     job = backup(s, authorized)
@@ -71,7 +80,7 @@ def run(s):
     restored.mkdir(mode=0o700)
     with tarfile.open(fileobj=io.BytesIO(raw), mode="r:") as archive:
         names = set(archive.getnames())
-        assert names == {"data/auth.sqlite3", "data/storage.sqlite3", "config/postplus.json", "config/service-token.secret", "config/smarthost.secret", "config/certificates/fullchain.pem", "config/certificates/private-key.pem", "manifest.json", "RESTORE.txt"}, names
+        assert names == {"data/auth.sqlite3", "data/storage.sqlite3", "config/postplus.json", "config/service-token.secret", "config/smarthost.secret", "config/dkim/private-key.pem", "config/certificates/fullchain.pem", "config/certificates/private-key.pem", "manifest.json", "RESTORE.txt"}, names
         assert all(member.isfile() and member.mode == 0o600 for member in archive.getmembers())
         archive.extractall(restored, filter="data")
     for database in ("auth", "storage"):
@@ -84,6 +93,21 @@ def run(s):
     assert config["data_dir"] == "../data" and config["web_root"] == "../web"
     assert (restored / "config/service-token.secret").read_text() == s.token
     assert config["service_token_file"] == "service-token.secret"
+    assert config["dkim_private_key"] == "dkim/private-key.pem"
+    assert (restored / "config/dkim/private-key.pem").read_bytes() == dkim_key.read_bytes()
+    if os.name == "nt":
+        # tar's Unix 0600 mode cannot restore Windows ACLs. Follow the restore
+        # guide's permission step before loading the restored signing key.
+        from ctypes import wintypes as w
+        security = ctypes.WinDLL("advapi32", use_last_error=True)
+        security.GetFileSecurityW.argtypes = [w.LPCWSTR, w.DWORD, ctypes.c_void_p, w.DWORD, ctypes.POINTER(w.DWORD)]
+        security.SetFileSecurityW.argtypes = [w.LPCWSTR, w.DWORD, ctypes.c_void_p]
+        size = w.DWORD()
+        security.GetFileSecurityW(str(dkim_key), 4, None, 0, ctypes.byref(size))
+        descriptor = ctypes.create_string_buffer(size.value)
+        assert security.GetFileSecurityW(str(dkim_key), 4, descriptor, size, ctypes.byref(size))
+        assert security.SetFileSecurityW(str(restored / "config/dkim/private-key.pem"), 4 | 0x80000000, descriptor)
+    assert_private(restored / "config/dkim/private-key.pem")
     assert (restored / "config/certificates/fullchain.pem").read_bytes() == certificate.read_bytes()
     assert (restored / "config/certificates/private-key.pem").read_bytes() == private_key.read_bytes()
     assert (restored / "config/smarthost.secret").read_text() == "saved-relay-test-secret"
@@ -110,7 +134,8 @@ def run(s):
         assert status == 200 and len(inbox["messages"]) == 1
         assert http(s.ports["admin"], "GET", "/api/admin/messages?username=" + user + "&folder=Drafts", headers=a)[2]["messages"]
         assert http(s.ports["admin"], "GET", "/api/admin/quota?username=" + user, headers=a)[2]["max_bytes"] == 4 * 1024**3
-        assert http(s.ports["admin"], "GET", "/api/admin/stats", headers=a)[2]["queued"] == 1
+        queue_stats = http(s.ports["admin"], "GET", "/api/admin/stats", headers=a)[2]
+        assert queue_stats["queued"] + queue_stats["quarantined"] == 1
         settings = http(s.ports["admin"], "GET", "/api/admin/config", headers=a)[2]
         assert http(s.ports["admin"], "POST", "/api/admin/config", {"revision": settings["revision"], "values": {"log_level": "warn"}}, a)[0] == 200
         status, _, stopped = http(s.ports["admin"], "POST", "/api/admin/shutdown", {}, a)

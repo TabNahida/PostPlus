@@ -594,7 +594,7 @@ private:
     }
     Json queue_list(const Json& request) {
         const auto limit = integer_field(request, "limit", 1, 1, 100);
-        Statement query(db_, "SELECT id,sender,recipient,raw,attempts,size FROM queue WHERE state='pending' AND next_attempt<=? ORDER BY next_attempt,created_at,id LIMIT ?");
+        Statement query(db_, "SELECT id,sender,recipient,raw,attempts,size,created_at FROM queue WHERE state='pending' AND next_attempt<=? ORDER BY next_attempt,created_at,id LIMIT ?");
         query.integer(1, now()); query.integer(2, limit);
         Json jobs = Json::array();
         std::int64_t response_bytes = 0;
@@ -604,7 +604,7 @@ private:
             const auto size = query.integer(5);
             if (!jobs.empty() && response_bytes + size > max_message_) break;
             jobs.push_back({{"id", query.string(0)}, {"sender", query.string(1)}, {"recipient", query.string(2)},
-                {"raw", query.string(3)}, {"attempts", query.integer(4)}});
+                {"raw", query.string(3)}, {"attempts", query.integer(4)}, {"created_at",query.integer(6)}});
             response_bytes += size;
         }
         return {{"ok", true}, {"jobs", std::move(jobs)}};

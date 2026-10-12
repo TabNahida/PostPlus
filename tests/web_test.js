@@ -104,6 +104,10 @@ assert.equal(chinese.error({code:"invalid_setup_token",error:"token=secret"}), "
 assert.equal(chinese.error({error:"<script>unexpected server detail</script>"}), "请求失败，请稍后重试。");
 assert.equal(chinese.error({error:"A local recipient account does not exist: user@example.com"}), "本地收件人账号不存在：user@example.com");
 assert.equal(chinese.error({code:"port_unavailable"}), "服务端口不可用，请选择其他端口或检查权限。");
+assert.equal(chinese.error({code:"invalid_configuration",field:"mail_hostname",error:"Direct delivery requires a public mail domain and mail server hostname."}),"直接投递需要公网邮箱域名与邮件服务器主机名。");
+assert.equal(chinese.error({code:"dkim_not_prepared",error:"Load the current DKIM public record in the DNS guide before saving direct delivery."}),"保存直接投递配置前，请先在 DNS 向导读取当前 DKIM 公共记录。");
+assert.match(chinese.error({code:"ca_tls_failed",error:"Raw OpenSSL detail"}),/系统时间和受信任根证书/);
+assert.match(fresh.i18n.error({code:"ca_dns_failed",error:"Raw resolver detail"}),/DNS resolver and Internet connection/);
 assert.equal(chinese.error({error:"Move the message to Trash before permanently deleting it."}), "请先将邮件移入已删除邮件，再将其永久删除。");
 
 let checkedLabels = 0;
@@ -112,6 +116,8 @@ function translated(key, file) {
   assert.notEqual(chinese.t(key), key, `Missing Chinese translation in ${file}: ${key}`);
   checkedLabels++;
 }
+const settingsSource=fs.readFileSync(path.join(root,"src/core/settings.cpp"),"utf8");
+for(const match of settingsSource.matchAll(/SettingsError\([^,]+,\s*"([^"]+)"(?=\s*[,\)])/g))translated(match[1],"settings validation");
 for (const file of ["index.html", "admin.html", "setup.html"]) {
   const html = fs.readFileSync(path.join(root, "web", file), "utf8");
   assert.match(html, /<html\b[^>]*\blang="en"(?:\s|>)/, `${file} must render in English before scripts run`);
@@ -123,7 +129,7 @@ for (const file of ["index.html", "admin.html", "setup.html"]) {
   }
   for (const match of html.matchAll(/data-i18n-(?:aria-label|title|placeholder)="([^"]+)"/g)) translated(match[1], file);
 }
-for (const file of ["app.js", "admin.js", "setup.js", "settings.js", "size.js", "acme.js", "preferences.js", "address.js"]) {
+for (const file of ["app.js", "admin.js", "setup.js", "settings.js", "size.js", "acme.js", "dns.js", "preferences.js", "address.js"]) {
   const script = fs.readFileSync(path.join(root, "web", file), "utf8");
   new vm.Script(script, {filename:file});
   for (const match of script.matchAll(/\bt\("([^"]+)"/g)) translated(match[1], file);
@@ -138,10 +144,11 @@ class Control {
     if(tag==="textarea") Object.defineProperty(this,"type",{get:()=>"textarea"});
   }
   append(...children) {for(const child of children) {this.children.push(child); child.parent=this; child.parentElement=this;}}
+  prepend(...children) {this.children.unshift(...children);for(const child of children){child.parent=this;child.parentElement=this;}}
   replaceChildren(...children) {this.children=[];this.append(...children);}
   setAttribute(key,value) {this.attributes[key]=value;}
   removeAttribute(key) {delete this.attributes[key];}
-  addEventListener(name, callback) {this.callbacks[name]=callback;}
+  addEventListener(name, callback) {const previous=this.callbacks[name];this.callbacks[name]=previous?(...args)=>{previous(...args);return callback(...args);}:callback;}
   closest(tag) {return this.tagName===tag ? this : this.parent?.closest(tag);}
   focus() {this.focused=true;}
   checkValidity() {return this.type!=="number" || (!this.min || Number(this.value)>=Number(this.min)) && (!this.max || Number(this.value)<=Number(this.max));}
@@ -224,14 +231,15 @@ assert.doesNotMatch(fs.readFileSync(path.join(root,"web/setup.js"),"utf8"),/(?:l
 // Exercise asynchronous ACME controls with local fake responses; no CA request is sent.
 async function checkCertificateControls() {
   const panelRoot=new Control("div"),timers=new Map(),calls=[];
-  let nextTimer=0,resolveTerms,resolveOldStatus,statusCount=0,statusResponse={ok:true,state:"idle"},termsCount=0,applied=null;
+  let nextTimer=0,resolveTerms,resolveOldStatus,statusCount=0,statusResponse={ok:true,state:"idle"},termsCount=0,applied=null,appliedMetadata=null;
   const oldStatus=new Promise(resolve=>{resolveOldStatus=resolve;});
   const firstTerms=new Promise(resolve=>{resolveTerms=resolve;});
   const termsUrl="https://TERMS.example.test:443/legal";
   const acmeSandbox={window:{},document:{createElement:tag=>new Control(tag)},PostPlusI18n:fresh.i18n,URL,
     setTimeout(callback){const id=++nextTimer;timers.set(id,callback);return id;},clearTimeout(id){timers.delete(id);}};
   vm.runInNewContext(fs.readFileSync(path.join(root,"web/acme.js"),"utf8"),acmeSandbox);
-  const component=acmeSandbox.window.PostPlusAcme.create(panelRoot,{domain:"mail.example.com",prefix:"test",onCertificate:paths=>{applied=paths;},
+  const domains=[],running=[];
+  const component=acmeSandbox.window.PostPlusAcme.create(panelRoot,{domain:"mail.example.com",prefix:"test",onDomainChange:value=>domains.push(value),onRunningChange:value=>running.push(value),onCertificate:(paths,metadata)=>{applied=paths;appliedMetadata=metadata;},
     async request(suffix,options){
       calls.push({suffix,options});
       if(suffix.startsWith("/terms"))return ++termsCount===1 ? firstTerms : {ok:true,terms_of_service:termsUrl};
@@ -241,6 +249,11 @@ async function checkCertificateControls() {
       throw new Error("Unexpected test request: "+suffix);
     }});
   const all=descendants(panelRoot),label=text=>all.find(control=>control.dataset.i18n===text),id=value=>all.find(control=>control.id===value);
+  component.setDomain("example.com");
+  assert.equal(component.getDomain(),"example.com","Untouched certificate hostname follows the mail domain");
+  id("test-domain").value="mail.example.com";id("test-domain").callbacks.input();component.setDomain("new.example.com");
+  assert.equal(component.getDomain(),"mail.example.com","Explicit certificate hostname survives later mail-domain edits");
+  assert.deepEqual(domains,["example.com","mail.example.com"],"Notify DNS guidance when the certificate hostname changes");
   const panel=panelRoot.children[0],start=label("Request certificate"),cancel=label("Cancel request"),terms=label("Load certificate authority terms"),apply=label("Use these certificate paths"),directory=id("test-directory"),consent=all.find(control=>control.type==="checkbox");
   id("test-email").value="admin@example.com";
   panel.open=true;panel.callbacks.toggle();
@@ -252,6 +265,7 @@ async function checkCertificateControls() {
   consent.checked=true;consent.callbacks.change();
   assert.equal(start.disabled,false);
   await start.callbacks.click();
+  assert.deepEqual(running,[false,true],"Notify the setup form to lock server identity while issuance is active");
   const submission=calls.find(call=>call.suffix==="/start").options.body;
   assert.equal(submission.terms_of_service,termsUrl,"Submit the exact terms string; URL normalization would invalidate consent");
   assert.equal(submission.directory,"staging","New certificate requests default to staging");
@@ -263,6 +277,7 @@ async function checkCertificateControls() {
   assert.equal(cancel.hidden,false,"Continue showing an active job until its terminal status arrives");
   async function tick(response) {statusResponse=response;assert.equal(timers.size,1,"Exactly one status refresh is scheduled");const [key,callback]=timers.entries().next().value;timers.delete(key);await callback();}
   await tick({ok:true,job_id:"test-job",state:"cancelled"});
+  assert.deepEqual(running,[false,true,false],"Unlock server identity after cancellation becomes terminal");
   assert.equal(start.disabled,false);
   assert.equal(cancel.hidden,true);
 
@@ -276,14 +291,16 @@ async function checkCertificateControls() {
   await terms.callbacks.click();consent.checked=true;consent.callbacks.change();
   await start.callbacks.click();
   const expiresAt="2026-12-15T00:00:00Z";
-  await tick({ok:true,job_id:"test-job",state:"succeeded",directory:"production",result:{tls_certificate:"/private/fullchain.pem",tls_private_key:"/private/key.pem",expires_at:expiresAt,staging:false}});
+  await tick({ok:true,job_id:"test-job",state:"succeeded",domain:"mail.example.com",directory:"production",result:{tls_certificate:"/private/fullchain.pem",tls_private_key:"/private/key.pem",expires_at:expiresAt,staging:false}});
   const expiry=all.find(control=>control.textContent===`Certificate expires: ${expiresAt}`);
   assert.ok(expiry,"Show the expiry returned by the certificate API");
   assert.equal(expiry.hidden,false);
   assert.equal(apply.hidden,false);
+  id("test-domain").value="unverified.example.com";id("test-domain").callbacks.input();
   await apply.callbacks.click();
   assert.equal(applied.tls_certificate,"/private/fullchain.pem");
   assert.equal(applied.tls_private_key,"/private/key.pem");
+  assert.equal(appliedMetadata.domain,"mail.example.com","Applying a certificate uses the issued job domain, even if the hostname field was edited afterward");
   assert.equal(calls.some(call=>call.suffix==="/config"),false,"Issuance does not save or restart global configuration");
 
   await start.callbacks.click();
@@ -292,8 +309,8 @@ async function checkCertificateControls() {
   assert.match(error.textContent,/Check the challenge port/,"Job failure handling uses the backend's code property");
   component.dispose();assert.equal(timers.size,0);
 }
-checkCertificateControls().then(checkSetupAddressFlow).then(checkMaintenanceControls).then(()=>{
-  console.log(`Web checks passed: language defaults, persistence, API errors, ${checkedLabels} translated labels, typed settings, exact size units, certificate controls, secret preservation, portal separation, and script syntax.`);
+checkCertificateControls().then(checkSetupAddressFlow).then(checkSetupTlsLinks).then(checkAdminDkimControls).then(checkMaintenanceControls).then(()=>{
+  console.log(`Web checks passed: language defaults, persistence, API errors, ${checkedLabels} translated labels, typed settings, exact size units, certificate controls, DNS guidance, verified certificate-host links, secret preservation, portal separation, and script syntax.`);
 }).catch(error=>{console.error(error);process.exitCode=1;});
 
 // Address inputs show the server domain and accept browser-autofilled full usernames.
@@ -337,31 +354,42 @@ async function checkSetupAddressFlow() {
     constructor(tag="div"){super(tag);this.hidden=false;}
     querySelectorAll(selector){
       if(this!==id("setup-form"))return [];
-      const named=["setup-domain","setup-admin","setup-data-dir","setup-bind","setup-password","setup-certificate","setup-key"].map(id);
+      const named=["setup-domain","setup-hostname","setup-admin","setup-data-dir","setup-bind","setup-password","setup-certificate","setup-key"].map(id);
       return selector==="[name]"?named:selector==="input"?[...named,id("setup-password-confirm")]:[];
     }
     scrollIntoView(){}
   }
   function id(name){if(!controls.has(name))controls.set(name,new SetupControl());return controls.get(name);}
-  for(const [control,name] of [["setup-domain","domain"],["setup-admin","admin_username"],["setup-data-dir","data_dir"],["setup-bind","bind"],["setup-password","admin_password"],["setup-certificate","tls_certificate"],["setup-key","tls_private_key"]])id(control).name=name;
+  for(const [control,name] of [["setup-domain","domain"],["setup-hostname","mail_hostname"],["setup-admin","admin_username"],["setup-data-dir","data_dir"],["setup-bind","bind"],["setup-password","admin_password"],["setup-certificate","tls_certificate"],["setup-key","tls_private_key"]])id(control).name=name;
   id("setup-password").type="password";
   id("setup-password-confirm").type="password";
   id("setup-mode").value="local";
   const ports=Object.fromEntries(portNames.map((service,index)=>[service,2500+index]));
-  const defaults={domain:"localhost",admin_username:"admin@localhost",data_dir:"/srv/postplus",bind:"127.0.0.1",allow_insecure_auth:true,ports};
+  const defaults={domain:"localhost",admin_username:"admin@localhost",data_dir:"/srv/postplus",bind:"127.0.0.1",allow_insecure_auth:true,outbound_mode:"disabled",ports};
   const requests=[];
-  const sandbox={window:{},document:{getElementById:id,createElement:tag=>new SetupControl(tag),addEventListener(){},title:""},
+  let certificateHost="localhost",certificateChanged;
+  const languageCallbacks=new Map();
+  const sandbox={window:{},document:{getElementById:id,createElement:tag=>new SetupControl(tag),addEventListener:(name,callback)=>languageCallbacks.set(name,callback),title:""},
     PostPlusI18n:fresh.i18n,PostPlusAddress:addressSandbox.window.PostPlusAddress,
-    PostPlusAcme:{create:()=>({dispose(){},translate(){}})},PostPlusSettings:{create:()=>({read:()=>({}),clearSecrets(){},highlight(){},translate(){}})},
+    PostPlusAcme:{create:(_root,options)=>{certificateChanged=options.onDomainChange;return {dispose(){},translate(){},getDomain:()=>certificateHost,setDomain:value=>{certificateHost=value;certificateChanged?.();}};}},PostPlusSettings:{create:()=>({read:()=>({}),clearSecrets(){},highlight(){},translate(){}})},
     URL,URLSearchParams,location:{hash:"#token=secret",pathname:"/setup",search:""},history:{replaceState(){}},
     fetch:async(route,options)=>{requests.push({route,options});return {ok:true,json:async()=>options.method==="POST"?{ok:true,web_url:"http://localhost:8080/",admin_url:"http://localhost:8081/"}:{ok:true,defaults,schema:[]}};}};
+  vm.runInNewContext(fs.readFileSync(path.join(root,"web/dns.js"),"utf8"),sandbox);
+  sandbox.PostPlusDns=sandbox.window.PostPlusDns;
   vm.runInNewContext(fs.readFileSync(path.join(root,"web/setup.js"),"utf8"),sandbox);
   for(let index=0;index<12;index++)await Promise.resolve();
   assert.equal(id("setup-admin").value,"admin","The setup default is shown as a mailbox name");
   assert.equal(id("setup-admin-domain").textContent,"@localhost");
+  assert.equal(id("setup-hostname").value,"","Local names have no default public mail hostname");
   id("setup-domain").value="Example.COM";id("setup-domain").callbacks.input();
   assert.equal(id("setup-admin-domain").textContent,"@example.com","The suffix tracks a changed setup domain");
   assert.equal(id("setup-admin").value,"admin");
+  assert.equal(id("setup-hostname").value,"mail.example.com","Use an independent mail subdomain by default");
+  assert.equal(certificateHost,"mail.example.com","The built-in certificate uses the server hostname");
+  id("setup-hostname").value="smtp.example.com";id("setup-hostname").callbacks.input();
+  id("setup-domain").value="team.example.com";id("setup-domain").callbacks.input();
+  assert.equal(id("setup-hostname").value,"smtp.example.com","Preserve a manually chosen hostname");
+  id("setup-domain").value="Example.COM";id("setup-domain").callbacks.input();
   id("setup-password").value="test-passphrase";id("setup-password-confirm").value="test-passphrase";
   id("setup-admin").value="alice@wrong.example";
   await id("setup-form").callbacks.submit({preventDefault(){},currentTarget:id("setup-form")});
@@ -372,6 +400,92 @@ async function checkSetupAddressFlow() {
   assert.ok(posted,"Setup submits with an address on the selected domain");
   assert.equal(JSON.parse(posted.options.body).admin_username,"alice@example.com");
   assert.equal(id("setup-admin").value,"Alice","Browser autofill is normalized to the mailbox name");
+}
+
+async function checkSetupTlsLinks() {
+  async function run({bind="0.0.0.0",replaceCertificate=false,changedHostname=false,direct=false,expected="https://mail.example.com:8080/"}={}) {
+    const controls=new Map(),requests=[];let acmeOptions,certificateHost="example.com";
+    class SetupControl extends Control {
+      querySelectorAll(selector) {
+        if(this!==id("setup-form"))return [];
+        const named=["setup-domain","setup-hostname","setup-admin","setup-data-dir","setup-bind","setup-password","setup-certificate","setup-key"].map(id);
+        return selector==="[name]"?named:selector==="input"?[...named,id("setup-password-confirm")]:[];
+      }
+      scrollIntoView(){}
+    }
+    function id(name){if(!controls.has(name))controls.set(name,new SetupControl("div"));return controls.get(name);}
+    for(const [control,name] of [["setup-domain","domain"],["setup-hostname","mail_hostname"],["setup-admin","admin_username"],["setup-data-dir","data_dir"],["setup-bind","bind"],["setup-password","admin_password"],["setup-certificate","tls_certificate"],["setup-key","tls_private_key"]])id(control).name=name;
+    id("setup-password").type="password";id("setup-password-confirm").type="password";
+    const defaults={domain:"example.com",admin_username:"admin@example.com",data_dir:"/srv/postplus",bind,allow_insecure_auth:false,outbound_mode:direct?"direct":"disabled",ports:Object.fromEntries(["smtp","pop3","imap","web","admin","auth","storage","filter","transfer","delivery_lock"].map((service,index)=>[service,2500+index]))};
+    const webUrl=["0.0.0.0","::"].includes(bind)?"https://example.com:8080/":`https://${bind}:8080/`;
+    const sandbox={window:{},document:{getElementById:id,createElement:tag=>new SetupControl(tag),addEventListener(){}},
+      PostPlusI18n:fresh.i18n,PostPlusAddress:addressSandbox.window.PostPlusAddress,
+      PostPlusAcme:{create:(_root,options)=>{acmeOptions=options;return {dispose(){},translate(){},getDomain:()=>certificateHost,setDomain:value=>{certificateHost=value;}};}},
+      PostPlusSettings:{create:()=>({read:()=>({}),clearSecrets(){},highlight(){},translate(){}})},URL,URLSearchParams,
+      location:{hash:"#token=test",pathname:"/setup",search:""},history:{replaceState(){}},
+      fetch:async(route,options)=>{requests.push({...options,route});return {ok:true,json:async()=>route==="/api/setup/dkim"?{ok:true,domain:"example.com",selector:"postplus",name:"postplus._domainkey.example.com",type:"TXT",value:"v=DKIM1; k=rsa; h=sha256; p="+"A".repeat(392),fingerprint:"public-key-fingerprint"}:options.method==="POST"?{ok:true,web_url:webUrl,admin_url:"https://localhost:8081/"}:{ok:true,defaults,schema:[]}};}};
+    vm.runInNewContext(fs.readFileSync(path.join(root,"web/dns.js"),"utf8"),sandbox);
+    sandbox.PostPlusDns=sandbox.window.PostPlusDns;
+    vm.runInNewContext(fs.readFileSync(path.join(root,"web/setup.js"),"utf8"),sandbox);
+    for(let index=0;index<12;index++)await Promise.resolve();
+    assert.equal(id("setup-acme").hidden,true,"Existing PEM certificates do not present a public-port-80 requirement");
+    id("setup-certificate-method").value="http01";id("setup-certificate-method").callbacks.change();
+    assert.equal(id("setup-acme").hidden,false);assert.equal(id("setup-existing-help").hidden,true);
+    acmeOptions.onRunningChange(true);assert.equal(id("setup-hostname").disabled,true);assert.equal(id("setup-domain").disabled,true);
+    acmeOptions.onRunningChange(false);assert.equal(id("setup-hostname").disabled,false);
+    acmeOptions.onCertificate({tls_certificate:"/private/mail/fullchain.pem",tls_private_key:"/private/mail/key.pem"},{domain:"mail.example.com"});
+    certificateHost="unverified.example.com";
+    if(replaceCertificate)id("setup-certificate").value="/private/manual/fullchain.pem";
+    id("setup-password").value="test-passphrase";id("setup-password-confirm").value="test-passphrase";
+    if(direct){
+      await id("setup-form").callbacks.submit({preventDefault(){},currentTarget:id("setup-form")});
+      assert.equal(requests.filter(call=>call.method==="POST").length,0,"Direct setup cannot submit before current DKIM key exists");
+      assert.match(id("setup-error").textContent,/current domain and selector/);
+      const generate=descendants(id("setup-dns-guide")).find(control=>control.id==="setup-dns-generate-dkim");await generate.callbacks.click();
+      assert.equal(requests.at(-1).route,"/api/setup/dkim");assert.deepEqual(JSON.parse(requests.at(-1).body),{domain:"example.com",selector:"postplus"});
+    }
+    if(changedHostname){
+      id("setup-hostname").value="unverified.example.com";id("setup-hostname").callbacks.input();
+      await id("setup-form").callbacks.submit({preventDefault(){},currentTarget:id("setup-form")});
+      assert.equal(requests.filter(options=>options.method==="POST").length,0,"A certificate for the old hostname cannot silently be saved for a newly requested hostname");
+      assert.match(id("setup-error").textContent,/issued for mail.example.com/);
+      id("setup-hostname").value="mail.example.com";id("setup-hostname").callbacks.input();
+    }
+    await id("setup-form").callbacks.submit({preventDefault(){},currentTarget:id("setup-form")});
+    assert.equal(id("setup-open").href,expected,"Webmail URL uses only the certificate domain known for matching saved paths and a wildcard bind");
+    if(direct){const posted=JSON.parse(requests.find(call=>call.route==="/api/setup"&&call.method==="POST").body);assert.equal(posted.outbound_mode,"direct");assert.equal(posted.dkim_selector,"postplus");assert.equal(posted.dkim_fingerprint,"public-key-fingerprint");assert.equal(posted.mail_hostname,"mail.example.com");assert.equal(posted.dkim_private_key,undefined);}
+    assert.equal(id("setup-open-admin").href,"https://localhost:8081/","Administration stays on its local listener");
+    if(!replaceCertificate)assert.match(id("setup-access-help").textContent,/SSH tunnel.*mail.example.com/);
+  }
+  await run();
+  await run({direct:true});
+  await run({bind:"::"});
+  await run({changedHostname:true});
+  await run({replaceCertificate:true,expected:"https://example.com:8080/"});
+  await run({bind:"192.0.1.2",expected:"https://192.0.1.2:8080/"});
+}
+
+async function checkAdminDkimControls(){
+  const fields=[{key:"domain",group:"general",type:"text",label:"Mail domain"},{key:"outbound_mode",group:"delivery",type:"select",options:["disabled","direct","relay"],label:"Outgoing delivery mode"},{key:"dkim_selector",group:"delivery",type:"text",label:"DKIM selector"},{key:"dkim_private_key",group:"delivery",type:"text",readonly:true,label:"DKIM private key file"}];
+  const response=({domain,selector})=>({ok:true,domain,selector,name:selector+"._domainkey."+domain,type:"TXT",value:"v=DKIM1; k=rsa; h=sha256; p="+"A".repeat(392),fingerprint:"public-fingerprint"});
+  function create({mode="disabled",savedKey="",generateDkim=async body=>response(body)}={}){
+    const root=new Control("div"),calls=[],editor=settingsSandbox.window.PostPlusSettings.create(root,fields,{domain:"example.com",outbound_mode:mode,dkim_selector:"postplus",dkim_private_key:savedKey},{prefix:"admin-test",generateDkim:body=>{calls.push(JSON.parse(JSON.stringify(body)));return generateDkim(body);}});
+    const all=()=>descendants(root),control=key=>all().find(item=>item.dataset.configKey===key),button=all().find(item=>item.id==="admin-test-generate-dkim");return {root,calls,editor,all,control,button};
+  }
+  const f=create();assert.deepEqual(JSON.parse(JSON.stringify(f.editor.read())),{});assert.equal(f.all().find(item=>item.className==="settings-dkim").hidden,true);
+  f.control("outbound_mode").value="direct";f.control("outbound_mode").callbacks.change();assert.throws(()=>f.editor.read(),/current domain and selector/);
+  await f.button.callbacks.click();assert.deepEqual(f.calls,[{domain:"example.com",selector:"postplus"}]);
+  assert.deepEqual(JSON.parse(JSON.stringify(f.editor.read())),{outbound_mode:"direct"});
+  assert.equal(f.all().find(item=>item.readOnly&&item.attributes["aria-label"]==="Full DNS name").value,"postplus._domainkey.example.com");
+  assert.equal(f.all().find(item=>item.readOnly&&item.attributes["aria-label"]==="Value / content").value,response({domain:"example.com",selector:"postplus"}).value);
+  f.control("dkim_selector").value="updated";f.control("dkim_selector").callbacks.input();assert.throws(()=>f.editor.read(),/current domain and selector/);assert.equal(f.all().filter(item=>item.readOnly).length,0);
+  const deferred=[];const race=create({mode:"direct",generateDkim:()=>new Promise(resolve=>deferred.push(resolve))});
+  const loading=race.button.callbacks.click();race.control("domain").value="other.example.com";race.control("domain").callbacks.input();deferred[0](response({domain:"example.com",selector:"postplus"}));await loading;
+  assert.throws(()=>race.editor.read(),/current domain and selector/);assert.equal(race.all().filter(item=>item.readOnly).length,0,"Changed-domain response does not export old record");
+  const saved=create({mode:"direct",savedKey:"/srv/private/dkim.pem"});assert.deepEqual(JSON.parse(JSON.stringify(saved.editor.read())),{},"Existing unchanged direct config retains managed key");
+  saved.control("dkim_selector").value="new";saved.control("dkim_selector").callbacks.input();assert.throws(()=>saved.editor.read(),/current domain and selector/);
+  const malformed=create({mode:"direct",generateDkim:async body=>({...response(body),private_key:"never export"})});await malformed.button.callbacks.click();assert.throws(()=>malformed.editor.read());assert.equal(malformed.all().filter(item=>item.readOnly).length,0);
+  const disposed=create({mode:"direct",generateDkim:()=>new Promise(resolve=>deferred.push(resolve))});const stale=disposed.button.callbacks.click();disposed.editor.dispose();deferred[1](response({domain:"example.com",selector:"postplus"}));await stale;assert.equal(disposed.all().filter(item=>item.readOnly).length,0);
 }
 
 async function checkMaintenanceControls() {

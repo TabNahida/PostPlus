@@ -17,6 +17,12 @@ void process(const Config& config, const Json& job) {
     const auto id = job.at("id").get<std::string>();
     const auto recipient = job.at("recipient").get<std::string>();
     const auto raw = job.at("raw").get<std::string>();
+    const auto now=std::chrono::system_clock::to_time_t(std::chrono::system_clock::now());
+    if(job.contains("created_at") && now-job.at("created_at").get<std::int64_t>()>=config.number("delivery_max_age_seconds",432000)) {
+        require_ok(rpc(config,"storage",{{"op","queue_reject"},{"id",id},{"error","delivery retry age exceeded"}}));
+        log("delivery","delivery expired for queue item "+id,"warn");
+        return;
+    }
     const auto scan = require_ok(rpc(config,"filter",{{"op","scan"},{"raw",raw}}));
     if (scan.value("action", "reject") != "accept") {
         // Keep rejected mail durable and visible to administrators; never auto-release it.
@@ -30,7 +36,13 @@ void process(const Config& config, const Json& job) {
         if (!exists.value("exists",false)) throw std::runtime_error("local recipient no longer exists");
         require_ok(rpc(config,"storage",{{"op","deliver"},{"username",recipient},{"raw",raw},{"delivery_id",id}}));
     } else {
-        require_ok(rpc(config,"transfer",{{"op","send"},{"sender",job.at("sender")},{"recipient",recipient},{"raw",raw}}));
+        const auto sent=rpc(config,"transfer",{{"op","send"},{"sender",job.at("sender")},{"recipient",recipient},{"raw",raw}});
+        if(!sent.value("ok",false) && sent.value("permanent",false)) {
+            require_ok(rpc(config,"storage",{{"op","queue_reject"},{"id",id},{"error",sent.value("error","permanent delivery failure")}}));
+            log("delivery","permanent delivery failure for queue item "+id,"warn");
+            return;
+        }
+        require_ok(sent);
     }
     require_ok(rpc(config,"storage",{{"op","queue_finish"},{"id",id}}));
     log("delivery", "delivered queue item " + id);
@@ -55,10 +67,12 @@ int main(int argc, char** argv) {
                 for (const auto& job : batch.at("jobs")) {
                     if (stopping || process_stop_requested()) break;
                     try { process(config,job); }
-                    catch (const std::exception&) {
+                    catch (const std::exception& error) {
                         const auto id = job.at("id").get<std::string>();
                         const int attempts = std::clamp(job.value("attempts",0),0,10);
-                        require_ok(rpc(config,"storage",{{"op","queue_retry"},{"id",id},{"delay",std::min(3600, 5 * (1 << attempts))},{"error","temporary delivery failure; check service health and configuration"}}));
+                        auto reason=std::string(error.what()).substr(0,1024);
+                        for(auto& c:reason) if(static_cast<unsigned char>(c)<32)c=' ';
+                        require_ok(rpc(config,"storage",{{"op","queue_retry"},{"id",id},{"delay",std::min(3600, 5 * (1 << attempts))},{"error",reason}}));
                         log("delivery","deferred queue item " + id, "warn");
                     }
                 }

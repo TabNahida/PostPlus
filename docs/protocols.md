@@ -18,12 +18,12 @@ Implemented commands: `EHLO`, `HELO`, `STARTTLS`, `AUTH PLAIN`, `AUTH LOGIN`, `M
 - Ordinary commands are bounded to 512 bytes including CRLF (AUTH permits the larger RFC 4954 limit). DATA lines are bounded to 1,000 bytes including CRLF, excluding the extra transparency dot. The configured message size limit applies to the unstuffed message including line endings. `max_recipients` bounds each transaction (default 100, bounded to 1–100, matching storage and Webmail).
 - `smtp_data_timeout_seconds` limits the entire DATA reception stage (default 120; configuration must be an integer from 1 to 3,600). Continuous valid lines do not extend this absolute deadline. Expiry closes the connection without queuing partial mail. Once the terminating dot is received, ordinary operation timeouts apply again to storage and the SMTP response.
 - `MAIL FROM` accepts the ESMTP `SIZE` parameter. Unsupported MAIL and RCPT parameters are rejected. An empty reverse path is accepted for delivery status messages.
-- Local recipients must exist in the authentication service. External recipients require an authenticated session and a configured `smarthost_host`.
+- Local recipients must exist in the authentication service. External recipients require an authenticated session and enabled direct or relay delivery.
 - Dot transparency is implemented. DATA receives a successful final response only after the storage service durably queues all recipient jobs. Scanning happens in the delivery process; policy rejections are retained in the queue for operator inspection.
 - STARTTLS resets the authentication and transaction state. Messages cannot request a TLS upgrade partway through a transaction.
 - A new MAIL command resets the old transaction even if its address or SIZE argument is rejected, so old recipients cannot leak into a later submission.
 
-Not implemented: SMTPUTF8, 8BITMIME negotiation, CHUNKING/BDAT, DSN negotiation, public MX lookup, DKIM signing, SPF or DMARC verification. Outgoing remote delivery uses the configured smarthost. This is not a public Internet mail gateway yet.
+Outgoing delivery supports public MX lookup, priority/address failover, bounded retries and RSA-SHA256 DKIM signing. Direct mode uses TCP 25 and verified STARTTLS when offered; required TLS can be selected. Remote public recipients cannot route delivery to private/loopback addresses. Not implemented: SMTPUTF8, 8BITMIME negotiation, CHUNKING/BDAT, DSN negotiation/generation, incoming SPF/DKIM/DMARC verification, DANE and MTA-STS.
 
 ## POP3
 

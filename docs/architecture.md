@@ -24,7 +24,7 @@ flowchart LR
     Delivery[Delivery worker] --> Storage
     Delivery --> Filter[Spam rules / ClamAV]
     Delivery --> Transfer[SMTP transfer]
-    Transfer --> Relay[Configured SMTP relay]
+    Transfer --> Relay[SMTP relay or public recipient MX]
 ```
 
 Internal RPC uses HTTP/1.1 JSON on `127.0.0.1`. Raw mail is encoded as Base64 on the RPC wire so binary content survives JSON transport. A shared token authenticates internal requests and grants full internal access; there is no remote RPC deployment mode or per-service authorization policy.
@@ -77,17 +77,17 @@ Data, web-root, and log-directory paths are displayed read-only after installati
 
 ## Receiving and delivering mail
 
-1. SMTP validates local recipients. External recipients require authentication and a configured relay.
+1. SMTP validates local recipients. External recipients require authentication and enabled direct or relay delivery.
 2. Storage creates one queue job per recipient in a single transaction. SMTP returns success only after commit.
 3. The delivery worker reads a due job and invokes the filter service.
 4. Explicit rejection persists the job in quarantine. Scanner, RPC, or storage failures trigger retries.
-5. Local delivery is deduplicated by delivery ID and username. External mail is sent by the transfer service through the configured SMTP relay.
+5. Local delivery is deduplicated by delivery ID and username. The transfer service signs external mail with a configured DKIM key and sends through a relay or directly to recipient MX servers. Temporary failures use exponential retries; permanent failures and jobs older than the configured retry age are retained in quarantine. A final SMTP DATA acceptance immediately completes transfer.
 
 SQLite uses WAL and FULL synchronization. Restarts preserve accounts, messages, UIDs, UIDVALIDITY, queue state, retries, and deduplication records. `delivery_lock_port`, default 18085, is a loopback socket used as an exclusive worker lock and released by the OS when the process exits.
 
-Retries use exponential backoff, capped at one hour. Local deduplication records survive message deletion so a retry cannot restore a deleted message. Outbound SMTP has at-least-once semantics: a crash after the relay accepts mail but before local acknowledgement can cause a duplicate.
+Retries use exponential backoff, capped at one hour. Local deduplication records survive message deletion so a retry cannot restore a deleted message. Outbound SMTP has at-least-once semantics: a crash after the destination accepts mail but before local acknowledgement can cause a duplicate.
 
-There is no automatic DSN generation, retention cleanup, or quarantine-release interface. Permanent relay errors remain queued. Queue inspection exposes attempts, retry times, states, and diagnostic errors without exposing message bodies. An audited retention policy is needed before purging quarantine or deduplication records.
+There is no automatic DSN generation, retention cleanup, or quarantine-release interface. Permanent delivery errors remain in quarantine. Queue inspection exposes attempts, retry times, states, and diagnostic errors without exposing message bodies. An audited retention policy is needed before purging quarantine or deduplication records.
 
 ## Logging
 

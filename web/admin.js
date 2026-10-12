@@ -82,6 +82,7 @@ function signedOut() {
   logData = null;
   logVersion++;
   settingsData = null;
+  settingsEditor?.dispose();
   settingsEditor = null;
   acmeControl?.dispose();acmeControl=null;$("admin-acme").replaceChildren();
   clearInspection();
@@ -339,7 +340,8 @@ async function loadSettings() {
     settingsData = data;
     if (!acmeControl) acmeControl=PostPlusAcme.create($("admin-acme"),{request:(path,options)=>api("/api/admin/acme"+path,options),domain:data.values.domain,prefix:"admin-acme",onCertificate:async paths=>{if($("settings-form").hidden)await loadSettings();if(!settingsEditor || $("settings-form").hidden)throw new Error(t("Load server settings before applying certificate paths."));for(const [key,value] of Object.entries(paths)){const input=$("config-"+key);if(input){input.value=value;input.closest("details").open=true;}}}});
     $("settings-pending").hidden = !data.restart_required;
-    settingsEditor = PostPlusSettings.create($("settings-fields"),data.schema,data.values,{prefix:"config",secretStatus:data.secret_status});
+    settingsEditor?.dispose();
+    settingsEditor = PostPlusSettings.create($("settings-fields"),data.schema,data.values,{prefix:"config",secretStatus:data.secret_status,generateDkim:body=>api("/api/admin/dkim",{method:"POST",body})});
     $("settings-success").hidden = true;
     $("settings-form").hidden = false;
     setLink("open-webmail",data.web_url);

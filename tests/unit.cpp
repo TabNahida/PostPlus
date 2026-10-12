@@ -1,4 +1,5 @@
 #include <postplus/core.hpp>
+#include <postplus/settings.hpp>
 #include <iostream>
 #include <stdexcept>
 #include <thread>
@@ -21,6 +22,16 @@ int main() {
         for (const auto* value : {"abc", "====", "AA=A", "AA==junk", "AB==", "aGVsbG8=\n"}) rejects([&] { base64_decode(value); });
         check(secure_equal("secret","secret") && !secure_equal("secret","secreT") && !secure_equal("secret","secrets"),"secret comparison");
         check(random_hex().size() == 32 && random_hex() != random_hex(),"random ID");
+        Config legacy;legacy.values={{"domain","example.com"}};
+        check(legacy.outbound_mode()=="disabled","legacy blank relay must remain disabled");
+        legacy.values["smarthost_host"]="smtp.example.com";
+        check(legacy.outbound_mode()=="relay" && legacy.mail_hostname()=="example.com","legacy relay compatibility");
+        legacy.values["outbound_mode"]="direct";
+        check(legacy.mail_hostname()=="mail.example.com","direct EHLO default hostname");
+        legacy.values["outbound_mode"]="disabled";
+        check(legacy.outbound_mode()=="disabled","explicit outbound disable ignored");
+        legacy.values.erase("outbound_mode");legacy.values["allow_insecure_auth"]=true;
+        check(validate_settings(legacy,{{"log_level","debug"}}).outbound_mode()=="relay","partial settings save disabled legacy relay");
         // Exercise real TCP framing, buffered command boundaries and exact byte reads.
         asio::io_context io;
         tcp::acceptor acceptor(io,{tcp::v4(),0});

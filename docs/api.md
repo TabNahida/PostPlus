@@ -42,6 +42,8 @@ Storage and the mail protocols preserve original message bytes. Web JSON replace
 
 These routes require an administrator session. Ordinary users receive 403.
 
+DKIM preparation returns `ok`, `domain`, `selector`, `name`, `type: "TXT"`, `value` and a SHA-256 `fingerprint` of the public record. It generates a private RSA-2048 key beside the configuration or reuses the selected existing key; no private material is returned. First-run setup uses `POST /api/setup/dkim` with the same body and `X-Setup-Token`, Host/Origin protection. Saving setup in direct mode requires `dkim_fingerprint` from the current record, `outbound_mode: "direct"`, `mail_hostname` and `dkim_selector`. Key generation survives a failed save or wizard restart. DNS is published separately; record availability is not a claim of Internet reachability.
+
 | Method and path | Request or response |
 | --- | --- |
 | GET `/api/admin/users` | Usernames and administrator flags; no password material. |
@@ -58,6 +60,7 @@ These routes require an administrator session. Ordinary users receive 403.
 | GET `/api/admin/logs` | Recent structured events, filtered as described below. |
 | GET `/api/admin/config` | Sanitized settings, editable-field schema, file revision, saved-secret status, and interface URLs. |
 | POST `/api/admin/config` | `revision` and `values`; validates/saves settings and reports that a manual restart is required. |
+| POST `/api/admin/dkim` | `{ "domain": "example.com", "selector": "postplus" }`; prepares/reuses a private server key and returns its public DNS record. Administrator session and CSRF token required. |
 | POST `/api/admin/backup` | `{}`; starts an asynchronous backup and returns 202 with `job_id` and `state: "running"`. |
 | GET `/api/admin/backup?job_id=...` | `state` is `running`, `complete`, or `failed`. Completed jobs include `download_url`; failed jobs include `error`. |
 | GET `/api/admin/backup/download?job_id=...` | Streams the current completed job as an attachment with content type `application/x-tar`. |
@@ -228,6 +231,7 @@ The launcher prints the HTTP or HTTPS setup URL, normally `http://127.0.0.1:8081
 | --- | --- |
 | GET `/api/setup` | Returns `ok`, `defaults`, `schema`, and `completing_existing` for the form. Requires `X-Setup-Token`. |
 | POST `/api/setup` | Validates configuration, creates the administrator, and commits configuration. Requires `X-Setup-Token`; returns `ok`, `admin_url`, and `web_url` on success. |
+| POST `/api/setup/dns/check` | Checks draft DNS records without provisioning or saving settings. Requires `X-Setup-Token` and the same Host/Origin checks. |
 
 POST fields:
 
@@ -252,6 +256,30 @@ Public listening requires TLS with insecure authentication disabled. The auth po
 For a new configuration, setup commits without replacing a competing destination. For completion of an eligible existing configuration, it verifies the original contents are unchanged, retains the same data directory, and creates a private backup before replacement. Established configurations enter this completion path only when marked `setup_required: true` by the offline reset workflow; successful setup clears that marker.
 
 A failed provisioning/commit may leave an administrator in the data directory; retry with the same credentials. Existing users are accepted only after successful password verification and an administrator-role check. Setup errors return `ok: false`, a stable `code`, and an English `error` string; the UI translates known error codes. General configuration changes after setup use `/api/admin/config` on the administrator listener.
+
+### Setup DNS checks
+
+Send a JSON object to `/api/setup/dns/check` with the required text fields `domain` (mailbox domain) and `hostname` (mail server). Optional text fields are `ipv4`, `ipv6`, `spf`, `dkim_name` (full selector name), `dkim_type` (`TXT` or `CNAME`, default `TXT`), `dkim_value`, and `dmarc`. Unknown fields and invalid types or names return 400 with `code: "invalid_dns_input"`. For example:
+
+```json
+{
+  "domain": "example.com",
+  "hostname": "mail.example.com",
+  "ipv4": "",
+  "ipv6": "",
+  "spf": "",
+  "dkim_name": "",
+  "dkim_type": "TXT",
+  "dkim_value": "",
+  "dmarc": "v=DMARC1; p=none"
+}
+```
+
+Use real public addresses and the relay provider's actual authentication records when known. The response includes `ok`, `resolver`, `checked_at` (UTC), `limitations`, and six `records` with IDs `a`, `aaaa`, `mx`, `spf`, `dkim`, `dmarc`. Each record has `name`, `type`, arrays `expected` and `observed`, `status`, `code`, and `message`. Statuses are `matched`, `missing`, `mismatch`, `not_configured`, or `error`; `ok: true` means the check ran, not that every record matched. MX observations include priority. The check compares MX targets with the mail hostname, and reports CNAME mail hosts as unsuitable MX targets. It rejects multiple SPF/DMARC policies. Unconfigured A/AAAA are still queried so unexpected public addresses remain visible.
+
+The resolver is fixed to Cloudflare `1.1.1.1:53` over UDP, with a ten-second overall budget and bounded packets. Browser requests cannot select a resolver, URL, port or timeout. Network, malformed and truncated-response errors leave the affected record in `error`, never `missing` or `matched`. Queries use one public resolver's current cached view; they do not establish SMTP reachability, PTR, relay DKIM signing, SPF/DMARC alignment, delivery or certificate issuance. The frontend invalidates results after input changes and discards responses to earlier drafts.
+
+DNS guide fields are separate from saved server settings. Checking does not publish records, accept certificate terms, request a certificate, or create an administrator. Other setup work in progress returns 409 with `code: "setup_busy"`.
 
 ## Status codes and health
 

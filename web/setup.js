@@ -9,7 +9,11 @@
   let advancedEditor = null;
   let unlocking = false;
   let acmeControl = null;
+  let dnsControl = null;
+  let appliedCertificate = null;
+  let accessHelp = null;
   let saving = false;
+  let suggestDirect = false;
   const adminAddress = PostPlusAddress.create($("setup-admin"),$("setup-admin-domain"));
   const portLabels = {smtp:"SMTP",pop3:"POP3",imap:"IMAP",web:"Webmail",admin:"Administration",auth:"Authentication",storage:"Mail storage",filter:"Mail filter",transfer:"Mail transfer",delivery_lock:"Delivery lock"};
   for (const [service, label] of Object.entries(portLabels)) {
@@ -31,9 +35,13 @@
   function render() {
     document.title = t("PostPlus · First-run setup");
     $("setup-status").textContent = statusKey ? t(statusKey) : "";
-    $("setup-error").textContent = errorData ? (errorData.key ? t(errorData.key) : PostPlusI18n.error(errorData)) : "";
+    $("setup-error").textContent = errorData ? (errorData.key ? t(errorData.key,errorData.parameters || {}) : PostPlusI18n.error(errorData)) : "";
     $("setup-error").hidden = !errorData;
+    $("setup-access-help").hidden = !accessHelp;
+    $("setup-access-help").textContent = accessHelp ? t(accessHelp.key,accessHelp.parameters) : "";
+    $("setup-identity-help").textContent = t("Mailboxes use @{domain}; mail clients connect to {hostname}.",{domain:$("setup-domain").value.trim(),hostname:$("setup-hostname").value.trim() || t("the mail server hostname")});
   }
+  const publicDomain = value => PostPlusDns.publicDomain(value);
   function fail(data) {
     errorData = data;
     render();
@@ -48,14 +56,24 @@
     $("setup-bind").readOnly = !secure;
     if (!secure) $("setup-bind").value = "127.0.0.1";
     else if (userChange && $("setup-bind").value === "127.0.0.1") $("setup-bind").value = "0.0.0.0";
+    if(userChange && suggestDirect)dnsControl?.suggestMode(secure?"direct":"disabled");
+    certificateMethodChanged();
   }
+  function certificateMethodChanged() {
+    const builtIn = $("setup-certificate-method").value === "http01";
+    $("setup-acme").hidden = !builtIn;
+    $("setup-http01-help").hidden = !builtIn;
+    $("setup-existing-help").hidden = builtIn;
+  }
+  $("setup-certificate-method").addEventListener("change", certificateMethodChanged);
   $("setup-mode").addEventListener("change", () => modeChanged(true));
   $("setup-brand").addEventListener("click", event => event.preventDefault());
   $("setup-domain").addEventListener("input", () => {
     adminAddress.setDraftDomain($("setup-domain").value);
+    render();
   });
   $("setup-form").addEventListener("input", event => event.target.removeAttribute("aria-invalid"));
-  document.addEventListener("postplus:language", () => {render(); advancedEditor?.translate(); acmeControl?.translate();});
+  document.addEventListener("postplus:language", () => {render(); advancedEditor?.translate(); acmeControl?.translate(); dnsControl?.translate();});
   async function request(method, body, path = "/api/setup") {
     let response;
     try {
@@ -91,10 +109,20 @@
     for (const control of event.currentTarget.querySelectorAll("[name]")) {
       payload[control.name] = control.type === "number" ? Number(control.value) : (control.type === "password" ? control.value : control.value.trim());
     }
+    Object.assign(payload,dnsControl?.settings());
+    if(!payload.mail_hostname&&payload.outbound_mode!=="direct")payload.mail_hostname=$("setup-domain").value.trim().toLowerCase();
+    if(!dnsControl?.directReady()){
+      fail({key:"Generate or load the DKIM public record for the current domain and selector before saving direct delivery."});
+      return;
+    }
     try { payload.admin_username = adminAddress.address(); }
     catch (error) { $("setup-admin").setAttribute("aria-invalid","true");fail({key:error.message});$("setup-admin").focus();return; }
     payload.allow_insecure_auth = $("setup-mode").value === "local";
     if (payload.allow_insecure_auth) { payload.tls_certificate = ""; payload.tls_private_key = ""; }
+    if (!payload.allow_insecure_auth && appliedCertificate && appliedCertificate.tls_certificate === payload.tls_certificate && appliedCertificate.tls_private_key === payload.tls_private_key && appliedCertificate.domain !== $("setup-hostname").value.trim().toLowerCase()) {
+      fail({key:"This certificate was issued for {domain}. Restore that mail server hostname or request a new certificate for the hostname in step 1.",parameters:{domain:appliedCertificate.domain}});
+      return;
+    }
     payload.ports = Object.fromEntries(Object.keys(portLabels).map(service => [service, Number($(`setup-port-${service}`).value)]));
     saving = true;
     statusKey = "Saving configuration…";
@@ -105,16 +133,22 @@
       const data = await request("POST", payload);
       token = "";
       acmeControl?.dispose();
+      dnsControl?.dispose();
       $("setup-token").value = "";
       advancedEditor?.clearSecrets();
       $("setup-password").value = "";
       $("setup-password-confirm").value = "";
       const destination = new URL(data.web_url);
       if (!["http:", "https:"].includes(destination.protocol) || destination.username || destination.password) throw {key:"The server returned an unreadable response."};
+      const matchingIssuedCertificate = appliedCertificate && publicDomain(appliedCertificate.domain) && payload.tls_certificate === appliedCertificate.tls_certificate && payload.tls_private_key === appliedCertificate.tls_private_key;
+      if (destination.protocol === "https:" && ["0.0.0.0","::"].includes(payload.bind) && matchingIssuedCertificate) destination.hostname = appliedCertificate.domain;
       $("setup-open").href = destination.href;
       const adminDestination = new URL(data.admin_url);
       if (!["http:","https:"].includes(adminDestination.protocol) || adminDestination.username || adminDestination.password) throw {key:"The server returned an unreadable response."};
       $("setup-open-admin").href = adminDestination.href;
+      if (adminDestination.protocol === "https:" && ["localhost","127.0.0.1","[::1]"].includes(adminDestination.hostname) && matchingIssuedCertificate) {
+        accessHelp = {key:"Administration remains local-only. Its localhost link is not covered by the certificate for {host}. To access it from another computer, use an SSH tunnel and map {host} to 127.0.0.1 locally, then open https://{host}:{port}/ through the tunnel.",parameters:{host:appliedCertificate.domain,port:adminDestination.port || "443"}};
+      }
       $("setup-form").hidden = true;
       $("setup-success").hidden = false;
       $("setup-success").scrollIntoView({block:"center", behavior:"auto"});
@@ -138,6 +172,7 @@
     render();
     try {
       const {defaults,schema = [],completing_existing = false} = await request("GET");
+      suggestDirect=!completing_existing&&!defaults.smarthost_host&&!defaults.smarthost;
       for (const control of $("setup-form").querySelectorAll("[name]")) {
         if (control.name !== "admin_password" && Object.hasOwn(defaults,control.name)) control.value = defaults[control.name];
       }
@@ -149,7 +184,9 @@
       for (const service of Object.keys(portLabels)) exclude.add(`ports.${service}`);
       exclude.add("delivery_lock_port");
       exclude.add("allow_insecure_auth");
-      acmeControl=PostPlusAcme.create($("setup-acme"),{domain:defaults.domain,prefix:"setup-acme",request:async(path,options={})=>{try{return await request(options.method || "GET",options.body,"/api/setup/acme"+path);}catch(data){throw new Error(data.key ? t(data.key) : PostPlusI18n.error(data));}},onCertificate:paths=>{$("setup-certificate").value=paths.tls_certificate;$("setup-key").value=paths.tls_private_key;}});
+      exclude.add("outbound_mode");exclude.add("dkim_selector");exclude.add("dkim_private_key");
+      acmeControl=PostPlusAcme.create($("setup-acme"),{domain:publicDomain(defaults.domain)?"mail."+defaults.domain:"",prefix:"setup-acme",lockDomain:true,onRunningChange:running=>{$("setup-hostname").disabled=running;$("setup-domain").disabled=running;},request:async(path,options={})=>{try{return await request(options.method || "GET",options.body,"/api/setup/acme"+path);}catch(data){throw new Error(data.key ? t(data.key) : PostPlusI18n.error(data));}},onCertificate:(paths,certificate)=>{$("setup-certificate").value=paths.tls_certificate;$("setup-key").value=paths.tls_private_key;appliedCertificate={...paths,domain:typeof certificate?.domain === "string" ? certificate.domain.trim().toLowerCase() : ""};}});
+      dnsControl=PostPlusDns.create($("setup-dns-guide"),{inputs:{domain:$("setup-domain"),hostname:$("setup-hostname"),relayHost:$("setup-relay-host"),smtpPort:$("setup-port-smtp")},initialMode:defaults.outbound_mode || (defaults.smarthost_host||defaults.smarthost?"relay":!defaults.allow_insecure_auth?"direct":"disabled"),initialSelector:defaults.dkim_selector || "postplus",relaySettings:$("setup-relay-config"),request:body=>request("POST",body,"/api/setup/dns/check"),generateDkim:body=>request("POST",body,"/api/setup/dkim"),onHostnameChange:value=>{acmeControl?.setDomain(value,true);render();}});
       advancedEditor = PostPlusSettings.create($("setup-advanced"),schema,defaults,{prefix:"setup-extra",exclude});
       $("setup-mode").value = defaults.allow_insecure_auth ? "local" : "tls";
       modeChanged();

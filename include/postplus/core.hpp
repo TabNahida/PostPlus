@@ -26,6 +26,9 @@ struct Config {
     int port(const std::string& service) const;
     std::string token() const;
     std::string relay_password() const;
+    // Preserve relay-only legacy installations until a mode is explicitly selected.
+    std::string outbound_mode() const;
+    std::string mail_hostname() const;
 };
 std::string lower(std::string text);
 std::string trim(std::string text);
@@ -45,6 +48,7 @@ public:
     ~Connection();
     tcp::socket& socket();
     void connect(const std::string& host, int port);
+    void connect(const tcp::endpoint& endpoint);
     std::string line(std::size_t limit = 8192); // strips CRLF; requires CRLF
     std::string read(std::size_t count);
     void write(std::string_view bytes);

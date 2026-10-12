@@ -167,6 +167,7 @@ class SMTPMock:
         self.context.load_cert_chain(str(CERTIFICATE), str(PRIVATE_KEY))
         self.messages = []
         self.envelopes = []
+        self.greetings = []
         self.authenticated = []
         self.failures = []
         self.reply_times = []
@@ -212,6 +213,7 @@ class SMTPMock:
                 assert line.endswith(b"\r\n") and len(line) < 8192
                 command = line.split(b" ", 1)[0].strip().upper()
                 if command == b"EHLO":
+                    self.greetings.append(line.strip())
                     if encrypted:
                         self.send_reply(connection, b"250-localhost\r\n250 AUTH PLAIN\r\n")
                     elif self.starttls:
@@ -276,7 +278,7 @@ class SMTPMock:
 
 def configure_transfer(suite, mock, *, trusted=True, host="localhost"):
     suite.stop("transfer")
-    suite.config.update(smarthost_host=host, smarthost_port=mock.port,
+    suite.config.update(outbound_mode="relay", mail_hostname="mail.example.com", smarthost_host=host, smarthost_port=mock.port,
                         smarthost_tls="starttls", smarthost_username="upstream-user",
                         smarthost_password_env="POSTPLUS_TLS_TEST_SMARTHOST_PASSWORD")
     suite.env["POSTPLUS_TLS_TEST_SMARTHOST_PASSWORD"] = "upstream-test-secret"
@@ -300,10 +302,21 @@ def check_transfer(suite):
         assert b"\r\n..leading dot\r\n...two dots\r\n" in mock.messages[-1][1]
         assert mock.envelopes[-1] == (b"MAIL FROM:<alice@localhost>", b"RCPT TO:<external@example.test>")
         assert mock.authenticated
+        assert mock.greetings == [b"EHLO mail.example.com", b"EHLO mail.example.com"]
         mock.rcpt_status = 251
         forwarded = suite.rpc("transfer", **request)
         assert forwarded["ok"], ("RCPT 251 must allow DATA delivery", forwarded)
         assert len(mock.messages) == 2 and mock.messages[-1][0] == raw
+        for code in (451, 550):
+            mock.rcpt_status = code
+            rejected = suite.rpc("transfer", **request)
+            assert not rejected["ok"] and rejected["permanent"] == (code == 550), rejected
+            assert str(code) in rejected["error"] and len(mock.messages) == 2
+        mock.rcpt_status = 250
+        mock.final_status = 550
+        rejected = suite.rpc("transfer", **request)
+        assert not rejected["ok"] and rejected["permanent"] and "550" in rejected["error"], rejected
+        mock.final_status = 250
         # Web configuration saves the relay password in a private file. Exercise
         # that source against an actual TLS SMTP peer, including env precedence.
         suite.stop("transfer")
@@ -325,7 +338,8 @@ def check_transfer(suite):
         mock = SMTPMock(starttls=mode != "no_starttls")
         try:
             configure_transfer(suite, mock, trusted=mode != "untrusted")
-            assert not suite.rpc("transfer", **request)["ok"]
+            failed = suite.rpc("transfer", **request)
+            assert not failed["ok"] and not failed["permanent"], failed
             assert not mock.messages and not mock.authenticated
         finally:
             mock.close()

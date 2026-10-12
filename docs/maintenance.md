@@ -8,7 +8,7 @@
 4. Select **Create backup** and wait for **Download backup**.
 5. Download the `.tar` archive and store it in a private, backed-up location.
 
-The archive contains account password hashes, the live password policy, all mail folders, individual quotas, the delivery queue, saved server configuration, the service token, the configured relay password, and the configured TLS certificate/key pair. It includes `RESTORE.txt` with recovery instructions. Logs, binaries, older backups, and ACME account registration state are omitted. Certificates can be requested again through administration after a restore.
+The archive contains account password hashes, the live password policy, all mail folders, individual quotas, the delivery queue, saved server configuration, the service token, the configured relay password, the active DKIM private key, and the configured TLS certificate/key pair. It includes `RESTORE.txt` with recovery instructions. Logs, binaries, older backups, and ACME account registration state are omitted. Certificates can be requested again through administration after a restore.
 
 **Backups are not encrypted.** They contain private mail and credentials; anyone who can read an archive can access this information. Use an encrypted storage location and limit access to the server administrator.
 
@@ -22,7 +22,7 @@ Only the latest backup in the current administration process is available. Downl
 2. Create an **empty private directory** owned by the operating-system user that will run PostPlus. On Linux/macOS, use `mkdir -m 700 /path/to/restored-postplus`. On Windows, restrict the directory's Security permissions to your server account and SYSTEM before extracting.
 3. Extract the archive into that directory using `tar -xf /path/to/postplus-backup-....tar -C /path/to/restored-postplus`. Do not extract over a running installation or mix restored databases with old `-wal`/`-shm` files.
 4. Copy all PostPlus executables and the `web` directory from the matching release into the restored directory. Keep `config` and `data` from the backup.
-5. Check file permissions. Configuration, token, relay-secret, TLS-key and database files should be accessible only to the server account (mode `0600` on Linux/macOS).
+5. Check file permissions. Configuration, token, relay-secret, TLS/DKIM private-key and database files should be accessible only to the server account (mode `0600` on Linux/macOS). The active DKIM key is included at `config/dkim/private-key.pem`; preserving it keeps the published public record valid.
 6. Review `config/postplus.json`: listening addresses/ports, domain, relay and certificate validity. Backup paths are rewritten relative to the restored configuration: `../data`, `../web`, and files within `config`. Existing service-token and relay-password environment variables still take precedence over the restored secret files; remove unintended overrides.
 7. From the restored directory, run `./postplus --config config/postplus.json` (Windows: `.\postplus.exe --config config/postplus.json`). Sign in with the existing administrator password. Verify user accounts, password policy, folders, quotas, and pending queue entries before restoring public traffic.
 

@@ -15,6 +15,8 @@ Json settings_view(const Config& config);
 Config validate_settings(const Config& existing, const Json& patch);
 Json save_settings(const Config& config, const Json& request);
 std::string settings_url(const Config& config, const std::string& service);
+// Generate or reuse a private server key; return only its public DNS record.
+Json prepare_dkim(const Config& config, const Json& input);
 // Used by bootstrap completion as well as authenticated settings updates.
 // The caller supplies the original bytes, preventing accidental stale writes.
 void replace_config_file(const std::filesystem::path& destination,

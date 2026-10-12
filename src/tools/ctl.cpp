@@ -1,4 +1,5 @@
 #include <postplus/core.hpp>
+#include <postplus/settings.hpp>
 #include <iostream>
 #ifdef _WIN32
 #include <windows.h>
@@ -41,6 +42,7 @@ int main(int argc, char** argv) {
                      "  postplus-ctl create-user EMAIL [--admin] [--config PATH]\n"
                      "  postplus-ctl password EMAIL [--config PATH]\n"
                      "  postplus-ctl users|stats|queue [--config PATH]\n"
+                     "  postplus-ctl dkim [--config PATH]\n"
                      "Passwords are read from stdin, never from command arguments.\n";
         return 0;
     }
@@ -53,7 +55,8 @@ int main(int argc, char** argv) {
             for (int i=3; i<argc; ++i) if (std::string_view(argv[i]) == "--admin") admin = true;
             const auto password = read_password();
             result = rpc(config,"auth",{{"op",command == "password" ? "change_password" : "create"},{"username",lower(argv[2])},{"password",password},{"admin",admin}});
-        } else if (command == "users") result = rpc(config,"auth",{{"op","list"}});
+        } else if (command == "dkim") result = prepare_dkim(config,Json::object());
+        else if (command == "users") result = rpc(config,"auth",{{"op","list"}});
         else if (command == "stats") result = rpc(config,"storage",{{"op","stats"}});
         else if (command == "queue") {
             result = rpc(config,"storage",{{"op","queue_inspect"},{"limit",100}});

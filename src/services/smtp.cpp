@@ -121,7 +121,8 @@ void smtp(Connection& c, const Config& cfg, std::chrono::seconds data_timeout) {
                     auto result = rpc(cfg, "auth", {{"op", "exists"}, {"username", recipient}});
                     if (!result.value("ok", false)) { reply("451 4.3.0 Recipient service unavailable\r\n"); continue; }
                     if (!result.value("exists", false)) { reply("550 5.1.1 Unknown recipient\r\n"); continue; }
-                } else if (username.empty() || cfg.text("smarthost_host").empty()) { reply("550 5.7.1 Relay denied\r\n"); continue; }
+                } else if (username.empty() || cfg.outbound_mode()=="disabled" ||
+                    (cfg.outbound_mode()=="direct" && !sender.empty() && sender.substr(sender.rfind('@')+1)!=lower(cfg.text("domain")))) { reply("550 5.7.1 Relay denied\r\n"); continue; }
                 if (std::find(recipients.begin(), recipients.end(), recipient) == recipients.end()) recipients.push_back(recipient);
                 reply("250 2.1.5 Recipient accepted\r\n"); continue;
             }

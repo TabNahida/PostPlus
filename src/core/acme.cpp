@@ -4,6 +4,7 @@
 #include <openssl/bn.h>
 #include <openssl/core_names.h>
 #include <openssl/ecdsa.h>
+#include <openssl/err.h>
 #include <openssl/evp.h>
 #include <openssl/pem.h>
 #include <openssl/x509.h>
@@ -289,13 +290,33 @@ Key account_key(const fs::path& directory) {
     return read_key(path);
 }
 
+enum class NetworkStage { connecting, tls, exchange };
+[[noreturn]] void network_failure(const std::exception& error,NetworkStage stage,Clock::time_point deadline) {
+    const auto* system=dynamic_cast<const std::system_error*>(&error);
+    if(Clock::now()>=deadline || (system && system->code()==asio::error::timed_out) ||
+       std::string_view(error.what())=="connection timed out" || std::string_view(error.what())=="transaction timed out")
+        throw AcmeError("timeout","The certificate authority connection timed out. Check DNS resolution and outbound HTTPS (TCP port 443), then retry.",504);
+    if(system && (system->code()==asio::error::host_not_found || system->code()==asio::error::host_not_found_try_again ||
+                  system->code()==asio::error::no_data || system->code()==asio::error::no_recovery))
+        throw AcmeError("ca_dns_failed","Could not resolve the Let's Encrypt server. Check this server's DNS resolver and Internet connection.",502);
+    if(stage==NetworkStage::connecting)
+        throw AcmeError("ca_connection_failed","Could not connect to Let's Encrypt. Allow outbound HTTPS (TCP port 443) and check the server's Internet connection.",502);
+    if(stage==NetworkStage::tls)
+        throw AcmeError("ca_tls_failed","Could not establish verified HTTPS with Let's Encrypt. Check the system clock and trusted CA certificates (the ca-certificates package on Linux, or SSL_CERT_FILE/SSL_CERT_DIR).",502);
+    throw AcmeError("ca_network_failed","The connection to the certificate authority failed while exchanging data. Check network access and retry.",502);
+}
+
 AcmeHttpResponse native_http(const std::string& method,const std::string& url,
     const std::map<std::string,std::string>& headers,const std::string& body,Clock::time_point deadline) {
     const auto address=parse_url(url);
     Connection connection(std::chrono::seconds(15));
     connection.set_deadline(deadline);
-    connection.connect(address.host,address.port);
-    if(address.tls) connection.start_tls_client(address.host);
+    try {connection.connect(address.host,address.port);}
+    catch(const std::exception& error) {network_failure(error,NetworkStage::connecting,deadline);}
+    if(address.tls) {
+        try {connection.start_tls_client(address.host);}
+        catch(const std::exception& error) {network_failure(error,NetworkStage::tls,deadline);}
+    }
     std::string request=method+" "+address.target+" HTTP/1.1\r\nHost: "+address.host;
     if(address.port!=(address.tls?443:80)) request+=":"+std::to_string(address.port);
     request+="\r\nUser-Agent: PostPlus-ACME/0.1\r\nConnection: close\r\n";
@@ -447,7 +468,13 @@ private:
         check_();checked_url(url);
         if(Clock::now()>=deadline_) throw AcmeError("timeout","Certificate issuance timed out. Verify public DNS and HTTP port 80 before retrying.",504);
         const auto limit=std::min(deadline_,Clock::now()+options_.request_timeout);
-        auto response=options_.transport ? options_.transport(method,url,headers,body,limit) : native_http(method,url,headers,body,limit);
+        AcmeHttpResponse response;
+        try {
+            response=options_.transport ? options_.transport(method,url,headers,body,limit) : native_http(method,url,headers,body,limit);
+        } catch(const AcmeError&) {throw;}
+        catch(const Json::exception&) {throw AcmeError("invalid_ca_response","The certificate authority returned invalid response metadata.",502);}
+        catch(const std::length_error&) {throw AcmeError("invalid_ca_response","The certificate authority returned an oversized or malformed HTTP response.",502);}
+        catch(const std::exception& error) {network_failure(error,NetworkStage::exchange,limit);}
         if(response.body.size()>max_response) throw AcmeError("invalid_ca_response","Certificate authority response exceeded its size limit.",502);
         const auto nonce=response.headers.find("replay-nonce");
         if(nonce!=response.headers.end()) {
@@ -577,8 +604,11 @@ std::string certificate_expiry(const std::string& pem,EVP_PKEY* key,const std::s
         if(!test_ca.empty()) {
             if(X509_STORE_load_file(store.get(),test_ca.string().c_str())!=1) throw AcmeError("invalid_test_ca","Could not load the local test CA.",503);
         } else {
-            if(X509_STORE_set_default_paths(store.get())!=1) throw AcmeError("ca_trust_unavailable","Could not load trusted root certificates.",503);
+            // Missing build-machine defaults must not prevent using native
+            // roots on the deployment machine. Verification remains required.
+            (void)X509_STORE_set_default_paths(store.get());
             add_platform_trust_roots(store.get());
+            ERR_clear_error();
         }
         STACK_OF(X509)* intermediates=sk_X509_new_null();
         if(!intermediates) throw AcmeError("crypto_failed","Could not allocate certificate chain validation state.",503);
@@ -783,9 +813,13 @@ AcmeManager::~AcmeManager()=default;
 Json AcmeManager::terms(const std::string& directory) const {
     check_directory(directory);
     Protocol protocol(impl_->options,directory,Clock::now()+impl_->options.request_timeout,[]{});
-    const auto metadata=protocol.directory();
-    return {{"ok",true},{"directory",directory},{"terms_of_service",metadata.at("meta").at("termsOfService")},
-        {"staging",directory=="staging"},{"challenge_type","http-01"},{"public_challenge_port",80}};
+    try {
+        const auto metadata=protocol.directory();
+        return {{"ok",true},{"directory",directory},{"terms_of_service",metadata.at("meta").at("termsOfService")},
+            {"staging",directory=="staging"},{"challenge_type","http-01"},{"public_challenge_port",80}};
+    } catch(const Json::exception&) {
+        throw AcmeError("invalid_ca_response","The certificate authority returned invalid directory metadata.",502);
+    }
 }
 Json AcmeManager::start(const Json& request) {
     if(!request.is_object()) throw AcmeError("invalid_request","Certificate requests must be JSON objects.");
@@ -826,6 +860,16 @@ Json AcmeManager::start(const Json& request) {
             std::lock_guard lock(implementation->state_mutex);
             implementation->state["state"]=error.code=="cancelled"?"cancelled":"failed";
             implementation->state["code"]=error.code;implementation->state["error"]=error.what();implementation->state["message"]=error.what();
+        } catch(const fs::filesystem_error&) {
+            std::lock_guard lock(implementation->state_mutex);
+            implementation->state["state"]="failed";implementation->state["code"]="file_permissions";
+            implementation->state["error"]="Could not access certificate storage. Check that its directory is writable by the PostPlus service account.";
+            implementation->state["message"]=implementation->state.at("error");
+        } catch(const Json::exception&) {
+            std::lock_guard lock(implementation->state_mutex);
+            implementation->state["state"]="failed";implementation->state["code"]="invalid_ca_response";
+            implementation->state["error"]="The certificate authority returned invalid response metadata.";
+            implementation->state["message"]=implementation->state.at("error");
         } catch(const std::exception&) {
             std::lock_guard lock(implementation->state_mutex);
             implementation->state["state"]="failed";implementation->state["code"]="issuance_failed";

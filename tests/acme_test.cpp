@@ -1,12 +1,15 @@
 #include <postplus/acme.hpp>
+#include <postplus/trust.hpp>
 #include <openssl/core_names.h>
 #include <openssl/ecdsa.h>
 #include <openssl/evp.h>
 #include <openssl/params.h>
 #include <openssl/pem.h>
 #include <openssl/x509v3.h>
+#include <openssl/x509_vfy.h>
 #include <algorithm>
 #include <atomic>
+#include <cstdlib>
 #include <fstream>
 #include <iostream>
 #include <mutex>
@@ -167,7 +170,53 @@ check((fs::status(path).permissions()&(fs::perms::group_all|fs::perms::others_al
 
 int main() {
     try {
+        // Use a fresh store with NO OpenSSL default paths, as in a packaged
+        // release whose dependency build directory is absent on the host.
+#if !defined(_WIN32) && !defined(__APPLE__)
+        if(!std::getenv("SSL_CERT_FILE")) {
+            bool has_bundle=false;
+            for(const auto* path:{"/etc/ssl/certs/ca-certificates.crt","/etc/pki/tls/certs/ca-bundle.crt","/etc/ssl/ca-bundle.pem","/etc/ssl/cert.pem"})
+                has_bundle=has_bundle || fs::is_regular_file(path);
+            if(has_bundle) {
+                Owned<X509_STORE,X509_STORE_free> store(X509_STORE_new(),X509_STORE_free);
+                check(static_cast<bool>(store),"could not create a fresh trust store");
+                add_platform_trust_roots(store.get());
+                check(sk_X509_OBJECT_num(X509_STORE_get0_objects(store.get()))>0,"packaged OpenSSL could not load Linux distribution CA roots");
+                std::cout<<"PASS distribution CA roots without OpenSSL build-machine default paths\n";
+            }
+        }
+        if(!std::getenv("SSL_CERT_FILE") && !std::getenv("SSL_CERT_DIR")) {
+            struct ResetTrustEnvironment {
+                ~ResetTrustEnvironment(){unsetenv("SSL_CERT_FILE");unsetenv("SSL_CERT_DIR");}
+            } reset;
+            check(setenv("SSL_CERT_FILE","/postplus-test-missing-ca.pem",1)==0 &&
+                  setenv("SSL_CERT_DIR","/postplus-test-missing-certs",1)==0,"could not set explicit test CA overrides");
+            Owned<X509_STORE,X509_STORE_free> store(X509_STORE_new(),X509_STORE_free);
+            check(static_cast<bool>(store),"could not create explicit override trust store");
+            add_platform_trust_roots(store.get());
+            check(sk_X509_OBJECT_num(X509_STORE_get0_objects(store.get()))==0,"distribution roots ignored explicit CA overrides");
+        }
+#endif
         const auto directory=fs::absolute(fs::path("build/test-runs")/("acme-"+random_hex(6)));fs::create_directories(directory);
+        MockCa network;
+        fs::create_directories(directory/"network");
+        auto network_options=network.options(directory/"network/certificates");
+        network_options.transport=[](const auto&,const auto&,const auto&,const auto&,auto)->AcmeHttpResponse {
+            throw std::system_error(asio::error::host_not_found,"SENSITIVE_TRANSPORT_DETAIL");
+        };
+        AcmeManager dns_failed(network_options);
+        rejects([&]{dns_failed.terms();},"ca_dns_failed");
+        const auto dns_result=finished(dns_failed,dns_failed.start(network.request()).at("job_id"));
+        check(dns_result.at("code")=="ca_dns_failed" && dns_result.dump().find("SENSITIVE_TRANSPORT_DETAIL")==std::string::npos,"ACME network failure leaked details or lost its error code");
+        network_options.transport=[](const auto&,const auto&,const auto&,const auto&,auto)->AcmeHttpResponse {throw std::runtime_error("connection timed out");};
+        AcmeManager timeout(network_options);rejects([&]{timeout.terms();},"timeout");
+        network_options.transport=[](const auto&,const auto&,const auto&,const auto&,auto)->AcmeHttpResponse {throw std::system_error(asio::error::eof);};
+        AcmeManager disconnected(network_options);rejects([&]{disconnected.terms();},"ca_network_failed");
+        network_options.transport=[](const auto&,const auto&,const auto&,const auto&,auto)->AcmeHttpResponse {throw std::length_error("oversized response");};
+        AcmeManager oversized(network_options);rejects([&]{oversized.terms();},"invalid_ca_response");
+        network_options.transport=[](const auto&,const auto&,const auto&,const auto&,auto)->AcmeHttpResponse {return {200,{},"{\"newNonce\":false}"};};
+        AcmeManager malformed(network_options);rejects([&]{malformed.terms();},"invalid_ca_response");
+        std::cout<<"PASS CA directory DNS, timeout, disconnect and malformed-response failures remain actionable and private\n";
         MockCa mock;AcmeManager manager(mock.options(directory/"certificates",true));mock.manager=&manager;
         const auto metadata=manager.terms("staging");check(metadata.at("terms_of_service")==mock.terms && metadata.at("public_challenge_port")==80,"CA terms metadata mismatch");
         const auto before=mock.requests.load();auto input=mock.request();

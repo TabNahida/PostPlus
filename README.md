@@ -29,7 +29,7 @@
   <img src="docs/assets/preview.svg" alt="Illustrated overview of PostPlus setup, administration, and Webmail" width="920">
 </p>
 
-PostPlus is under active development. The current release supports local mail workflows and outbound delivery through an SMTP relay. See [Current scope](#current-scope) before planning an internet-facing installation.
+PostPlus is under active development. It supports local mail, built-in direct MX delivery with DKIM signing, and optional SMTP relays. See [Current scope](#current-scope) before planning an internet-facing installation.
 
 ## Quick start
 
@@ -104,7 +104,7 @@ Most day-to-day options are available in **Administration → Server settings**:
 
 The [example configuration](config/postplus.example.json) is a reference for manual management. The browser wizard generates a private service credential automatically. Mail data stays in the installation's data directory; changing that directory later requires a deliberate offline migration.
 
-External recipients require a configured SMTP relay. Full antivirus scanning requires a separately installed and maintained ClamAV service. PostPlus can request Let’s Encrypt certificates using HTTP-01. You configure DNS, public port 80 reachability, and any external relay or antivirus service. Automatic certificate renewal is not implemented.
+For external recipients, select built-in direct delivery and publish the generated DKIM/SPF records, or configure an SMTP relay. Direct sending requires outbound TCP 25, public DNS and suitable PTR/IP reputation. Full antivirus scanning requires a separately installed and maintained ClamAV service. PostPlus can request Let’s Encrypt certificates using HTTP-01. Automatic certificate renewal is not implemented.
 
 ## Architecture and development
 
@@ -157,7 +157,7 @@ tests/                 C++ tests, web checks, and integration suites
 
 - IMAP implements a [documented command subset](docs/protocols.md); full client compatibility, IDLE, ENVELOPE, and BODYSTRUCTURE remain outside the current scope. POP3 does not yet provide an exclusive maildrop lock.
 - Webmail reads and composes plain text across six built-in folders. Attachment upload/download, HTML rendering, and custom folder creation are not implemented. A Sent copy records successful submission to the queue, not proof of final delivery.
-- Outbound delivery uses an SMTP relay. Direct MX delivery, SPF/DKIM/DMARC processing, DSN generation, multiple domains, and multi-host high availability are not implemented.
+- Outbound delivery supports direct MX routing with DKIM signing or an SMTP relay. Incoming SPF/DKIM/DMARC verification, DSN generation, DANE, MTA-STS, multiple domains, and multi-host high availability are not implemented. Permanent delivery failures remain visible in the administration queue.
 - SMTP queues mail transactionally. Local delivery is idempotent; retrying outbound mail after an interrupted acknowledgement can produce a duplicate.
 - Sessions use bounded worker pools, SQLite serializes writes, and delivery uses one worker. Capacity for hundreds or thousands of active users requires representative workload testing and further development.
 - Linux installations can use the bundled [systemd installer](docs/systemd.md) after setup for automatic startup and restart on failure. Automatic certificate renewal and DNS automation are not bundled.

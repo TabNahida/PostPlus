@@ -188,9 +188,13 @@ class NativeServer:
         arguments.extend(extra_args or [])
         self.process = subprocess.Popen(
             arguments,
-            cwd=directory, env=env, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+            cwd=directory, env=env, stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
             text=True, encoding="utf-8", errors="replace",
             creationflags=subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0)
+        # Windows treats NUL as a terminal; a closed pipe reliably selects
+        # the non-interactive setup defaults without prompting the test driver.
+        self.process.stdin.close()
         self.reader = threading.Thread(target=self.read_output, daemon=True)
         self.reader.start()
 
@@ -529,7 +533,20 @@ def run(binaries, directory):
         assert http(ports["admin"], "GET", "/api/setup", headers={**headers, "Host": "evil.example"})[0] == 403
         assert http(ports["admin"], "POST", "/api/setup", {}, {**headers, "Origin": "https://evil.example"})[0] == 403
         assert http(ports["admin"], "GET", "/api/setup?token=" + server.token)[0] == 404
-        for path in ("/setup", "/setup.js", "/i18n.js", "/settings.js", "/favicon.svg", "/style.css"):
+        dns_route = "/api/setup/dns/check"
+        dns_input = {"domain": "example.com", "hostname": "mail.example.com"}
+        assert http(ports["admin"], "POST", dns_route, dns_input)[0] == 403
+        assert http(ports["admin"], "POST", dns_route, dns_input, {"X-Setup-Token": "wrong"})[0] == 403
+        assert http(ports["admin"], "POST", dns_route, dns_input, {**headers, "Origin": "https://evil.example"})[0] == 403
+        assert http(ports["admin"], "POST", dns_route, dns_input, {**headers, "Host": "evil.example"})[0] == 403
+        assert http(ports["admin"], "GET", dns_route, headers=headers)[0] == 405
+        for invalid_dns in ({**dns_input, "resolver": "http://127.0.0.1/"},
+                            {**dns_input, "hostname": "https://example.test/"},
+                            {**dns_input, "dkim_name": "selector._domainkey.other.test", "dkim_value": "p=AbCd1234"},
+                            {**dns_input, "ipv4": "2001:db8::1"}):
+            dns_status, _, dns_error = http(ports["admin"], "POST", dns_route, invalid_dns, headers)
+            assert dns_status == 400 and dns_error["code"] == "invalid_dns_input", (dns_status, dns_error)
+        for path in ("/setup", "/setup.js", "/dns.js", "/i18n.js", "/settings.js", "/favicon.svg", "/style.css"):
             status, policy, body = http(ports["admin"], "GET", path)
             assert status == 200 and body
             assert policy["Cache-Control"] == "no-store" and "frame-ancestors 'none'" in policy["Content-Security-Policy"]

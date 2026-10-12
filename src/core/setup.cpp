@@ -2,6 +2,8 @@
 #include <postplus/settings.hpp>
 #include <postplus/password_policy.hpp>
 #include <postplus/acme.hpp>
+#include <postplus/dns.hpp>
+#include <postplus/dkim.hpp>
 #include <asio/ssl.hpp>
 #include <openssl/ssl.h>
 #include <algorithm>
@@ -178,6 +180,8 @@ Json setup_defaults(const SetupOptions& options) {
             if (result["ports"].contains(entry.key())) result["ports"][entry.key()]=entry.value();
     if (base.values.contains("delivery_lock_port")) result["ports"]["delivery_lock"]=base.values.at("delivery_lock_port");
     if (!base.text("data_dir").empty()) result["data_dir"]=absolute_field(base.text("data_dir"),parent).string();
+    result["outbound_mode"]=base.outbound_mode();
+    result["mail_hostname"]=base.text("mail_hostname",result.at("domain").get<std::string>()=="localhost"?"localhost":"mail."+result.at("domain").get<std::string>());
     for (const auto* key : {"tls_certificate","tls_private_key"})
         if (!result.at(key).get<std::string>().empty()) result[key]=absolute_field(result.at(key).get<std::string>(),parent).string();
     result["admin_username"]="admin@"+result.at("domain").get<std::string>();
@@ -188,11 +192,13 @@ Config validate_input(const Json& input, const Json& defaults, const SetupOption
                       std::string& username, std::string& password) {
     const auto parent = fs::absolute(options.config_path).parent_path();
     Config config;
+    config.values=Json::object();
     config.source=fs::absolute(options.config_path).lexically_normal();
     if (options.existing_config) config.values=Json::parse(*options.existing_config);
     auto& values = config.values;
     const auto domain = lower(trim(text_field(input, "domain", "", 253)));
     if (!valid_address("postmaster@" + domain)) throw SetupError("invalid_domain", "Enter a valid ASCII mail domain, such as example.com.");
+    if(!config.text("domain").empty() && lower(config.text("domain"))!=domain) values.erase("dkim_private_key");
     values["domain"] = domain;
     username = lower(trim(text_field(input, "admin_username", "", 254)));
     if (!valid_address(username) || username.substr(username.find('@') + 1) != domain)
@@ -290,7 +296,7 @@ Config validate_input(const Json& input, const Json& defaults, const SetupOption
     values["smarthost_tls"] = relay_tls;
     values["service_token_env"] = "POSTPLUS_SERVICE_TOKEN";
     auto settings=input;
-    for (const auto* field : {"admin_username","admin_password","data_dir"}) settings.erase(field);
+    for (const auto* field : {"admin_username","admin_password","data_dir","dkim_fingerprint"}) settings.erase(field);
     if (settings.contains("ports") && settings["ports"].contains("delivery_lock")) {
         settings["delivery_lock_port"]=settings["ports"]["delivery_lock"];
         settings["ports"].erase("delivery_lock");
@@ -335,12 +341,13 @@ bool run_setup(const SetupOptions& options, SetupProvision provision) {
         if(options.port==(https?443:80)) hosts.insert("localhost");
     }
     AcmeManager acme(AcmeOptions{destination.parent_path()/"certificates"});
+    DnsChecker dns;
     std::map<std::string, HttpResponse> assets;
     for (const auto& [filename, type] : std::map<std::string, std::string>{
         {"setup.html", "text/html; charset=utf-8"}, {"setup.js", "application/javascript; charset=utf-8"},
         {"i18n.js", "application/javascript; charset=utf-8"}, {"settings.js", "application/javascript; charset=utf-8"},
         {"size.js", "application/javascript; charset=utf-8"}, {"acme.js", "application/javascript; charset=utf-8"},
-        {"address.js", "application/javascript; charset=utf-8"},
+        {"address.js", "application/javascript; charset=utf-8"}, {"dns.js", "application/javascript; charset=utf-8"},
         {"preferences.js", "application/javascript; charset=utf-8"}, {"preferences.css", "text/css; charset=utf-8"},
         {"icons.svg", "image/svg+xml"},
         {"favicon.svg", "image/svg+xml"}, {"style.css", "text/css; charset=utf-8"}}) {
@@ -372,12 +379,39 @@ bool run_setup(const SetupOptions& options, SetupProvision provision) {
         const auto origin = header(request, "origin");
         if (!origin.empty() && (!origin.starts_with(scheme) || !hosts.contains(origin.substr(scheme.size()))))
             return error_response("invalid_origin", "Open the setup URL printed by the server.", 403);
-        if ((request.path == "/api/setup" || request.path.starts_with("/api/setup/acme/")) && !secure_equal(header(request, "x-setup-token"), token))
+        if ((request.path == "/api/setup" || request.path.starts_with("/api/setup/acme/") || request.path.starts_with("/api/setup/dns/") || request.path=="/api/setup/dkim") && !secure_equal(header(request, "x-setup-token"), token))
             return error_response("invalid_setup_token", "Enter the one-time setup password printed in the PostPlus terminal.", 403);
         return std::nullopt;
     };
     auto handler = [&](const HttpRequest& request) -> HttpResponse {
         try {
+            if(request.path=="/api/setup/dkim") {
+                if(request.method!="POST") return error_response("method_not_allowed","Use POST for DKIM preparation.",405);
+                if(trim(lower(header(request,"content-type")).substr(0,header(request,"content-type").find(';')))!="application/json")
+                    return error_response("invalid_content_type","Use application/json for setup.",415);
+                std::unique_lock lock(provisioning,std::try_to_lock);
+                if(!lock.owns_lock()) return error_response("setup_busy","Setup is already running. Wait before retrying.",409);
+                if(completed) return error_response("already_configured","A configuration already exists. Restart PostPlus to use it.",409);
+                if(request.body.size()>2048) throw SetupError("invalid_field","DKIM request is too large.");
+                const auto input=Json::parse(request.body,nullptr,false);
+                if(input.is_discarded() || !input.is_object()) throw SetupError("invalid_json","A JSON object is required.");
+                Config base; base.source=destination; base.values=Json::object();
+                if(options.existing_config) base.values=Json::parse(*options.existing_config);
+                if(!base.text("dkim_private_key").empty()) base.values["dkim_private_key"]=absolute_field(base.text("dkim_private_key"),destination.parent_path()).string();
+                return protected_response(json_response(prepare_dkim(base,input)));
+            }
+            if(request.path=="/api/setup/dns/check") {
+                if(request.method!="POST")return error_response("method_not_allowed","Use POST for DNS checks.",405);
+                if(trim(lower(header(request,"content-type")).substr(0,header(request,"content-type").find(';')))!="application/json")
+                    return error_response("invalid_content_type","Use application/json for setup.",415);
+                std::unique_lock lock(provisioning,std::try_to_lock);
+                if(!lock.owns_lock())return error_response("setup_busy","Setup is already running. Wait before retrying.",409);
+                if(completed)return error_response("already_configured","A configuration already exists. Restart PostPlus to use it.",409);
+                if(request.body.size()>32768)throw DnsError("invalid_dns_input","The DNS check request is too large.");
+                auto input=Json::parse(request.body,nullptr,false);
+                if(input.is_discarded() || !input.is_object())throw SetupError("invalid_json","A JSON object is required.");
+                return protected_response(json_response(dns.check(input)));
+            }
             if(request.path.starts_with("/api/setup/acme/")) {
                 std::lock_guard lock(provisioning);
                 if(completed) return error_response("already_configured","A configuration already exists. Restart PostPlus to use it.",409);
@@ -418,6 +452,11 @@ bool run_setup(const SetupOptions& options, SetupProvision provision) {
             if (input.is_discarded() || !input.is_object()) throw SetupError("invalid_json", "A JSON object is required.");
             std::string username, password;
             auto config = validate_input(input, defaults, options, username, password);
+            if(config.outbound_mode()=="direct") {
+                auto record=prepare_dkim(config,Json::object());
+                if(!secure_equal(text_field(input,"dkim_fingerprint","",64),record.at("fingerprint").get<std::string>()))
+                    throw SetupError("dkim_not_prepared","Load the current DKIM public record in the DNS guide before saving direct delivery.");
+            }
             // The password only reaches the in-memory provisioning callback.
             input.erase("admin_password");
             if (fs::create_directories(destination.parent_path())) {
@@ -457,7 +496,11 @@ bool run_setup(const SetupOptions& options, SetupProvision provision) {
             log("setup", "initial configuration and administrator created");
             return protected_response(json_response({{"ok", true}, {"web_url", settings_url(config,"web")},
                 {"admin_url",settings_url(config,"admin")}}));
+        } catch (const DnsError& error) {
+            return error_response(error.code,error.what(),400);
         } catch (const AcmeError& error) {
+            if (error.status >= 500)
+                log("setup", "certificate request failed: " + error.code + ". " + error.what(), "error");
             return error_response(error.code,error.what(),error.status);
         } catch (const SettingsError& error) {
             auto response=json_response({{"ok",false},{"code","invalid_configuration"},{"field",error.field},{"error",error.what()}},error.status);

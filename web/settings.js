@@ -7,7 +7,7 @@ window.PostPlusSettings = (() => {
     network:["Network", "Separate addresses and ports for administration, Webmail, and mail clients."],
     security:["Security", "Certificates, authentication, and connection protection."],
     limits:["Connection and message limits", "Choose sensible limits for mail clients and message uploads."],
-    delivery:["Outgoing mail", "Connect a relay to send mail to other domains."],
+    delivery:["Outgoing mail", "Choose built-in direct delivery, an SMTP relay, or receiving and local mail only."],
     filter:["Mail filtering", "Choose how suspicious mail and antivirus failures are handled."],
     storage:["Storage and limits", "Set message sizes, account quotas, and delivery limits."],
     logging:["Logging", "Keep useful service events without using unlimited disk space."],
@@ -34,12 +34,14 @@ window.PostPlusSettings = (() => {
   }
   function create(root, schema, values, options = {}) {
     const controls = new Map();
+    let deliverySection=null,dkimPanel=null,disposed=false;
     const prefix = options.prefix || "settings";
     root.replaceChildren();
     for (const [group, [title, description]] of Object.entries(groups)) {
       const fields = schema.filter(field => field.group === group && !options.exclude?.has(field.key));
       if (!fields.length) continue;
       const section = node("details", "settings-group");
+      if(group==="delivery")deliverySection=section;
       section.open = group === "general";
       section.append(node("summary", "", title), node("p", "field-hint", description));
       const grid = node("div", "settings-grid");
@@ -53,7 +55,9 @@ window.PostPlusSettings = (() => {
         input.dataset.configKey = field.key;
         const initial = get(values, field.key) ?? field.default ?? "";
         if (field.type === "boolean" || field.type === "select") {
-          const choices = field.type === "boolean" ? [["true","Enabled"],["false","Disabled"]] : (field.options || []).map(value => [value,value]);
+          const deliveryLabels={disabled:"Receive and local mail only",direct:"Direct delivery — recommended for your own server",relay:"Send through an SMTP relay"};
+          const directTlsLabels={starttls:"STARTTLS when available",required:"Require verified TLS"};
+          const choices = field.type === "boolean" ? [["true","Enabled"],["false","Disabled"]] : (field.options || []).map(value => [value,field.key==="outbound_mode"?deliveryLabels[value]||value:field.key==="direct_tls"?directTlsLabels[value]||value:value]);
           for (const [value, text] of choices) { const choice = node("option", "", text); choice.value = value; input.append(choice); }
           input.value = String(initial);
         } else {
@@ -77,7 +81,7 @@ window.PostPlusSettings = (() => {
           sizeControl=PostPlusSize.create(input,unit,Number(initial),{min:field.min,max:field.max});
           const size=node("div","size-control");size.append(input,unit);wrapper.append(label,size,help);
         } else wrapper.append(label,input,help);
-        if (field.readonly) wrapper.append(node("p","field-hint readonly-hint","Managed by the server. Change this in the configuration file while PostPlus is stopped."));
+        if (field.readonly) wrapper.append(node("p","field-hint readonly-hint",field.key==="dkim_private_key"?"Use Generate / load DKIM public record below. The private key stays on this server.":"Managed by the server. Change this in the configuration file while PostPlus is stopped."));
         let clearPassword = null;
         if (field.type === "password") {
           wrapper.append(node("p","field-hint", options.secretStatus?.[field.key] ? "A password is saved. Leave blank to keep it." : "No password is saved. Leave blank to use the environment variable."));
@@ -97,7 +101,37 @@ window.PostPlusSettings = (() => {
       section.append(grid);
       root.append(section);
     }
+    if(options.generateDkim&&deliverySection&&["domain","outbound_mode","dkim_selector"].every(key=>controls.has(key))){
+      const panel=node("section","settings-dkim"),button=node("button","button primary","Generate / load DKIM public record"),status=node("p","field-hint"),error=node("p","form-error"),record=node("div","dns-record-grid");
+      button.type="button";button.id=`${prefix}-generate-dkim`;status.setAttribute("role","status");error.setAttribute("role","alert");panel.append(node("h3","","DKIM public DNS record"),node("p","field-hint","Publish this TXT record at your DNS provider. Only the public key is shown; keep private backups secure."),button,status,error,record);deliverySection.append(panel);
+      const current=()=>({domain:controls.get("domain").input.value.trim().toLowerCase(),selector:controls.get("dkim_selector").input.value.trim().toLowerCase()}),direct=()=>controls.get("outbound_mode").input.value==="direct";
+      let revision=0,busy=false,publicRecord=null,errorKey="",errorProblem=null;
+      function currentKey(){const expected=current();return publicRecord&&publicRecord.domain===expected.domain&&publicRecord.selector===expected.selector;}
+      function ready(){const expected=current();return !busy&&(currentKey()||Boolean(values.dkim_private_key&&expected.domain===String(values.domain).toLowerCase()&&expected.selector===String(values.dkim_selector||"postplus").toLowerCase()));}
+      function copy(label,value){const wrap=node("div","dns-copy"),input=node("textarea");input.rows=value.length>160?3:1;input.readOnly=true;input.value=value;input.setAttribute("aria-label",t(label));input.addEventListener("click",()=>input.select());wrap.append(node("span","",label),input);record.append(wrap);}
+      function render(){
+        panel.hidden=!direct();button.disabled=busy;button.textContent=t(busy?"Generating / loading DKIM…":"Generate / load DKIM public record");
+        status.textContent=busy?t("The private key stays on the server. Waiting for its public DNS record…"):currentKey()?t("Public DKIM key loaded. Fingerprint: {fingerprint}",{fingerprint:publicRecord.fingerprint}):t("Generate or load the key for this domain and selector before saving direct delivery.");
+        const detail=errorProblem?PostPlusI18n.error(errorProblem):"";
+        error.hidden=!errorKey;error.textContent=errorKey?t(errorKey)+(detail&&detail!==t("The request failed. Please try again.")?" "+detail:""):"";record.replaceChildren();if(currentKey()){copy("Full DNS name",publicRecord.name);copy("Value / content",publicRecord.value);}
+      }
+      function invalidate(){revision++;publicRecord=null;errorKey="";errorProblem=null;render();}
+      for(const key of ["domain","dkim_selector"])controls.get(key).input.addEventListener("input",invalidate);
+      controls.get("outbound_mode").input.addEventListener("change",render);
+      button.addEventListener("click",async()=>{
+        if(busy||disposed)return;const expected=current(),requested=++revision;busy=true;publicRecord=null;errorKey="";errorProblem=null;render();
+        try{
+          const data=await options.generateDkim(expected);if(disposed||requested!==revision)return;
+          const tags=typeof data?.value==="string"?data.value.split(";").map(part=>/^\s*([^=]+?)\s*=\s*(.*?)\s*$/.exec(part)).filter(Boolean):[],names=tags.map(tag=>tag[1].toLowerCase()),tag=name=>tags.find(item=>item[1].toLowerCase()===name)?.[2];
+          if(!data?.ok||data.domain!==expected.domain||data.selector!==expected.selector||data.type!=="TXT"||data.name!==expected.selector+"._domainkey."+expected.domain||tag("v")!=="DKIM1"||tag("k")!=="rsa"||!tag("p")||!/^[a-z0-9+/=]+$/i.test(tag("p"))||new Set(names).size!==names.length||typeof data.fingerprint!=="string"||!data.fingerprint||/PRIVATE KEY/i.test(JSON.stringify(data))||Object.keys(data).some(key=>/private|secret/i.test(key)))throw new Error("invalid_response");
+          publicRecord={domain:expected.domain,selector:expected.selector,name:data.name,value:data.value,fingerprint:data.fingerprint};
+        }catch(problem){if(!disposed&&requested===revision){errorProblem=problem?.data||problem;errorKey="Cannot generate or load the public DKIM record. Check the server error and retry.";}}
+        finally{if(!disposed){busy=false;render();}}
+      });
+      dkimPanel={render,check(){if(direct()&&!ready()){deliverySection.open=true;button.focus();throw new Error(t("Generate or load the DKIM public record for the current domain and selector before saving direct delivery."));}},dispose(){revision++;}};render();
+    }
     function read({changedOnly = true} = {}) {
+      dkimPanel?.check();
       const result = {};
       for (const [key,{field,input,initial,clearPassword,sizeControl}] of controls) {
         if (clearPassword?.checked) {result.clear_smarthost_password = true; continue;}
@@ -116,7 +150,7 @@ window.PostPlusSettings = (() => {
       }
       return result;
     }
-    return {read,translate:() => PostPlusI18n.apply(root),highlight:key => {const control = controls.get(key); if(control) reveal(control.input);},clearSecrets:() => controls.forEach(({field,input}) => {if(field.type === "password") input.value = "";})};
+    return {read,translate:() => {PostPlusI18n.apply(root);dkimPanel?.render();},dispose(){disposed=true;dkimPanel?.dispose();},highlight:key => {const control = controls.get(key); if(control) reveal(control.input);},clearSecrets:() => controls.forEach(({field,input}) => {if(field.type === "password") input.value = "";})};
   }
   return {create};
 })();

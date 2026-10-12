@@ -2,13 +2,19 @@
 window.PostPlusAcme = (() => {
   const t=(...args)=>PostPlusI18n.t(...args);
   function node(tag,text,className) {const item=document.createElement(tag);if(text){item.dataset.i18n=text;item.textContent=t(text);}if(className)item.className=className;return item;}
-  function create(root,{request,domain="",onCertificate,prefix="acme"}) {
+  function create(root,{request,domain="",onCertificate,onDomainChange,onRunningChange,prefix="acme",lockDomain=false}) {
     const panel=node("details",null,"acme-panel");panel.append(node("summary","Get a certificate from Let's Encrypt"));
     panel.append(node("p","Point your domain's DNS to this server and forward public TCP port 80 to PostPlus for HTTP-01 validation.","field-hint"));
-    panel.append(node("p","Start with staging to check your setup. Staging certificates are for testing and are not trusted by browsers or mail clients.","field-hint"));
+    const help=node("details",null,"dns-technical");help.append(node("summary","HTTP-01 certificate details"));
+    help.append(node("p","Use a public domain, not localhost. Allow inbound TCP port 80 through your firewall and router, and serve the challenge directly or through your reverse proxy. Remove incorrect AAAA records before retrying.","field-hint"));
+    help.append(node("p","Start with staging to check your setup. Staging certificates are for testing and are not trusted by browsers or mail clients.","field-hint"));panel.append(help);
     const form=node("div",null,"acme-fields"),grid=node("div",null,"grid-two");
     function field(label,name,type,value) {const wrap=node("div"),text=node("label",label),input=node("input");text.htmlFor=`${prefix}-${name}`;input.id=text.htmlFor;input.type=type;input.value=value;input.autocomplete="off";wrap.append(text,input);grid.append(wrap);return input;}
     const host=field("Certificate domain","domain","text",domain),email=field("Certificate contact email","email","email","");
+    host.readOnly=lockDomain;
+    if(lockDomain)form.append(node("p","The certificate uses the mail server hostname from step 1. Change that hostname there before requesting a certificate.","field-hint"));
+    let domainEdited=false;
+    host.addEventListener("input",()=>{domainEdited=true;onDomainChange?.(host.value);});
     form.append(grid);const directoryLabel=node("label","Certificate environment"),directory=node("select");directory.id=`${prefix}-directory`;directoryLabel.htmlFor=directory.id;
     for(const [value,label] of [["staging","Staging · test certificate"],["production","Production · trusted certificate"]]){const option=node("option",label);option.value=value;directory.append(option);}
     directory.value="staging";
@@ -22,9 +28,9 @@ window.PostPlusAcme = (() => {
     const certificateLabel=node("label","Issued certificate file"),keyLabel=node("label","Issued private key file");certificate.id=`${prefix}-issued-certificate`;key.id=`${prefix}-issued-key`;certificateLabel.htmlFor=certificate.id;keyLabel.htmlFor=key.id;
     const expiry=node("p",null,"field-hint"),apply=node("button","Use these certificate paths","button secondary");apply.type="button";result.append(certificateLabel,certificate,keyLabel,key,expiry,apply);
     form.append(termsButton,termsLink,consentLabel,actions,status,error,result);panel.append(form);root.replaceChildren(panel);
-    let terms="",job=null,timer=null,running=false,lastStatus="",disposed=false,loadingTerms=false,cancelling=false,version=0;
+    let terms="",job=null,timer=null,running=false,lastStatus="",disposed=false,loadingTerms=false,cancelling=false,version=0,lastRunning=null;
     function fail(problem) {error.hidden=false;error.textContent=problem.message || PostPlusI18n.error(problem);}
-    function render() {status.textContent=lastStatus ? t(lastStatus) : "";start.disabled=running || loadingTerms || !terms || !consent.checked;cancel.hidden=!running;cancel.disabled=cancelling;host.disabled=running;email.disabled=running;directory.disabled=running || loadingTerms;termsButton.disabled=running || loadingTerms;consent.disabled=running || loadingTerms || !terms;expiry.hidden=!job?.result?.expires_at;expiry.textContent=job?.result?.expires_at ? t("Certificate expires: {date}",{date:job.result.expires_at}) : "";}
+    function render() {status.textContent=lastStatus ? t(lastStatus) : "";start.disabled=running || loadingTerms || !terms || !consent.checked;cancel.hidden=!running;cancel.disabled=cancelling;host.disabled=running;email.disabled=running;directory.disabled=running || loadingTerms;termsButton.disabled=running || loadingTerms;consent.disabled=running || loadingTerms || !terms;expiry.hidden=!job?.result?.expires_at;expiry.textContent=job?.result?.expires_at ? t("Certificate expires: {date}",{date:job.result.expires_at}) : "";if(lastRunning!==running){lastRunning=running;onRunningChange?.(running);}}
     function resetTerms() {terms="";consent.checked=false;consent.disabled=true;termsLink.hidden=true;render();}
     directory.addEventListener("change",resetTerms);consent.addEventListener("change",render);
     termsButton.addEventListener("click",async()=>{
@@ -68,10 +74,10 @@ window.PostPlusAcme = (() => {
       catch(problem){if(!disposed){fail(problem);timer=setTimeout(poll,2500);}}
       finally{cancelling=false;if(!disposed)render();}
     });
-    apply.addEventListener("click",async()=>{if(disposed || apply.hidden || apply.disabled)return;apply.disabled=true;try{await onCertificate({tls_certificate:certificate.value,tls_private_key:key.value});if(disposed)return;lastStatus="Certificate paths filled. Review and save your configuration.";render();}catch(problem){if(!disposed)fail(problem);}finally{apply.disabled=false;}});
+    apply.addEventListener("click",async()=>{if(disposed || apply.hidden || apply.disabled)return;apply.disabled=true;try{await onCertificate({tls_certificate:certificate.value,tls_private_key:key.value},{domain:job?.domain || ""});if(disposed)return;lastStatus="Certificate paths filled. Review and save your configuration.";render();}catch(problem){if(!disposed)fail(problem);}finally{apply.disabled=false;}});
     panel.addEventListener("toggle",()=>{if(panel.open && !running)poll();});
     render();
-    return {translate(){PostPlusI18n.apply(root);render();},setDomain(value){if(!host.value)host.value=value;},dispose(){disposed=true;version++;clearTimeout(timer);}};
+    return {translate(){PostPlusI18n.apply(root);render();},getDomain(){return host.value;},setDomain(value,force=false){if(!running && (force || !domainEdited || !host.value)){host.value=value;onDomainChange?.(host.value);}},dispose(){disposed=true;version++;clearTimeout(timer);}};
   }
   return {create};
 })();

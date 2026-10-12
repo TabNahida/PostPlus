@@ -94,7 +94,7 @@ For a first trial on one computer, use the values below. Expand advanced section
 | Webmail port | `8080` | Reading and composing mail in a browser. |
 | SMTP / POP3 / IMAP | `2525` / `1110` / `1143` | Non-privileged development ports for mail clients. |
 | Internal ports | Keep the suggested values | Private communication between service processes; each must be distinct. |
-| Outgoing relay | Leave host empty | Local recipients work. Sending to an external domain requires a relay. |
+| Outgoing delivery | Choose disabled for the local trial | Local recipients work. A real-domain deployment can select built-in direct delivery or an SMTP relay. |
 | ClamAV | Leave host empty for this trial | Built-in filtering remains active; full malware scanning needs a separate ClamAV service. |
 
 Save the form. PostPlus validates the values, creates the administrator and private configuration files, closes setup, and starts the service group. Use the success page's links or the addresses printed by the launcher.
@@ -188,9 +188,39 @@ Suppose you control `example.com` and want addresses such as `alice@example.com`
 4. **Obtain a certificate.** Request one through PostPlus’s Let’s Encrypt panel (below), or use another provider. The certificate must cover `mail.example.com`; its PEM chain and matching unencrypted private key must be readable by the service account.
 5. **Configure TLS and listening.** In Server settings, enter those paths, disable local plaintext authentication, and choose a reachable bind address. `0.0.0.0` means all IPv4 interfaces; `127.0.0.1` means local access only. Keep the administration bind on loopback if you manage it through a tunnel. All configured ports must differ, including admin and Webmail.
 6. **Access the correct name.** Use `https://mail.example.com:8080/` for Webmail if that is the configured port and certificate name. Accessing by an IP or another domain can cause a certificate-name error. PostPlus uses one configured certificate/key pair for its TLS listeners.
-7. **Configure an outbound relay.** Follow the next section, then create addresses in the real domain and test a local message before testing an external recipient.
+7. **Configure outgoing delivery.** Choose built-in direct delivery or an SMTP relay as described below, then create addresses in the real domain and test a local message before testing an external recipient.
 
 You can run the administration port on a separate network address without making it publicly accessible. DNS, TLS, firewall rules, and relay permission must all agree with the names and ports you actually use. The setup form validates local settings but does not prove external reachability or email deliverability.
+
+### Fill in DNS records
+
+First-run setup guides you through the domain and hostname, receiving mail, sending authentication, and the certificate. For mailbox domain `example.com`, it suggests `mail.example.com` as the mail hostname and preserves manual hostname edits. Add the `mail` A/AAAA records and the root MX; **you do not need to replace your existing website's root A record**. A local `localhost` trial can skip public DNS.
+
+**Configure receiving first.** Enter the server's public addresses to generate records you can copy into the provider hosting your authoritative DNS:
+
+| Type | Name in the `example.com` DNS zone | Value | Purpose |
+| --- | --- | --- | --- |
+| A | `mail` | The public IPv4 entered in setup | Let mail clients and other servers find the mail host. |
+| AAAA (optional) | `mail` | Your working public IPv6 address | Publish only when IPv6 reaches the mail services. |
+| MX | `@` | `mail.example.com`, priority `10` | Receive mail for `@example.com`; public TCP 25 must reach the configured SMTP port. |
+
+`@` means the zone's root. Most DNS panels append `example.com`, so enter `mail`; panels requiring a complete name use `mail.example.com`. The wizard shows both forms. If the mail hostname belongs to another domain, create A/AAAA in that domain's DNS zone; the mailbox MX still belongs to `example.com`. Select DNS-only for the mail hostname when your provider offers an HTTP proxy.
+
+**Send directly from your server.** Choose **Built-in direct delivery** in step 3. PostPlus queries recipient MX records and sends on TCP 25 without a relay. Enter the public IP addresses actually used for outbound SMTP, then generate/load DKIM. The server creates a private RSA key and shows the real public TXT record to publish. Retrying or restarting setup reuses that key.
+
+**Publish sending authentication.** Direct mode generates SPF from the public IPs you enter and DKIM from the server's generated public key. For an SMTP relay, enter its actual SPF policy and public DKIM TXT/CNAME record. Disabled mode lets you receive Internet mail and exchange messages between local accounts while preparing outbound delivery later.
+
+- SPF: publish the generated direct-sending policy or the relay's complete `v=spf1 …` policy. Merge with an existing policy so there is only one SPF TXT at that name. If the relay requires a separate return-path domain, follow its instructions.
+- DKIM: publish the generated public TXT at `<selector>._domainkey.example.com`. For a relay, enable signing and use its actual public TXT or CNAME. Never publish a private key.
+- DMARC: setup suggests TXT `v=DMARC1; p=none` at `_dmarc`. Confirm SPF or DKIM aligns with the sender domain before choosing `quarantine` or `reject`. Keep an existing suitable policy rather than adding a duplicate.
+
+Direct mode signs outgoing mail with the generated DKIM key; publish its TXT at `postplus._domainkey.example.com` or your chosen selector. Allow **outbound TCP 25** and ask the hosting provider to set the outbound IP's **PTR** to `mail.example.com`; that hostname's A/AAAA must resolve back to the IP. After deployment, send a test message and inspect authentication results. DNS matching does not prove port reachability, IP reputation or inbox placement.
+
+**After publishing, click “Check public DNS”.** The server queries A, AAAA, MX, SPF, DKIM and DMARC through a fixed public resolver. Each record shows matched, missing, mismatched, unconfigured or lookup failed, with observed values, the check time and resolver. Changing inputs invalidates old results. Saving persists delivery mode, SMTP hostname, DKIM selector and private-key path. DNS records are published separately in your provider's panel.
+
+The check requires outbound UDP port 53 to the public resolver. A lookup failure leaves the result unknown; fix connectivity and retry, or continue using your provider's panel and external checks. A match only reflects what that resolver currently sees. It does not prove TCP 25 reachability, delivery, relay signing or certificate issuance.
+
+**Prepare the certificate last.** For an existing certificate, enter server-side PEM paths and confirm that it covers the mail hostname. Only the built-in Let's Encrypt **HTTP-01** flow below requires public TCP 80; other issuance methods follow their provider's requirements. MX, SPF, DKIM and DMARC do not affect loading CA terms. The built-in flow does not request a DNS-01 `_acme-challenge` TXT record.
 
 ### Request a Let’s Encrypt certificate
 
@@ -206,9 +236,11 @@ The certificate panel is available in **Server settings** and in first-run setup
 
 Certificates and account credentials are saved privately on the server. PostPlus does not configure DNS or your firewall, and successful local setup is not proof of public reachability. Automatic renewal is not implemented: track certificate expiry and request a replacement before it expires, then save and manually restart. You can still use a certificate obtained through another provider by entering its PEM paths directly.
 
-### Outbound SMTP relay
+### Built-in direct delivery or an SMTP relay
 
-PostPlus sends external mail through a smarthost: an SMTP provider or another server that accepts and forwards mail for your domain. It does not perform direct destination-MX delivery.
+To deploy without another mail server, select direct delivery, set a public mail hostname, prepare and publish the DKIM key, and save. Existing installations can prepare a key in **Server settings → Outgoing mail**. Temporary failures retry with exponential backoff for five days by default; permanent failures and expired jobs remain visible in the administration queue. Automatic delivery-failure emails are not generated.
+
+For an SMTP relay, select relay mode and configure a provider or another server that accepts and forwards mail for your domain. A self-hosted relay on loopback can use `smarthost_tls: "none"` without authentication; remote relays require TLS. Never point a relay at PostPlus's own SMTP listener.
 
 In **Server settings**, configure:
 
@@ -218,7 +250,7 @@ In **Server settings**, configure:
 
 Alternatively, set the password through an environment variable, normally `POSTPLUS_SMARTHOST_PASSWORD`, and enter that variable's **name** in the relay environment field. A nonempty environment value takes precedence over the saved password. Set it in the environment used to launch PostPlus or in your service manager's protected configuration, then restart the launcher. Avoid putting a real password in a shell command saved to history. `service_token_file` is a different credential and cannot authenticate with the SMTP provider.
 
-Outbound TLS verifies the relay certificate and hostname. If the platform needs an explicit trust store, configure OpenSSL's `SSL_CERT_FILE` or `SSL_CERT_DIR` before starting PostPlus. Follow the provider's domain-verification, sending-policy, and SPF/DKIM instructions. PostPlus itself does not implement SPF, DKIM signing, or DMARC processing, so use capabilities supplied by the relay where appropriate.
+Outbound TLS verifies certificate trust and hostname. Direct sending uses STARTTLS when offered and defers after TLS failures; required TLS can be selected. Relay mode follows the provider's domain-verification and SPF/DKIM instructions. PostPlus does not verify SPF/DKIM/DMARC on incoming mail.
 
 ### Spam rules and ClamAV
 
@@ -233,7 +265,7 @@ instance, then run `sudo bash scripts/install-systemd.sh` from the extracted
 installation. See the [service guide](systemd.md) for prerequisites, options,
 logs, and `systemctl` commands.
 
-Press **Ctrl+C** in the launcher terminal and wait until the group exits. For a consistent offline backup, copy the entire data directory, configuration, referenced service-token file, and TLS credentials to protected storage. Do not copy only live `.sqlite3` files: recent changes can be in SQLite WAL files. See [Backup and recovery](architecture.md#backup-and-recovery).
+Press **Ctrl+C** in the launcher terminal and wait until the group exits. For a consistent offline backup, copy the entire data directory, configuration, referenced service/relay secrets, DKIM private key, and TLS credentials to protected storage. Do not copy only live `.sqlite3` files: recent changes can be in SQLite WAL files. See [Backup and recovery](architecture.md#backup-and-recovery).
 
 After restoring or making a manual change, run PostPlus with the same explicit `--config` path and inspect the terminal. Keep the old config or the save-generated backup until the new configuration has started successfully. To recover from an unreachable admin listener, stop PostPlus and correct `admin_bind`, `ports.admin`, or TLS paths in the file, then restart.
 
@@ -279,7 +311,7 @@ The utility removes only the known authentication/mail SQLite database files and
 | Browser certificate error | Use the hostname covered by the certificate; check expiration and chain trust. The mail domain and TLS hostname can differ. |
 | Saved settings have not taken effect | Saving does not restart services. Stop the launcher with Ctrl+C, wait for shutdown, then run the same command. Use the new URL after startup. |
 | Page disconnected after restarting | Browser sessions expire when services stop. Wait for startup, use the new admin address, and sign in again. Inspect the terminal if the service does not return. |
-| No mail arrives | Confirm recipient exists, inspect Delivery queue, then check storage/delivery/filter/transfer logs. External mail also needs a relay. |
+| No mail arrives | Confirm recipient exists, inspect Delivery queue, then check storage/delivery/filter/transfer logs. External sending requires enabled direct or relay delivery. |
 | Mail waits after enabling ClamAV | Confirm `clamd` is running and reachable and signatures are loaded. Scanner failures defer delivery. |
 | Internet sender cannot reach the mailbox | Check MX/A/AAAA records, inbound TCP 25, firewall/NAT/provider restrictions, and the configured local recipient. |
 | Mail client has missing folders/features | Compare its needs with the [protocol support matrix](protocols.md). Full IMAP compatibility is still in development. |
