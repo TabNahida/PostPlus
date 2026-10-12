@@ -131,7 +131,9 @@ def gates_and_queue(binaries, directory, key):
             suite.start(service)
         user = "sender@example.com"
         assert suite.rpc("auth", op="create", username=user, password=PASSWORD, admin=True)["ok"]
-        with smtplib.SMTP("127.0.0.1", suite.ports["smtp"], timeout=5) as client:
+        # Avoid ambient hostname DNS lookups after connecting: a slow runner
+        # resolver can consume the server's idle timeout before the first EHLO.
+        with smtplib.SMTP("127.0.0.1", suite.ports["smtp"], local_hostname="localhost", timeout=5) as client:
             client.ehlo()
             assert client.mail(user)[0] == 250
             assert client.rcpt("external@destination.example")[0] == 550
