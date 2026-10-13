@@ -8,7 +8,7 @@
 4. Select **Create backup** and wait for **Download backup**.
 5. Download the `.tar` archive and store it in a private, backed-up location.
 
-The archive contains account password hashes, the live password policy, all mail folders, individual quotas, the delivery queue, saved server configuration, the service token, the configured relay password, the active DKIM private key, and the configured TLS certificate/key pair. It includes `RESTORE.txt` with recovery instructions. Logs, binaries, older backups, and ACME account registration state are omitted. Certificates can be requested again through administration after a restore.
+The archive contains account password hashes, administrator API-key digests and metadata (not usable full keys), the live password policy, all mail folders, individual quotas, the delivery queue, saved server configuration, the service token, the configured relay password, the active DKIM private key, and the configured TLS certificate/key pair. It includes `RESTORE.txt` with recovery instructions. Logs, binaries, older backups, and ACME account registration state are omitted. Certificates can be requested again through administration after a restore.
 
 **Backups are not encrypted.** They contain private mail and credentials; anyone who can read an archive can access this information. Use an encrypted storage location and limit access to the server administrator.
 
@@ -30,7 +30,7 @@ A restore returns the queue to its snapshot state. An external message successfu
 
 ## Save and shut down from administration
 
-Select **Server settings → Server maintenance → Save and shut down**. The page validates and saves the current Server settings form first. If validation or saving fails, the server keeps running. The account password policy has its own Save button; unsaved policy edits are not included.
+Select **Server settings → Server maintenance → Save and shut down**. The page validates and saves the current Server settings form first, with automatic application disabled so a restart cannot race the shutdown. If validation or saving fails, the server keeps running. The account password policy has its own Save button; unsaved policy edits are not included.
 
 After the shutdown request is accepted, the native `postplus` supervisor:
 
@@ -38,7 +38,7 @@ After the shutdown request is accepted, the native `postplus` supervisor:
 2. Stops the delivery worker while keeping its dependencies available. Pending queue entries stay stored for the next start.
 3. Stops filtering/transfer and closes the mail/account databases.
 
-The terminal reports each service's progress, waits, and any forced termination. Each stage has a 35-second deadline. A service that exceeds it is forcibly stopped and the supervisor exits with an error rather than claiming a clean shutdown. Inspect logs before restarting after an error. An interrupted external SMTP delivery may be retried.
+The terminal reports each service's progress, waits, and any forced termination. Each stage has a 35-second deadline. A service that exceeds it is forcibly stopped and the error remains visible in logs. An explicit administration shutdown still exits with status 0 after stopping the group, so systemd does not automatically relaunch it; this exit policy does not claim that the forced stop was clean. Inspect logs before restarting after an error. An interrupted external SMTP delivery may be retried.
 
 Web shutdown requires the native launcher. An administration service started separately cannot stop a server group and returns an error. The control request uses a private, randomly named, per-launch local directory; no extra public port is opened.
 
@@ -46,4 +46,4 @@ Web shutdown requires the native launcher. An administration service started sep
 
 Press **Ctrl+C** once. The same staged shutdown runs and prints completion information even when the configured log level hides informational messages. Wait for **service group stopped; data saved** before closing the terminal. SIGTERM uses the same path on Linux/macOS.
 
-Saved configuration still requires a **manual restart**. Start `postplus` again using your normal command to apply changes and resume mail service.
+After a deliberate shutdown, start `postplus` again using your normal command to resume service; a systemd installation uses `sudo systemctl start postplus.service`. Ordinary settings saves automatically restart only affected services through the supervisor. The separate **Restart all services** action automatically restarts the whole group, including installations made with the supplied systemd script.

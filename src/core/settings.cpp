@@ -1,4 +1,6 @@
 #include <postplus/settings.hpp>
+#include <postplus/maintenance.hpp>
+#include <postplus/restart.hpp>
 #include <postplus/dkim.hpp>
 #include <asio/ssl.hpp>
 #include <openssl/evp.h>
@@ -36,9 +38,11 @@ Json fields() {
     add("domain","general","text","localhost","Mail domain","Domain used for local recipient addresses; changing it does not rename existing accounts.");
     add("bind","network","text","127.0.0.1","Mail and Webmail listening address","Use 127.0.0.1 for local use or 0.0.0.0 to accept IPv4 connections from other computers.");
     add("admin_bind","network","text","127.0.0.1","Administration listening address","Keep 127.0.0.1 unless remote administration is needed; public access requires TLS.");
-    const std::map<std::string,int> ports = {{"smtp",2525},{"pop3",1110},{"imap",1143},{"web",8080},{"admin",8081},{"auth",18081},{"storage",18082},{"filter",18083},{"transfer",18084}};
+    const std::map<std::string,int> ports = {{"smtp",25},{"pop3",1110},{"imap",1143},{"web",8080},{"admin",8081},{"auth",18081},{"storage",18082},{"filter",18083},{"transfer",18084}};
     const std::map<std::string,std::string> port_labels={{"smtp","SMTP"},{"pop3","POP3"},{"imap","IMAP"},{"web","Webmail"},{"admin","Administration"},{"auth","Authentication"},{"storage","Mail storage"},{"filter","Mail filter"},{"transfer","Mail transfer"}};
-    for (const auto& [name,port] : ports) add("ports."+name,"network","number",port,port_labels.at(name)+" port","Every service needs a different port. Internal services listen on loopback.",1,65535);
+    for (const auto& [name,port] : ports) add("ports."+name,"network","number",port,port_labels.at(name)+" port",
+        name=="smtp" ? "Internet mail arrives on TCP 25. Allow inbound traffic and grant permission to bind this privileged port on Unix. A different port requires forwarding from public TCP 25." :
+            "Every service needs a different port. Internal services listen on loopback.",1,65535);
     add("delivery_lock_port","network","number",18085,"Delivery lock port","Loopback port used to prevent duplicate delivery workers.",1,65535);
     add("allow_insecure_auth","security","boolean",false,"Allow local plaintext authentication","Only loopback clients may authenticate without TLS. Disable for deployment.");
     add("tls_certificate","security","text","","TLS certificate file","Readable PEM certificate chain; paths are relative to the configuration file.");
@@ -301,10 +305,15 @@ Json settings_view(const Config& config) {
     }
     values["outbound_mode"]=current.outbound_mode();
     values["mail_hostname"]=current.mail_hostname();
-    return {{"ok",true},{"values",values},{"revision",version},{"schema",settings_schema(current)},
-        {"restart_required",!config.source.empty() && current.values!=config.values},
+    const bool available=supervisor_restart_available(config);
+    const auto running=supervisor_running_config(config).value_or(config);
+    auto result=Json{{"ok",true},{"values",values},{"revision",version},{"schema",settings_schema(current)},
+        {"restart_available",available},
+        {"restart_required",!config.source.empty() && current.values!=running.values},
         {"secret_status",{{"smarthost_password",!current.text("smarthost_password_file").empty()}}},
         {"admin_url",settings_url(current,"admin")},{"web_url",settings_url(current,"web")}};
+    if(available) result["restart"]=supervisor_restart_status(config);
+    return result;
 }
 
 Config validate_settings(const Config& existing,const Json& patch) {
@@ -435,6 +444,7 @@ void replace_config_file(const fs::path& destination,const std::string& expected
 Json save_settings(const Config& config,const Json& request) {
     static std::mutex saves;
     std::lock_guard guard(saves);
+    if(supervisor_restart_busy(config)) throw SettingsError("","Wait for the service restart to finish before saving configuration.",409);
     if(!request.is_object() || request.size()!=2 || !request.contains("revision") || !request.at("revision").is_string() || !request.contains("values"))
         throw SettingsError("","Send a configuration revision and values object.");
     const auto raw=read_file(config.source);
@@ -450,8 +460,9 @@ Json save_settings(const Config& config,const Json& request) {
     }
     // Check genuinely new ports now; old service ports are released together
     // by the supervisor, allowing deliberate port swaps within PostPlus.
-    std::set<int> active_ports{config.number("delivery_lock_port",18085)};
-    for(const auto* service:{"auth","storage","filter","transfer","smtp","pop3","imap","web","admin"}) active_ports.insert(config.port(service));
+    const auto active=supervisor_running_config(config).value_or(config);
+    std::set<int> active_ports{active.number("delivery_lock_port",18085)};
+    for(const auto* service:{"auth","storage","filter","transfer","smtp","pop3","imap","web","admin"}) active_ports.insert(active.port(service));
     asio::io_context context;
     for(const auto* service:{"auth","storage","filter","transfer","smtp","pop3","imap","web","admin","delivery"}) {
         const std::string name(service);
@@ -478,7 +489,7 @@ Json save_settings(const Config& config,const Json& request) {
     }
     replace_config_file(config.source,raw,updated.values.dump(2)+"\n");
     secret_cleanup.path.clear();
-    log("admin","administrator saved server settings; restart required");
+    log("admin","administrator saved server settings");
     return {{"ok",true},{"restart_required",true},{"admin_url",settings_url(updated,"admin")},{"web_url",settings_url(updated,"web")}};
 }
 }

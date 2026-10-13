@@ -14,7 +14,7 @@ The mailbox JSON API shares an origin with Webmail, normally port 8080. The admi
 {"username":"user@localhost","password":"your-password"}
 ```
 
-It returns `ok`, `username`, `admin`, `csrf`, and `expires_in`, and sets the `pp_session` cookie for Webmail or `pp_admin_session` for administration. Send the appropriate cookie on subsequent requests. Sessions and CSRF tokens are held independently by each process. All state-changing requests except login also require `X-CSRF-Token: <csrf>`.
+It returns `ok`, `username`, `admin`, `csrf`, and `expires_in`, and sets the `pp_session` cookie for Webmail or `pp_admin_session` for administration. Send the appropriate cookie on subsequent browser requests. Sessions and CSRF tokens are held independently by each process. All state-changing cookie-authenticated requests except login also require `X-CSRF-Token: <csrf>`. The browser administration portal continues to use its cookie and CSRF token; API keys are for external administration clients.
 
 `GET /api/session` returns the current account and CSRF token. `POST /api/logout` revokes the session and clears its cookie. Cookies are HttpOnly and SameSite=Strict, with Secure added over HTTPS. Sessions are kept in web-process memory, last one hour by default, and expire on restart.
 
@@ -24,7 +24,7 @@ It returns `ok`, `username`, `admin`, `csrf`, and `expires_in`, and sets the `pp
 | --- | --- |
 | GET `/api/folders` | Six folders with `name`, `messages`, `unseen`, `bytes` (also `total`/`unread` aliases), and the current user's `usage`. |
 | GET `/api/messages?folder=INBOX` | The selected folder (defaults to INBOX). Entries include id, uid, size, seen, and internal_date; up to the newest 100 include optional subject/from/date summaries. |
-| GET `/api/messages/{id}` | `raw` text and decoded `message` fields: subject, from, to, date, text. Marks the message as seen. |
+| GET `/api/messages/{id}` | `raw` source and decoded `message` headers, text/HTML bodies, forwarded views, and inline images. Marks the message as seen. |
 | DELETE `/api/messages/{id}` | Moves the current user's message to Trash. Explicit `?permanent=true` permanently deletes a message already in Trash, with a folder/UID guard. |
 | POST `/api/messages/{id}/move` | `{ "folder": "Archive" }`; moves between supported folders. |
 | POST `/api/drafts` | `to` array, `subject`, `text`, and optional existing draft `id`. Empty recipients and content are allowed. Returns id/uid/folder. |
@@ -36,17 +36,22 @@ Example send body:
 {"to":["friend@localhost"],"subject":"Hello","text":"A message from PostPlus."}
 ```
 
-Storage and the mail protocols preserve original message bytes. Web JSON replaces bytes that cannot be represented as UTF-8 for display. Binary attachment download and HTML rendering are not implemented. Reading a message updates its Seen flag, so this endpoint should not be treated as a side-effect-free prefetch API.
+Storage and the mail protocols preserve original message bytes. Message views convert declared header/body character sets to UTF-8 for display. In addition to `subject`, `from`, `to`, `date`, and `text`, `message` includes `html`, a `forwarded` array of attached message views, and `inline_images` with `cid`, `content_type`, and Base64 `data` for supported raster CID images. Empty text/HTML parts use empty strings. MIME attachments are excluded from the main body; `message/rfc822` forwards retain their own headers and body. Forwarded views and inline images have depth, count, and size limits; raw source is retained for content outside those limits.
+
+The browser reader sanitizes HTML and renders it in a sandboxed frame with a restrictive content policy. Scripts, forms, embedded pages, external styles, and automatic remote-image requests are blocked; users can explicitly load remote images. Binary attachment download is not implemented. Reading a message updates its Seen flag, so this endpoint should not be treated as a side-effect-free prefetch API.
 
 ## Administration
 
-These routes require an administrator session. Ordinary users receive 403.
+These routes require an administrator cookie session or, except for API-key management, an administrator API key in `Authorization: Bearer <key>`. Ordinary users receive 403. Bearer keys are accepted only over HTTPS or from loopback; remote plaintext HTTP is rejected. A Bearer request does not use a browser session or CSRF token. Keys are not accepted by login, session, logout, setup, or mailbox routes.
 
 DKIM preparation returns `ok`, `domain`, `selector`, `name`, `type: "TXT"`, `value` and a SHA-256 `fingerprint` of the public record. It generates a private RSA-2048 key beside the configuration or reuses the selected existing key; no private material is returned. First-run setup uses `POST /api/setup/dkim` with the same body and `X-Setup-Token`, Host/Origin protection. Saving setup in direct mode requires `dkim_fingerprint` from the current record, `outbound_mode: "direct"`, `mail_hostname` and `dkim_selector`. Key generation survives a failed save or wizard restart. DNS is published separately; record availability is not a claim of Internet reachability.
 
 | Method and path | Request or response |
 | --- | --- |
 | GET `/api/admin/users` | Usernames and administrator flags; no password material. |
+| GET `/api/admin/api-keys` | Key metadata and limits; administrator cookie required. No full keys or hashes. |
+| POST `/api/admin/api-keys` | `{ "name": "Monitoring", "expires_in_days": 90 }`; creates a full administrator key and returns it once. Cookie and CSRF required. Returns 201. |
+| DELETE `/api/admin/api-keys/{id}` | Immediately revokes the key; idempotent. Cookie and CSRF required. |
 | GET `/api/admin/messages?username=user%40example.com&folder=Sent` | Read-only view of a selected user's folder. |
 | GET `/api/admin/messages/{id}?username=user%40example.com` | Original and decoded message. Does not mark Seen. Inspection is audited without logging message contents. |
 | GET `/api/admin/quota?username=user%40example.com` | `bytes`, `messages`, effective `max_bytes`/`max_messages`, nullable override `quota_bytes`/`quota_messages`. |
@@ -59,20 +64,78 @@ DKIM preparation returns `ok`, `domain`, `selector`, `name`, `type: "TXT"`, `val
 | GET `/api/admin/queue` | Up to 100 jobs with state and errors; no message bodies. |
 | GET `/api/admin/logs` | Recent structured events, filtered as described below. |
 | GET `/api/admin/config` | Sanitized settings, editable-field schema, file revision, saved-secret status, and interface URLs. |
-| POST `/api/admin/config` | `revision` and `values`; validates/saves settings and reports that a manual restart is required. |
-| POST `/api/admin/dkim` | `{ "domain": "example.com", "selector": "postplus" }`; prepares/reuses a private server key and returns its public DNS record. Administrator session and CSRF token required. |
+| POST `/api/admin/config` | `revision` and `values`; validates/saves settings and automatically restarts affected services when supervised; accepts optional `apply: false` to save without applying. |
+| POST `/api/admin/dkim` | `{ "domain": "example.com", "selector": "postplus" }`; prepares/reuses a private server key and returns its public DNS record. |
 | POST `/api/admin/backup` | `{}`; starts an asynchronous backup and returns 202 with `job_id` and `state: "running"`. |
 | GET `/api/admin/backup?job_id=...` | `state` is `running`, `complete`, or `failed`. Completed jobs include `download_url`; failed jobs include `error`. |
 | GET `/api/admin/backup/download?job_id=...` | Streams the current completed job as an attachment with content type `application/x-tar`. |
 | POST `/api/admin/shutdown` | `{}`; asks the native supervisor to stop. Returns 202 with `state: "shutting_down"`; it does not save browser form values. |
+| POST `/api/admin/restart` | `{ "mode": "all" }` for a full restart, or `{ "mode": "changed" }` to apply saved file changes. Returns 202 with a restart job. |
+| GET `/api/admin/restart?job_id=...` | Restart job state, affected services, and updated URLs. |
 
 Folder names are `INBOX`, `Sent`, `Trash`, `Drafts`, `Junk`, and `Archive`. URL-encode query values, especially a username containing `+`. Administrator inspection is read-only; mailbox mutation routes remain exclusive to Webmail and its current user.
 
-Backup and shutdown mutations require the administrator session and CSRF token. The backup download also requires an administrator session; its random job ID is not an authentication credential. A new backup replaces the previous completed job, returns 409 while another backup/download is active, and is discarded on a normal administration-service shutdown. Configuration saving and web shutdown return 409 during backup. Shutdown returns 503 if administration was started without the native supervisor. The web UI saves and validates its Server settings form through `/api/admin/config` before calling `/api/admin/shutdown`. See [maintenance.md](maintenance.md) for backup contents and restoration.
+Backup and shutdown mutations require administrator authentication, with CSRF for cookie requests. The backup download also requires administrator authentication; its random job ID is not an authentication credential. A new backup replaces the previous completed job, returns 409 while another backup/download is active, and is discarded on a normal administration-service shutdown. Configuration saving and web shutdown return 409 during backup. Shutdown returns 503 if administration was started without the native supervisor. The web UI saves and validates its Server settings form through `/api/admin/config` with `apply: false` before calling `/api/admin/shutdown`, avoiding a competing automatic restart. See [maintenance.md](maintenance.md) for backup contents and restoration.
+
+### External administration API keys
+
+Sign in to the browser administration portal and open **API keys** to create a key, review its usage, or revoke it. A key has full administrator scope, including access to private mail, configuration, backup, and shutdown operations. Its owner is the administrator who created it. Use a separate, clearly named key for each trusted integration. Keys cannot list, create, or revoke other keys; those three management endpoints always require the administrator cookie; POST and DELETE also require `X-CSRF-Token`.
+
+Create with `POST /api/admin/api-keys`:
+
+```json
+{"name":"Monitoring","expires_in_days":90}
+```
+
+`name` must be nonempty and at most 80 UTF-8 bytes. `expires_in_days` is optional; when provided, it must be an integer from 1 to 3650. Omit it for no expiry. The service permits at most 100 active keys and 1000 stored entries. A successful response contains:
+
+```json
+{
+  "ok": true,
+  "key": "pp_<64 hexadecimal characters>",
+  "api_key": {
+    "id": "<32 hexadecimal characters>",
+    "name": "Monitoring",
+    "prefix": "pp_<public prefix>",
+    "owner": "admin@example.com",
+    "scope": "admin",
+    "created_at": 1791849600,
+    "expires_at": 1799625600,
+    "last_used_at": null,
+    "revoked_at": null,
+    "active": true
+  }
+}
+```
+
+The complete key is returned only by this creation response. The server stores a SHA-256 digest and metadata, not the usable key. The browser shows it once, supports copying or manual selection, and clears it on dialog close or sign-out; it does not save it in browser storage. Store it in a secret manager before closing the window. `GET /api/admin/api-keys` returns `api_keys` containing metadata only and `max_active_keys: 100` and `max_stored_keys: 1000`. Timestamp fields use Unix seconds; `expires_at`, `last_used_at`, and `revoked_at` can be null. An unused key has `last_used_at: null`. Revoked and expired entries remain visible for review until old inactive entries are pruned to retain at most 1000 records.
+
+Keys persist across service restarts. A password reset does not revoke them; revoke them separately when rotating access. Every request checks that the owner still exists and is an administrator. Key-management errors include `invalid_api_key` (400), `api_key_not_found` (404), and `api_key_limit` (409).
+
+For an external client, use the administration origin and send the key in the header:
+
+```sh
+# Load POSTPLUS_API_KEY from the integration's secret manager.
+curl --fail --silent --show-error \
+  -H "Authorization: Bearer $POSTPLUS_API_KEY" \
+  https://mail.example.com:8081/api/admin/stats
+```
+
+For a mutation, also send JSON and its content type:
+
+```sh
+curl --fail --silent --show-error \
+  -H "Authorization: Bearer $POSTPLUS_API_KEY" \
+  -H "Content-Type: application/json" \
+  --data '{"username":"user@example.com","quota_bytes":1073741824}' \
+  https://mail.example.com:8081/api/admin/quota
+```
+
+Remote requests require HTTPS with a valid, trusted server certificate. Plain HTTP is accepted for loopback testing only. Keep the key out of URLs, source code, logs, and shell history; do not disable certificate verification. Browser cookies and CSRF headers are unnecessary for Bearer requests. If a key is lost or exposed, revoke it in the portal and create a replacement. `DELETE /api/admin/api-keys/{id}` takes effect immediately and is idempotent; revocation cannot be undone.
 
 ### Certificate requests
 
-The following paths use the `/api/admin/acme` prefix in administration, or `/api/setup/acme` during first-run setup. Administration requires its session and CSRF token for mutations; setup requires `X-Setup-Token` on all ACME endpoints and validates Host/Origin. Only predefined Let's Encrypt staging/production directory names are accepted.
+The following paths use the `/api/admin/acme` prefix in administration, or `/api/setup/acme` during first-run setup. Administration requires administrator authentication, with CSRF for cookie-authenticated mutations; setup requires `X-Setup-Token` on all ACME endpoints and validates Host/Origin. Only predefined Let's Encrypt staging/production directory names are accepted.
 
 | Method and suffix | Contract |
 | --- | --- |
@@ -81,7 +144,7 @@ The following paths use the `/api/admin/acme` prefix in administration, or `/api
 | GET `/status?job_id=...` | Current/latest job state and progress; success includes `result.tls_certificate`, `result.tls_private_key`, `result.expires_at`, `result.staging`. |
 | POST `/cancel` | `{ "job_id": "..." }`; requests cancellation. |
 
-Issuance does not save server settings or restart services. On an existing installation, save the returned file paths through the settings API, then manually restart. During first-run setup, include the paths in the setup submission; successful setup starts the services with that configuration. Private keys never leave the server. Terms are checked again before issuance and changed terms require fresh consent. See [certificate deployment prerequisites](configuration.md#lets-encrypt-certificates).
+Issuance does not save server settings or restart services. On an existing installation, save the returned file paths through the settings API; the supervisor then automatically restarts affected services. Standalone service executables require a manual restart. During first-run setup, include the paths in the setup submission; successful setup starts the services with that configuration. Private keys never leave the server. Terms are checked again before issuance and changed terms require fresh consent. See [certificate deployment prerequisites](configuration.md#lets-encrypt-certificates).
 
 Both browser services check each authenticated request against the current credential version through authentication RPC. A password change through administration or the CLI invalidates older sessions on their next authenticated request, without requiring a service restart. A change to administrator status likewise invalidates a session whose stored role no longer matches. Credential-version values stay inside the service processes and are not returned to the browser.
 
@@ -106,7 +169,7 @@ Both browser services check each authenticated request against the current crede
 }
 ```
 
-`POST /api/admin/password-policy` requires an administrator session and CSRF token. Submit all five policy fields, with the revision from the last GET:
+`POST /api/admin/password-policy` requires administrator authentication, with CSRF for cookie requests. Submit all five policy fields, with the revision from the last GET:
 
 ```json
 {
@@ -165,7 +228,9 @@ Violation names are `min_length`, `max_password_bytes`, `require_uppercase`, `re
 
 This is an abbreviated example. The actual `values` includes all supported settings. Each `schema` entry has `key`, `group`, `type`, `default`, `label`, and `help`, plus `min`/`max` for numbers, `options` for selections, or `readonly` for immutable paths. A dotted schema key such as `ports.admin` maps to the nested `values.ports.admin` JSON property. Types are `text`, `number`, `boolean`, `select`, `password`, `lines`, and `json`; `lines` and `json` values are arrays on the wire.
 
-Save with `POST /api/admin/config`, the administration cookie, and its CSRF token:
+The response also includes `restart_available`, whether saved values differ from the actually applied configuration in `restart_required`, and the latest `restart` job when supervised. This lets a new browser session inspect progress or the result after administration itself restarts.
+
+Save with `POST /api/admin/config` and administrator authentication. Cookie clients also send their CSRF token:
 
 ```json
 {
@@ -178,9 +243,21 @@ Save with `POST /api/admin/config`, the administration cookie, and its CSRF toke
 
 Send a nonempty `smarthost_password` to save a new relay password in a private file; omission or an empty string keeps the previous secret. Send `clear_smarthost_password: true` inside `values` to remove the active saved-password reference. Clearing and setting a new password in the same request is rejected. The old file is retained so configuration backups remain usable. An environment-provided password still takes precedence and is not cleared by this operation. Secrets are never returned. `secret_status.smarthost_password` indicates a configured saved-secret file, not the validity of that credential or whether an environment override exists.
 
-Successful saves create a private backup, atomically replace the configuration, and return `ok`, `restart_required: true`, `admin_url`, and `web_url`. Saving does not restart any service or clear current sessions. The returned URLs describe the saved configuration and may not be reachable until the operator stops the launcher and runs it again with the same configuration path. After that manual restart, clients must sign in again. Individually launched services also require manual restart. A startup failure is reported by the launcher; automatic rollback is not provided.
+Successful saves create a private backup and atomically replace the configuration. Under the native supervisor, the response has `restart_required: false`, `restart: { "job_id": "...", "state": "pending", "services": ["..."] }`, `admin_url`, and `web_url`; only affected services restart automatically. The URLs describe the saved configuration and may become reachable only as restarting completes. An administration-service restart clears its browser sessions, so clients must sign in again at its updated address. Other service restarts preserve the administration session.
+
+Individually launched service executables return `restart_required: true` and require a manual restart. To save deliberately without applying changes, send top-level `apply: false` beside `revision` and `values`; the browser uses this for Save and shut down. A failed restart is reported separately from the successful configuration save. When the native supervisor can restore the previous affected-service snapshots, the failed job returns `rolled_back: true`; the newly saved configuration remains pending for correction and retry. This restores running services, not the saved file. A full systemd relaunch cannot automatically restore the old processes after the supervisor exits.
+
+If the configuration was saved but a restart could not be scheduled, the response retains `restart_required: true` and includes `restart_error`. Review the saved configuration and service logs before requesting a restart; do not treat the save response as proof that services loaded the changes.
 
 Revision conflicts return 409. Validation failures return 400 with a field identifier and error; filesystem failures can return 503. Fetch fresh values before retrying a conflict. Do not repeatedly overwrite a concurrent administrator's changes.
+
+### Restarting services
+
+`POST /api/admin/restart` requires administrator authentication and CSRF for cookie requests. Send `{ "mode": "all" }` to restart all services with the saved configuration, or `{ "mode": "changed" }` to apply supported changes already saved by manual file editing. It does not save browser form edits. A full restart under the supplied systemd installation automatically brings PostPlus back; shutdown is a separate action that leaves it stopped.
+
+The schedule response is `{ "ok": true, "job_id": "...", "state": "pending", "services": ["..."], "admin_url": "...", "web_url": "..." }`. Poll `GET /api/admin/restart?job_id=...` for `pending`, `running`, `complete`, or `failed`, with the same metadata and an optional error plus `rolled_back` on failure. A completed state confirms service readiness; losing the HTTP connection does not. State survives an administration-service restart, but the old browser session does not. After that restart, sign in at the updated address before reading the result.
+
+The UI retries transient connection failures for a bounded interval and shows reconnect links if authentication expires or the administration address moves. It does not repeatedly force the login screen or report completion from a disconnect. Without a native supervisor, the restart API is unavailable and settings saves report the manual fallback.
 
 ### Service logs
 

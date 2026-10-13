@@ -1,6 +1,7 @@
 #include <postplus/maintenance.hpp>
 #include <postplus/dkim.hpp>
 #include <postplus/data_lock.hpp>
+#include <postplus/settings.hpp>
 #include <sqlite3.h>
 #include <algorithm>
 #include <array>
@@ -49,6 +50,14 @@ private:
     PSECURITY_DESCRIPTOR descriptor_ = nullptr;
     SECURITY_ATTRIBUTES attributes_{};
 };
+bool transient_file_error(DWORD error) {
+    return error == ERROR_SHARING_VIOLATION || error == ERROR_LOCK_VIOLATION ||
+        error == ERROR_ACCESS_DENIED || error == ERROR_DELETE_PENDING;
+}
+struct InputHandle {
+    HANDLE value = INVALID_HANDLE_VALUE;
+    ~InputHandle() { if (value != INVALID_HANDLE_VALUE) CloseHandle(value); }
+};
 #endif
 
 void private_directory(const fs::path& path) {
@@ -85,12 +94,78 @@ void private_write(const fs::path& path, std::string_view contents) {
 #endif
 }
 
+void private_replace(const fs::path& path, std::string_view contents) {
+    require_plain_path(path.parent_path());
+    const auto temporary = path.parent_path() / (".write-" + random_hex(16));
+    private_write(temporary, contents);
+    try {
+        require_plain_path(path);
+#ifdef _WIN32
+        const auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(250);
+        while (!MoveFileExW(temporary.c_str(), path.c_str(), MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH)) {
+            if (!transient_file_error(GetLastError()) || std::chrono::steady_clock::now() >= deadline)
+                throw MaintenanceError("Cannot publish supervisor state.");
+            std::this_thread::sleep_for(std::chrono::milliseconds(5));
+            require_plain_path(path);
+        }
+#else
+        fs::rename(temporary, path);
+        const int directory = ::open(path.parent_path().c_str(), O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC);
+        if (directory < 0) throw MaintenanceError("Cannot synchronize supervisor state.");
+        const bool synced = ::fsync(directory) == 0;
+        ::close(directory);
+        if (!synced) throw MaintenanceError("Cannot synchronize supervisor state.");
+#endif
+    } catch (...) { std::error_code ignored; fs::remove(temporary, ignored); throw; }
+}
+
 std::string read_small(const fs::path& path, std::uintmax_t limit = 1024 * 1024) {
     require_plain_path(path);
+#ifdef _WIN32
+    InputHandle file;
+    const auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(250);
+    for (;;) {
+        // Read one immutable file generation while the supervisor publishes
+        // its successor. CRT streams do not share deletion on Windows.
+        file.value = CreateFileW(path.c_str(), GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+            nullptr, OPEN_EXISTING, FILE_FLAG_OPEN_REPARSE_POINT, nullptr);
+        if (file.value != INVALID_HANDLE_VALUE) break;
+        const auto error = GetLastError();
+        if ((!transient_file_error(error) && error != ERROR_FILE_NOT_FOUND) || std::chrono::steady_clock::now() >= deadline)
+            throw MaintenanceError("Cannot read maintenance input file.");
+        std::this_thread::sleep_for(std::chrono::milliseconds(5));
+        require_plain_path(path);
+    }
+    BY_HANDLE_FILE_INFORMATION details{};
+    if (GetFileType(file.value) != FILE_TYPE_DISK || !GetFileInformationByHandle(file.value, &details) ||
+        (details.dwFileAttributes & (FILE_ATTRIBUTE_DIRECTORY | FILE_ATTRIBUTE_REPARSE_POINT)) ||
+        (static_cast<std::uintmax_t>(details.nFileSizeHigh) << 32 | details.nFileSizeLow) > limit)
+        throw MaintenanceError("Invalid maintenance input file.");
+    std::string result;
+    std::array<char, 8192> buffer{};
+    for (;;) {
+        DWORD count = 0;
+        if (!ReadFile(file.value, buffer.data(), static_cast<DWORD>(buffer.size()), &count, nullptr))
+            throw MaintenanceError("Cannot read maintenance input file.");
+        if (!count) return result;
+        if (count > limit - result.size()) throw MaintenanceError("Invalid maintenance input file.");
+        result.append(buffer.data(), count);
+    }
+#else
     if (!fs::is_regular_file(path) || fs::file_size(path) > limit) throw MaintenanceError("Invalid maintenance input file.");
     std::ifstream stream(path, std::ios::binary);
     if (!stream) throw MaintenanceError("Cannot read maintenance input file.");
-    return {std::istreambuf_iterator<char>(stream), std::istreambuf_iterator<char>()};
+    std::string result;
+    std::array<char, 8192> buffer{};
+    while (stream) {
+        stream.read(buffer.data(), static_cast<std::streamsize>(buffer.size()));
+        const auto count = static_cast<std::size_t>(stream.gcount());
+        if (count > limit - result.size()) throw MaintenanceError("Invalid maintenance input file.");
+        result.append(buffer.data(), count);
+    }
+    if (stream.bad()) throw MaintenanceError("Cannot read maintenance input file.");
+    return result;
+#endif
 }
 
 class Database {
@@ -294,8 +369,48 @@ void snapshot(const Config& live, const fs::path& directory, const std::atomic<b
 void remove_owned_directory(const fs::path& directory) noexcept {
     // Only fixed files in a randomly generated directory owned by this object.
     std::error_code ignored;
-    for (const auto* name : {"postplus-backup.tar", "auth.sqlite3", "storage.sqlite3", "auth.sqlite3-journal", "storage.sqlite3-journal", "auth.sqlite3-wal", "auth.sqlite3-shm", "storage.sqlite3-wal", "storage.sqlite3-shm", "shutdown.request", "shutdown.tmp", "identity.json"}) fs::remove(directory / name, ignored);
+    for (const auto* name : {"postplus-backup.tar", "auth.sqlite3", "storage.sqlite3", "auth.sqlite3-journal", "storage.sqlite3-journal", "auth.sqlite3-wal", "auth.sqlite3-shm", "storage.sqlite3-wal", "storage.sqlite3-shm", "shutdown.request", "shutdown.tmp", "restart.request", "restart.tmp", "identity.json", "owner.json"}) fs::remove(directory / name, ignored);
     fs::remove(directory, ignored);
+}
+
+std::int64_t control_milliseconds() {
+    return std::chrono::duration_cast<std::chrono::milliseconds>(
+        std::chrono::system_clock::now().time_since_epoch()).count();
+}
+struct ControlIdentity { fs::path directory, state_directory; Json value; };
+ControlIdentity control_identity(const Config& config, bool require_ready = true) {
+#ifdef _WIN32
+    const auto* value = _wgetenv(L"POSTPLUS_SUPERVISOR_CONTROL");
+#else
+    const auto* value = std::getenv("POSTPLUS_SUPERVISOR_CONTROL");
+#endif
+    if (!value || !*value) throw MaintenanceError("Start PostPlus with the native postplus launcher to use restart and shutdown.");
+    ControlIdentity result;
+    result.directory = fs::path(value);
+    require_plain_path(result.directory);
+    result.value = Json::parse(read_small(result.directory / "identity.json", 8192));
+    if (result.value.value("config", "") != config.source.string() || result.value.value("token", "").size() != 64)
+        throw MaintenanceError("Supervisor control does not match this server.");
+    if (require_ready && !result.value.value("ready", false)) throw MaintenanceError("The service group is still starting.");
+    result.state_directory = fs::path(result.value.at("state_dir").get<std::string>());
+    if (result.state_directory != fs::path(config.text("data_dir")) / ".restart-state")
+        throw MaintenanceError("Supervisor state does not match this server.");
+    require_plain_path(result.state_directory);
+    return result;
+}
+Json read_restart_state(const fs::path& directory) {
+    if (!fs::exists(directory / "latest.json")) return {{"ok", true}, {"state", "idle"}, {"services", Json::array()}};
+    return Json::parse(read_small(directory / "latest.json"));
+}
+Json public_restart_state(Json state) {
+    state.erase("config");
+    state.erase("not_before");
+    state.erase("service_manager");
+    return state;
+}
+void release_restart_reservation(const fs::path& directory) {
+    const auto reservation = directory / "reservation";
+    if (fs::exists(reservation)) { require_plain_path(reservation); remove_owned_directory(reservation); }
 }
 }
 
@@ -367,10 +482,14 @@ HttpResponse BackupManager::download(const std::string& id) {
 }
 
 SupervisorControl::SupervisorControl(const Config& config) :
-    directory_(fs::path(config.text("data_dir")) / (".supervisor-" + random_hex(16))), token_(random_hex(32)) {
+    directory_(fs::path(config.text("data_dir")) / (".supervisor-" + random_hex(16))),
+    state_directory_(fs::path(config.text("data_dir")) / ".restart-state"), config_(config), token_(random_hex(32)) {
+    if (fs::exists(state_directory_)) require_plain_path(state_directory_);
+    else private_directory(state_directory_);
     private_directory(directory_);
     try {
-        private_write(directory_ / "identity.json", Json{{"config", config.source.string()}, {"token", token_}}.dump());
+        private_write(directory_ / "identity.json", Json{{"config", config.source.string()}, {"token", token_},
+            {"state_dir", state_directory_.string()}, {"ready", false}}.dump());
 #ifdef _WIN32
         if (_wputenv_s(L"POSTPLUS_SUPERVISOR_CONTROL", directory_.c_str()) != 0) throw MaintenanceError("Cannot initialize supervisor control.");
 #else
@@ -378,11 +497,33 @@ SupervisorControl::SupervisorControl(const Config& config) :
 #endif
     } catch (...) { remove_owned_directory(directory_); throw; }
 }
-SupervisorControl::~SupervisorControl() { remove_owned_directory(directory_); }
+SupervisorControl::~SupervisorControl() {
+    // A service-manager relaunch that cannot reach readiness must leave a
+    // durable failure, even when no administration listener became available.
+    if (!ready_) {
+        try {
+            auto state = read_restart_state(state_directory_);
+            if (state.value("state", "idle") == "pending" || state.value("state", "idle") == "running") {
+                state["state"] = "failed";
+                state["error"] = "Service group startup failed or was interrupted; review the supervisor logs.";
+                private_replace(state_directory_ / "latest.json", state.dump());
+                release_restart_reservation(state_directory_);
+            }
+        } catch (...) {}
+    }
+    for (const auto& snapshot : snapshots_) { std::error_code ignored; fs::remove(snapshot, ignored); }
+    remove_owned_directory(directory_);
+}
 bool SupervisorControl::shutdown_requested() {
     const auto path = directory_ / "shutdown.request";
     if (!fs::exists(path)) return false;
-    const auto request = Json::parse(read_small(path, 4096));
+    Json request;
+    try { request = Json::parse(read_small(path, 4096)); }
+    catch (const std::exception&) {
+        std::error_code ignored; fs::remove(path, ignored);
+        log("postplus", "rejected malformed supervisor shutdown request", "warn");
+        return false;
+    }
     fs::remove(path);
     if (!request.is_object() || !request.contains("token") || !request["token"].is_string() ||
         !secure_equal(request.at("token").get<std::string>(), token_)) {
@@ -394,19 +535,153 @@ bool SupervisorControl::shutdown_requested() {
     return true;
 }
 void request_supervisor_shutdown(const Config& config) {
-#ifdef _WIN32
-    const auto* value = _wgetenv(L"POSTPLUS_SUPERVISOR_CONTROL");
-#else
-    const auto* value = std::getenv("POSTPLUS_SUPERVISOR_CONTROL");
-#endif
-    if (!value || !*value) throw MaintenanceError("Start PostPlus with the native postplus launcher to use web shutdown.");
-    const auto directory = fs::path(value);
-    require_plain_path(directory);
-    const auto identity = Json::parse(read_small(directory / "identity.json", 4096));
-    if (identity.value("config", "") != config.source.string() || identity.value("token", "").size() != 64)
-        throw MaintenanceError("Supervisor control does not match this server.");
-    const auto temporary = directory / "shutdown.tmp";
-    private_write(temporary, Json{{"token", identity.at("token")}}.dump());
-    fs::rename(temporary, directory / "shutdown.request");
+    const auto identity = control_identity(config);
+    if (supervisor_restart_busy(config)) throw MaintenanceError("Wait for the restart operation to finish before shutdown.", 409);
+    const auto temporary = identity.directory / "shutdown.tmp";
+    private_write(temporary, Json{{"token", identity.value.at("token")}}.dump());
+    fs::rename(temporary, identity.directory / "shutdown.request");
+}
+
+bool supervisor_restart_available(const Config& config) noexcept {
+    try { (void)control_identity(config); return true; } catch (...) { return false; }
+}
+bool supervisor_restart_busy(const Config& config) {
+    if (!supervisor_restart_available(config)) return false;
+    const auto identity = control_identity(config);
+    return fs::exists(identity.state_directory / "reservation");
+}
+std::optional<Config> supervisor_running_config(const Config& config) {
+    if (!supervisor_restart_available(config)) return {};
+    const auto identity = control_identity(config);
+    const auto path = identity.state_directory / "applied.json";
+    if (!fs::exists(path)) return {};
+    auto state = Json::parse(read_small(path));
+    if (state.value("source", "") != config.source.string() || !state.at("values").is_object())
+        throw MaintenanceError("Invalid running configuration state.");
+    return Config{state.at("values"), config.source};
+}
+Json supervisor_restart_status(const Config& config, const std::string& job_id) {
+    const auto identity = control_identity(config);
+    auto state = read_restart_state(identity.state_directory);
+    if (!job_id.empty() && state.value("job_id", "") != job_id) throw MaintenanceError("Restart job not found.", 404);
+    return public_restart_state(std::move(state));
+}
+Json request_supervisor_restart(const Config& config, const Config& saved, const std::string& mode) {
+    const auto identity = control_identity(config);
+    const auto running = supervisor_running_config(config);
+    if (!running) throw MaintenanceError("Running configuration is unavailable.");
+    if (saved.source != config.source || Config::from_file(config.source).values != saved.values)
+        throw MaintenanceError("Configuration changed before restart; reload and retry.", 409);
+    if (saved.text("data_dir") != running->text("data_dir"))
+        throw MaintenanceError("Stop PostPlus before changing the data directory.", 409);
+    const auto services = restart_plan(*running, saved, mode);
+    const auto reservation = identity.state_directory / "reservation";
+    try { private_directory(reservation); }
+    catch (...) {
+        if (fs::exists(reservation)) throw MaintenanceError("A restart operation is already pending or running.", 409);
+        throw;
+    }
+    const auto id = random_hex(16);
+    try {
+        private_write(reservation / "owner.json", Json{{"job_id", id}, {"token", identity.value.at("token")}}.dump());
+        Json state{{"ok", true}, {"job_id", id}, {"state", "pending"}, {"mode", mode},
+            {"services", services}, {"admin_url", settings_url(saved, "admin")}, {"web_url", settings_url(saved, "web")},
+            {"config", saved.values}, {"not_before", control_milliseconds() + 300}};
+        private_replace(identity.state_directory / "latest.json", state.dump());
+        state["token"] = identity.value.at("token");
+        private_write(identity.directory / "restart.tmp", state.dump());
+        fs::rename(identity.directory / "restart.tmp", identity.directory / "restart.request");
+        state.erase("token");
+        return public_restart_state(std::move(state));
+    } catch (const std::exception& error) {
+        // Publishing state can succeed before the request mailbox fails. Do
+        // not leave a job permanently pending when there is no request to run.
+        try {
+            auto state = read_restart_state(identity.state_directory);
+            if (state.value("job_id", "") == id) {
+                state["state"] = "failed";
+                state["error"] = std::string("Cannot schedule restart: ") + error.what();
+                private_replace(identity.state_directory / "latest.json", state.dump());
+            }
+        } catch (...) {}
+        std::error_code ignored;
+        fs::remove(identity.directory / "restart.tmp", ignored);
+        release_restart_reservation(identity.state_directory);
+        throw;
+    }
+}
+
+std::optional<RestartRequest> SupervisorControl::restart_requested() {
+    const auto path = directory_ / "restart.request";
+    if (!fs::exists(path)) return {};
+    Json value;
+    try { value = Json::parse(read_small(path)); }
+    catch (const std::exception&) {
+        std::error_code ignored; fs::remove(path, ignored);
+        log("postplus", "rejected malformed supervisor restart request", "warn");
+        return {};
+    }
+    if (!value.is_object() || !value.contains("token") || !value.at("token").is_string() ||
+        !secure_equal(value.at("token").get<std::string>(), token_)) {
+        fs::remove(path);
+        log("postplus", "rejected invalid supervisor restart request", "warn");
+        return {};
+    }
+    if (control_milliseconds() < value.at("not_before").get<std::int64_t>()) return {};
+    RestartRequest request{value.at("job_id").get<std::string>(), value.at("mode").get<std::string>(),
+        Config{value.at("config"), config_.source}, value.at("services").get<std::vector<std::string>>()};
+    const auto current = read_restart_state(state_directory_);
+    if (current.value("job_id", "") != request.job_id || current.value("state", "") != "pending")
+        throw MaintenanceError("Restart request does not match its reservation.");
+    fs::remove(path);
+    return request;
+}
+fs::path SupervisorControl::snapshot_config(const Config& config) {
+    const auto path = directory_ / ("config-" + random_hex(16) + ".json");
+    private_write(path, config.values.dump(2) + "\n");
+    snapshots_.push_back(path);
+    return path;
+}
+void SupervisorControl::ready(const Config& config) {
+    private_replace(state_directory_ / "applied.json", Json{{"source", config.source.string()}, {"values", config.values}}.dump());
+    auto state = read_restart_state(state_directory_);
+    if (state.value("state", "idle") == "running" || state.value("state", "idle") == "pending") {
+        const bool manager_complete = state.value("service_manager", false) && state.contains("config") && state.at("config") == config.values;
+        state["state"] = manager_complete ? "complete" : "failed";
+        if (!manager_complete) state["error"] = "The supervisor restarted before the requested operation completed.";
+        private_replace(state_directory_ / "latest.json", state.dump());
+    }
+    release_restart_reservation(state_directory_);
+    private_replace(directory_ / "identity.json", Json{{"config", config.source.string()}, {"token", token_},
+        {"state_dir", state_directory_.string()}, {"ready", true}}.dump());
+    ready_ = true;
+}
+void SupervisorControl::restart_running(const RestartRequest& request, bool service_manager) {
+    auto state = read_restart_state(state_directory_);
+    state["state"] = "running";
+    state["service_manager"] = service_manager;
+    private_replace(state_directory_ / "latest.json", state.dump());
+    log("postplus", "restart job " + request.job_id + " is running");
+}
+void SupervisorControl::restart_complete(const RestartRequest& request, const Config& config) {
+    private_replace(state_directory_ / "applied.json", Json{{"source", config.source.string()}, {"values", config.values}}.dump());
+    auto state = read_restart_state(state_directory_);
+    state["state"] = "complete";
+    state.erase("error");
+    private_replace(state_directory_ / "latest.json", state.dump());
+    release_restart_reservation(state_directory_);
+    config_ = config;
+    log("postplus", "restart job " + request.job_id + " completed; requested services are ready");
+}
+void SupervisorControl::restart_failed(const RestartRequest& request, const std::string& error, bool rolled_back) {
+    if (rolled_back)
+        private_replace(state_directory_ / "applied.json", Json{{"source", config_.source.string()}, {"values", config_.values}}.dump());
+    auto state = read_restart_state(state_directory_);
+    state["state"] = "failed";
+    state["error"] = error;
+    state["rolled_back"] = rolled_back;
+    private_replace(state_directory_ / "latest.json", state.dump());
+    release_restart_reservation(state_directory_);
+    log("postplus", "restart job " + request.job_id + " failed: " + error, "error");
 }
 }

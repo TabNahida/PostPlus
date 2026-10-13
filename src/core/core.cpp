@@ -2,6 +2,7 @@
 #include <postplus/process.hpp>
 #include <postplus/trust.hpp>
 #include <postplus/dkim.hpp>
+#include <postplus/data_lock.hpp>
 #include <asio/ssl.hpp>
 #include <openssl/crypto.h>
 #include <openssl/evp.h>
@@ -98,13 +99,32 @@ std::string base64_decode(std::string_view input) {
 }
 Config Config::load(int argc, char** argv) {
     std::filesystem::path path = "config/postplus.json";
+    std::filesystem::path snapshot;
     for (int i = 1; i < argc; ++i) {
-        if (std::string_view(argv[i]) == "--config") {
-            if (++i >= argc) throw std::invalid_argument("--config requires a path");
-            path = argv[i];
+        const std::string_view argument(argv[i]);
+        if (argument == "--config" || argument == "--config-snapshot") {
+            if (++i >= argc) throw std::invalid_argument(std::string(argument) + " requires a path");
+            (argument == "--config" ? path : snapshot) = argv[i];
         }
     }
-    return from_file(path);
+    if(!snapshot.empty()) {
+#ifdef _WIN32
+        const auto* control=_wgetenv(L"POSTPLUS_SUPERVISOR_CONTROL");
+#else
+        const auto* control=std::getenv("POSTPLUS_SUPERVISOR_CONTROL");
+#endif
+        if(!control || !*control) throw std::invalid_argument("Configuration snapshots require the native supervisor.");
+        snapshot=std::filesystem::absolute(snapshot).lexically_normal();
+        if(snapshot.parent_path()!=std::filesystem::absolute(std::filesystem::path(control)).lexically_normal())
+            throw std::invalid_argument("Configuration snapshot does not belong to this supervisor.");
+        require_plain_path(snapshot);
+    }
+    auto config = from_file(snapshot.empty() ? path : snapshot);
+    // The native supervisor supplies an immutable snapshot whose filesystem
+    // paths are already absolute. Administrative saves still target the live
+    // configuration, while every restarted child uses the same validated data.
+    if (!snapshot.empty()) config.source = std::filesystem::absolute(path).lexically_normal();
+    return config;
 }
 Config Config::from_file(const std::filesystem::path& path) {
     Config config;
@@ -152,7 +172,7 @@ bool Config::flag(const std::string& key, bool fallback) const { return values.v
 std::string Config::outbound_mode() const { return text("outbound_mode", text("smarthost_host").empty() ? "disabled" : "relay"); }
 std::string Config::mail_hostname() const { return text("mail_hostname",outbound_mode()=="direct"?"mail."+text("domain"):text("domain","localhost")); }
 int Config::port(const std::string& service) const {
-    static const std::map<std::string, int> defaults{{"auth",18081},{"storage",18082},{"filter",18083},{"transfer",18084},{"smtp",2525},{"pop3",1110},{"imap",1143},{"web",8080},{"admin",8081}};
+    static const std::map<std::string, int> defaults{{"auth",18081},{"storage",18082},{"filter",18083},{"transfer",18084},{"smtp",25},{"pop3",1110},{"imap",1143},{"web",8080},{"admin",8081}};
     int port_value = defaults.at(service);
     if (values.contains("ports")) port_value = values.at("ports").value(service, port_value);
     if (port_value < 1 || port_value > 65535) throw std::invalid_argument("invalid service port");

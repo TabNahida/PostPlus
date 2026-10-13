@@ -137,7 +137,9 @@ def run(s):
         queue_stats = http(s.ports["admin"], "GET", "/api/admin/stats", headers=a)[2]
         assert queue_stats["queued"] + queue_stats["quarantined"] == 1
         settings = http(s.ports["admin"], "GET", "/api/admin/config", headers=a)[2]
-        assert http(s.ports["admin"], "POST", "/api/admin/config", {"revision": settings["revision"], "values": {"log_level": "warn"}}, a)[0] == 200
+        # This maintenance check deliberately stages a saved logging change;
+        # automatic affected-child application has its own native regression.
+        assert http(s.ports["admin"], "POST", "/api/admin/config", {"revision": settings["revision"], "values": {"log_level": "warn"}, "apply": False}, a)[0] == 200
         status, _, stopped = http(s.ports["admin"], "POST", "/api/admin/shutdown", {}, a)
         assert status == 202 and stopped["state"] == "shutting_down"
         assert server.process.wait(timeout=45) == 0

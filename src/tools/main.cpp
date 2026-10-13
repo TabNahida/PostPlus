@@ -4,6 +4,8 @@
 #include <postplus/settings.hpp>
 #include <postplus/data_lock.hpp>
 #include <postplus/maintenance.hpp>
+#include <asio/ssl.hpp>
+#include <openssl/pem.h>
 
 #include <algorithm>
 #include <charconv>
@@ -197,6 +199,68 @@ Json readiness_rpc(const Config& config, const std::string& service, const Json&
     return response;
 }
 
+void readiness_https(const Config& config, const std::string& service,
+                     std::chrono::steady_clock::time_point deadline) {
+    // This local health probe pins the exact configured leaf, allowing private
+    // certificates without changing trust or hostname checks for public clients.
+    const auto path = std::filesystem::path(config.text("tls_certificate"));
+    require_plain_path(path);
+    if (std::filesystem::file_size(path) > 1024 * 1024) throw std::runtime_error("readiness certificate is too large");
+    std::ifstream file(path, std::ios::binary);
+    if (!file) throw std::runtime_error("cannot read readiness certificate");
+    const std::string pem{std::istreambuf_iterator<char>(file), std::istreambuf_iterator<char>()};
+    std::unique_ptr<BIO, decltype(&BIO_free)> input(BIO_new_mem_buf(pem.data(), static_cast<int>(pem.size())), BIO_free);
+    if (!input) throw std::runtime_error("cannot load readiness certificate");
+    std::shared_ptr<X509> expected(PEM_read_bio_X509(input.get(), nullptr, nullptr, nullptr), X509_free);
+    if (!expected) throw std::runtime_error("invalid readiness certificate");
+    asio::io_context context;
+    asio::ssl::context tls(asio::ssl::context::tls_client);
+    tls.set_verify_mode(asio::ssl::verify_peer);
+    tls.set_verify_callback([expected](bool, asio::ssl::verify_context& verification) {
+        const auto native = verification.native_handle();
+        if (X509_STORE_CTX_get_error_depth(native) != 0) return true;
+        const auto presented = X509_STORE_CTX_get_current_cert(native);
+        return presented && X509_cmp(expected.get(), presented) == 0;
+    });
+    asio::ssl::stream<tcp::socket> stream(context, tls);
+    asio::steady_timer timer(context, std::min(deadline, std::chrono::steady_clock::now() + std::chrono::seconds(1)));
+    asio::streambuf response(8192);
+    const std::string request = "GET /health HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n";
+    std::error_code failure;
+    bool finished = false, healthy = false;
+    auto finish = [&](std::error_code error) {
+        if (finished) return;
+        finished = true;
+        failure = error;
+        timer.cancel();
+        std::error_code ignored;
+        stream.lowest_layer().close(ignored);
+    };
+    timer.async_wait([&](std::error_code error) { if (!error) finish(asio::error::timed_out); });
+    const tcp::endpoint endpoint(asio::ip::make_address(public_probe_host(config, service)),
+                                 static_cast<unsigned short>(service_port(config, service)));
+    stream.next_layer().async_connect(endpoint, [&](std::error_code error) {
+        if (error) { finish(error); return; }
+        stream.async_handshake(asio::ssl::stream_base::client, [&](std::error_code error) {
+            if (error) { finish(error); return; }
+            asio::async_write(stream, asio::buffer(request), [&](std::error_code error, std::size_t) {
+                if (error) { finish(error); return; }
+                asio::async_read_until(stream, response, "\r\n\r\n", [&](std::error_code error, std::size_t) {
+                    if (!error) {
+                        std::istream input(&response);
+                        std::string line;
+                        std::getline(input, line);
+                        healthy = line.starts_with("HTTP/1.1 200 ");
+                    }
+                    finish(error);
+                });
+            });
+        });
+    });
+    context.run();
+    if (failure || !healthy) throw std::runtime_error("HTTPS application readiness probe failed");
+}
+
 void wait_ready(ProcessGroup& children, const Config& config, const std::string& service) {
     const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(20);
     while (!stop_requested()) {
@@ -212,6 +276,8 @@ void wait_ready(ProcessGroup& children, const Config& config, const std::string&
                 // An authenticated, correctly formed RPC response proves readiness
                 // without scanning mail or transmitting a message.
                 (void)readiness_rpc(config, service, {{"op", "health"}}, deadline);
+            } else if ((service == "web" || service == "admin") && !config.text("tls_certificate").empty()) {
+                readiness_https(config, service, deadline);
             } else {
                 Connection connection(std::chrono::seconds(1));
                 connection.set_deadline(std::min(deadline, std::chrono::steady_clock::now() + std::chrono::seconds(1)));
@@ -222,10 +288,7 @@ void wait_ready(ProcessGroup& children, const Config& config, const std::string&
                     throw std::runtime_error("POP3 readiness probe failed");
                 if (service == "imap" && !connection.line().starts_with("* OK"))
                     throw std::runtime_error("IMAP readiness probe failed");
-                // HTTPS may use a private certificate whose hostname differs
-                // from this local probe. Listener readiness plus child liveness
-                // is sufficient in that case; client trust policy stays strict.
-                if ((service == "web" || service == "admin") && config.text("tls_certificate").empty()) {
+                if (service == "web" || service == "admin") {
                     connection.write("GET /health HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n");
                     if (!connection.line().starts_with("HTTP/1.1 200 "))
                         throw std::runtime_error("web readiness probe failed");
@@ -295,7 +358,8 @@ int run(int argc, char** argv) {
                      "  --help              Show this help\n\n"
                      "A missing or uninitialized configuration opens browser setup and prints\n"
                      "its URL and one-time password. An initialized configuration starts all\n"
-                     "services. Restart manually to apply saved settings. Ctrl+C stops them.\n"
+                     "services. Saved administration settings restart affected services.\n"
+                     "Manual configuration edits stay pending until restart. Ctrl+C stops them.\n"
                      "A terminal prompts for the first-run setup address. For unattended remote\n"
                      "setup, specify --setup-bind 0.0.0.0 and --setup-host HOST. Setup HTTPS\n"
                      "is optional; use a trusted network when configuring over HTTP.\n";
@@ -360,7 +424,11 @@ int run(int argc, char** argv) {
     std::filesystem::create_directories(data_directory);
     DataDirectoryLock data_lease(data_directory);
     configure_logging(config, "postplus");
-    const std::vector<std::string> services{"auth", "storage", "filter", "transfer", "delivery", "smtp", "pop3", "imap", "web", "admin"};
+    // Create persistent restart tracking before installation/port preflight so
+    // a failed manager relaunch records failure. Declare control before the
+    // process group: children must be reaped before their snapshots are removed.
+    SupervisorControl control(config);
+    const auto& services = supervisor_services();
     // Validate the complete installation before creating any child process.
     std::set<int> ports;
     for (const auto& service : services) {
@@ -371,22 +439,110 @@ int run(int argc, char** argv) {
         port_available(config, service);
     }
     ProcessGroup children;
-    SupervisorControl control(config);
+    const auto initial_snapshot = control.snapshot_config(config);
+    std::map<std::string, Config> running_config;
+    std::map<std::string, std::filesystem::path> running_snapshot;
+    auto start_service = [&](const std::string& service, const Config& active, const std::filesystem::path& snapshot) {
+        children.start(service, service_executable(binaries, service),
+            {"--config", path_argument(active.source), "--config-snapshot", path_argument(snapshot)});
+        wait_ready(children, active, service);
+        running_config[service] = active;
+        running_snapshot[service] = snapshot;
+        log("postplus", service + " is ready");
+    };
     log("postplus", "starting service group");
     for (const auto& service : services) {
         if (stop_requested()) break;
-        children.start(service, service_executable(binaries, service), {"--config", path_argument(config.source)});
-        try { wait_ready(children, config, service); }
+        try { start_service(service, config, initial_snapshot); }
         catch (const std::exception&) { if (stop_requested()) break; throw; }
-        log("postplus", service + " is ready");
     }
-    if (!stop_requested()) log("postplus", "all services are ready");
+    if (!stop_requested()) { control.ready(config); log("postplus", "all services are ready"); }
     std::cout << "Administration: " << settings_url(config,"admin") << '\n'
               << "Webmail:        " << settings_url(config,"web") << '\n' << std::flush;
     bool admin_shutdown = false;
+    auto restart_progress = [&](const std::string& message) { log("postplus", "[restart] " + message); };
+    auto stop_selected = [&](const std::vector<std::string>& selected) {
+        auto phase = [&](std::initializer_list<const char*> group) {
+            std::vector<std::string> names;
+            for (auto name : group) if (std::find(selected.begin(), selected.end(), name) != selected.end()) names.emplace_back(name);
+            return children.stop_services(names, std::chrono::seconds(35), restart_progress);
+        };
+        bool graceful = phase({"smtp", "pop3", "imap", "web", "admin"});
+        graceful = phase({"delivery"}) && graceful;
+        graceful = phase({"filter", "transfer", "storage", "auth"}) && graceful;
+        return graceful;
+    };
     while (!stop_requested()) {
         ensure_alive(children);
         if (control.shutdown_requested()) { admin_shutdown = true; break; }
+        if (auto requested = control.restart_requested()) {
+            auto request = std::move(*requested);
+            const auto previous_active = config;
+            const auto previous_config = running_config;
+            const auto previous_snapshot = running_snapshot;
+            bool children_stopped = false;
+            try {
+                // An editor changing the file after submission must not silently
+                // alter the requested revision or trigger an implicit restart.
+                if (Config::from_file(config.source).values != request.config.values)
+                    throw MaintenanceError("Configuration changed after scheduling; reload and retry.", 409);
+                request.services = restart_plan(config, request.config, request.mode);
+                std::set<int> new_ports;
+                for (const auto& service : services) {
+                    if (!new_ports.insert(service_port(request.config, service)).second)
+                        throw std::invalid_argument("service ports must be distinct");
+                }
+                const auto target_snapshot = control.snapshot_config(request.config);
+                const auto* manager = std::getenv("POSTPLUS_SERVICE_MANAGER");
+                const bool managed_all = request.mode == "all" && manager && std::string_view(manager) == "systemd";
+                control.restart_running(request, managed_all);
+                children_stopped = true;
+                if (!stop_selected(request.services)) throw std::runtime_error("Affected services did not stop cleanly; the previous configuration will be restored.");
+                if (stop_requested()) {
+                    control.restart_failed(request, "Restart interrupted by a shutdown signal.");
+                    break;
+                }
+                if (managed_all) {
+                    // systemd relaunches only this deliberate exit. The child
+                    // never invokes a shell or systemctl with admin privileges.
+                    log("postplus", "all services stopped; requesting service-manager restart (exit 75)");
+                    return 75;
+                }
+                for (const auto& service : request.services) port_available(request.config, service);
+                for (const auto& service : request.services) {
+                    if (stop_requested()) throw std::runtime_error("Restart interrupted by a shutdown signal.");
+                    start_service(service, request.config, target_snapshot);
+                }
+                ensure_alive(children);
+                config = request.config;
+                configure_logging(config, "postplus");
+                control.restart_complete(request, config);
+            } catch (const std::exception& error) {
+                const auto failure = std::string(error.what());
+                config = previous_active;
+                configure_logging(config, "postplus");
+                bool rolled_back = !children_stopped;
+                if (children_stopped && !stop_requested()) {
+                    restart_progress("restoring the previous configuration after a failed restart");
+                    // Every affected service is stopped again before rollback;
+                    // never leave new listeners using an old RPC dependency.
+                    (void)stop_selected(request.services);
+                    try {
+                        for (const auto& service : request.services) {
+                            port_available(previous_config.at(service), service);
+                            start_service(service, previous_config.at(service), previous_snapshot.at(service));
+                        }
+                        ensure_alive(children);
+                        rolled_back = true;
+                    } catch (const std::exception& rollback_error) {
+                        control.restart_failed(request, failure + " Rollback failed: " + rollback_error.what());
+                        throw std::runtime_error("Restart and rollback failed; stopping the whole service group.");
+                    }
+                }
+                control.restart_failed(request, failure, rolled_back);
+                if (stop_requested()) break;
+            }
+        }
         std::this_thread::sleep_for(std::chrono::milliseconds(100));
     }
     auto progress = [&](const std::string& message) {
@@ -402,6 +558,10 @@ int run(int argc, char** argv) {
     progress("3/3 stopping supporting services and closing the mail and account databases");
     graceful = children.stop_services({"filter", "transfer", "storage", "auth"}, std::chrono::seconds(35), progress) && graceful;
     progress(graceful ? "service group stopped; data saved; it is safe to close this terminal" : "service group stopped with errors; review the logs before restarting");
+    // An explicit administrator shutdown must remain stopped under systemd's
+    // Restart=on-failure, even if forced cleanup was needed. Errors remain in
+    // the logs; only the separate deliberate full-restart path exits 75.
+    if (admin_shutdown) return 0;
     return graceful ? 0 : 1;
 }
 }

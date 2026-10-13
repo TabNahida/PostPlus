@@ -23,6 +23,9 @@ int main() {
         check(secure_equal("secret","secret") && !secure_equal("secret","secreT") && !secure_equal("secret","secrets"),"secret comparison");
         check(random_hex().size() == 32 && random_hex() != random_hex(),"random ID");
         Config legacy;legacy.values={{"domain","example.com"}};
+        check(legacy.port("smtp")==25,"default SMTP must receive Internet mail on port 25");
+        legacy.values["ports"]={{"smtp",2525}};
+        check(legacy.port("smtp")==2525,"explicit legacy SMTP port must be preserved");
         check(legacy.outbound_mode()=="disabled","legacy blank relay must remain disabled");
         legacy.values["smarthost_host"]="smtp.example.com";
         check(legacy.outbound_mode()=="relay" && legacy.mail_hostname()=="example.com","legacy relay compatibility");

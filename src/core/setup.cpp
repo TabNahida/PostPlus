@@ -162,7 +162,7 @@ Json setup_defaults(const SetupOptions& options) {
         {"allow_insecure_auth", true}, {"admin_username", "admin@localhost"},
         {"tls_certificate", ""}, {"tls_private_key", ""},
         {"ports", {{"auth", 18081}, {"storage", 18082}, {"filter", 18083}, {"transfer", 18084},
-            {"smtp", 2525}, {"pop3", 1110}, {"imap", 1143}, {"web", 8080}, {"admin", options.port==8080?8081:options.port}, {"delivery_lock", 18085}}},
+            {"smtp", 25}, {"pop3", 1110}, {"imap", 1143}, {"web", 8080}, {"admin", options.port==8080?8081:options.port}, {"delivery_lock", 18085}}},
         {"smarthost_host", ""}, {"smarthost_port", 587}, {"smarthost_tls", "starttls"},
         {"smarthost_username", ""}, {"smarthost_password_env", "POSTPLUS_SMARTHOST_PASSWORD"},
         {"clamav_host", ""}, {"clamav_port", 3310}};

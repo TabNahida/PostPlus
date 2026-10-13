@@ -100,6 +100,10 @@ assert.equal(adminAppearance.storage.has("postplus.admin.preferences"),true);ass
 
 const chinese = fixture("zh-CN").i18n;
 assert.equal(chinese.error({error:"The email address or password is incorrect."}), "邮箱地址或密码错误。");
+assert.equal(chinese.error({code:"invalid_api_key",error:"private detail"}),"请检查 API 密钥名称或有效期后重试。");
+assert.equal(chinese.error({code:"api_key_not_found"}),"找不到此 API 密钥，请刷新密钥列表。");
+assert.equal(chinese.error({code:"api_key_limit"}),"服务器的 API 密钥数量已达上限，请检查现有密钥或联系服务器管理员。");
+for(const status of ["Active","Inactive","Expired","Revoked"])assert.notEqual(chinese.t(status),status);
 assert.equal(chinese.error({code:"invalid_setup_token",error:"token=secret"}), "配置密码错误或已过期，请复制终端中最新的一次性密码。");
 assert.equal(chinese.error({error:"<script>unexpected server detail</script>"}), "请求失败，请稍后重试。");
 assert.equal(chinese.error({error:"A local recipient account does not exist: user@example.com"}), "本地收件人账号不存在：user@example.com");
@@ -129,7 +133,7 @@ for (const file of ["index.html", "admin.html", "setup.html"]) {
   }
   for (const match of html.matchAll(/data-i18n-(?:aria-label|title|placeholder)="([^"]+)"/g)) translated(match[1], file);
 }
-for (const file of ["app.js", "admin.js", "setup.js", "settings.js", "size.js", "acme.js", "dns.js", "preferences.js", "address.js"]) {
+for (const file of ["app.js", "admin.js", "setup.js", "settings.js", "size.js", "acme.js", "dns.js", "preferences.js", "address.js", "mail-reader.js"]) {
   const script = fs.readFileSync(path.join(root, "web", file), "utf8");
   new vm.Script(script, {filename:file});
   for (const match of script.matchAll(/\bt\("([^"]+)"/g)) translated(match[1], file);
@@ -502,6 +506,7 @@ async function checkMaintenanceControls() {
   function id(name){if(!controls.has(name))controls.set(name,new AdminControl());return controls.get(name);}
   const sandbox={window:{},document:{getElementById:id,querySelectorAll:()=>[],addEventListener(){},title:""},
     PostPlusI18n:fresh.i18n,PostPlusAddress:addressSandbox.window.PostPlusAddress,PostPlusPreferences:{closeNavigation(){}},
+    PostPlusMailReader:{create:()=>({show(){},clear(){},dispose(){}})},
     URL,URLSearchParams,TextEncoder,location:{origin:"http://localhost:8081"},
     setTimeout(callback){const key=++timerId;timers.set(key,callback);return key;},clearTimeout:key=>timers.delete(key),
     fetch:async route=>({ok:route==="/api/public/config",status:route==="/api/public/config"?200:401,
@@ -514,6 +519,7 @@ async function checkMaintenanceControls() {
   id("shutdown-form").callbacks.submit({preventDefault(){},currentTarget:id("shutdown-form")});
   for(let index=0;index<12;index++)await Promise.resolve();
   assert.deepEqual(calls.map(call=>call.route),["/api/admin/config","/api/admin/shutdown"],"Shutdown first commits changed settings");
+  assert.equal(calls[0].options.body.apply,false,"Shutdown saves without scheduling a competing automatic restart");
   assert.equal(id("shutdown-open").disabled,true);assert.match(id("shutdown-status").textContent,/Shutdown requested/);
   calls.length=0;id("settings-form").hidden=false;
   vm.runInContext('shutdownPending=false;settingsEditor.read=()=>{throw new Error("Invalid port");};',sandbox);

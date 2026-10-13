@@ -1,5 +1,6 @@
 #pragma once
 #include <postplus/core.hpp>
+#include <postplus/restart.hpp>
 #include <memory>
 
 namespace postplus {
@@ -29,9 +30,20 @@ public:
     explicit SupervisorControl(const Config& config);
     ~SupervisorControl();
     bool shutdown_requested();
+    std::optional<RestartRequest> restart_requested();
+    std::filesystem::path snapshot_config(const Config& config);
+    void ready(const Config& config);
+    void restart_running(const RestartRequest& request, bool service_manager = false);
+    void restart_complete(const RestartRequest& request, const Config& config);
+    void restart_failed(const RestartRequest& request, const std::string& error,
+                        bool rolled_back = false);
 private:
     std::filesystem::path directory_;
+    std::filesystem::path state_directory_;
+    Config config_;
+    std::vector<std::filesystem::path> snapshots_;
     std::string token_;
+    bool ready_ = false;
 };
 void request_supervisor_shutdown(const Config& config);
 }

@@ -92,12 +92,14 @@ For a first trial on one computer, use the values below. Expand advanced section
 | Connections and security | Loopback addresses; local development enabled | Allows a local trial without certificates. Clients on other computers cannot use this mode for plaintext login. |
 | Administration port | `8081` | Server management page; separate from Webmail. |
 | Webmail port | `8080` | Reading and composing mail in a browser. |
-| SMTP / POP3 / IMAP | `2525` / `1110` / `1143` | Non-privileged development ports for mail clients. |
+| SMTP / POP3 / IMAP | `25` / `1110` / `1143` | SMTP uses the Internet receiving port; Unix requires permission to bind TCP 25. |
 | Internal ports | Keep the suggested values | Private communication between service processes; each must be distinct. |
 | Outgoing delivery | Choose disabled for the local trial | Local recipients work. A real-domain deployment can select built-in direct delivery or an SMTP relay. |
 | ClamAV | Leave host empty for this trial | Built-in filtering remains active; full malware scanning needs a separate ClamAV service. |
 
 Save the form. PostPlus validates the values, creates the administrator and private configuration files, closes setup, and starts the service group. Use the success page's links or the addresses printed by the launcher.
+
+On Linux, a normal user without permission to bind low ports can temporarily select SMTP `2525` to finish setup. Stop that terminal instance with **Ctrl+C**, then [install the systemd service](systemd.md), whose unit grants `CAP_NET_BIND_SERVICE`. After it starts, change SMTP to `25` in administration and save. Existing installations using this managed unit already have the required permission.
 
 The generated internal service token lives in a private file referenced by `service_token_file`. You do not need to copy it into the browser or set `POSTPLUS_SERVICE_TOKEN` for a wizard-created installation. Your administrator password is stored as a salted password hash in the authentication database, not in the configuration.
 
@@ -154,7 +156,7 @@ For the local trial, use this manual account configuration:
 | Password | That account's permanent password |
 | Incoming server | `127.0.0.1` |
 | Incoming protocol | IMAP on `1143`, or POP3 on `1110` |
-| Outgoing server | `127.0.0.1`, SMTP on `2525` |
+| Outgoing server | `127.0.0.1`, SMTP on `25` |
 | Local trial encryption | None, only with explicit loopback development mode |
 | TLS installation encryption | STARTTLS for SMTP and IMAP; STLS/STARTTLS for POP3 |
 | SMTP authentication | Enabled, with the full address and password |
@@ -165,14 +167,11 @@ Use the real server hostname and configured ports after deployment. Implicit TLS
 
 Open **Server settings** for domain, network, TLS, outgoing mail, filtering, limits, sessions, and logs. The form explains fields and checks types, ranges, and conflicting ports before saving. Size fields have unit selectors; for example, enter 10 MiB instead of 10485760 bytes. Changing only the displayed unit preserves the exact byte count, and the config file always stores integer bytes.
 
-Saving writes and backs up the configuration. **It does not restart the server.** The existing service group and browser sessions continue with the current settings until you choose to apply the change:
+Saving validates and backs up the configuration, then **automatically restarts only affected services** when PostPlus is running through its native supervisor. The page shows the affected services, progress, and updated admin/Webmail addresses. Services that do not need the changed settings continue running. Your administration session stays available unless the administration service itself restarts; in that case, open the updated administration address and sign in again. A disconnected page alone does not confirm that restarting succeeded.
 
-1. Note the new admin and Webmail URLs displayed by the settings page.
-2. Press **Ctrl+C** in the launcher terminal and wait for all services to stop.
-3. Run the same command again, including the same `--config` option if you used one.
-4. Wait for startup, open the resulting admin URL, and sign in again. Sessions from before shutdown are no longer valid.
+Use **Server maintenance → Restart all services** when you need a full restart with the saved configuration. Unsaved form edits are not included. With the supplied systemd installation, PostPlus automatically comes back after this action. **Save and shut down** is a separate operation: it saves without starting an automatic restart and leaves the installation stopped.
 
-If a changed address, port, or certificate prevents startup, correct the file or restore its save-generated backup and run again. The launcher reports startup errors; it does not automatically roll back the saved configuration.
+If a changed address, port, or certificate prevents restarting, the native supervisor attempts to restore the previous affected services. The page reports restoration when confirmed; the new saved settings remain pending and must be corrected before retrying. If recovery also fails, check the service logs and start PostPlus after correcting the configuration or restoring its backup. A full systemd relaunch cannot restore old processes automatically.
 
 The data directory is read-only after installation. It contains the installation's accounts and mail; moving it requires stopping the group, copying the complete data directory, and updating the configuration deliberately. Changing the domain does not rename existing account addresses or migrate mailboxes. Choose the intended domain before creating real users.
 
@@ -184,7 +183,7 @@ Suppose you control `example.com` and want addresses such as `alice@example.com`
 
 1. **Choose the mailbox domain.** Set PostPlus's domain to `example.com`. This is the part after `@`; it need not equal the machine's hostname. PostPlus currently supports one mailbox domain.
 2. **Prepare DNS.** Point an A record for `mail.example.com` at the server's public IPv4 address. Add AAAA only if IPv6 actually reaches the configured listener. For direct inbound internet mail, point `example.com`'s MX record at `mail.example.com`. MX records name a host, not an IP address, URL, or custom port.
-3. **Arrange inbound SMTP.** Other mail servers deliver to TCP port 25. The local default `2525` is for testing: configure an appropriate port 25 listener or a controlled forwarding arrangement. Confirm the hosting provider and firewall permit inbound SMTP. A port value in the page does not create firewall/NAT rules or give the process permission to bind privileged ports.
+3. **Arrange inbound SMTP.** Other mail servers deliver to TCP port 25. The default SMTP port is `25`. If you choose a custom port such as `2525`, configure controlled forwarding from public TCP 25. Confirm the hosting provider and firewall permit inbound SMTP. A port value in the page does not create firewall/NAT rules or give the process permission to bind privileged ports.
 4. **Obtain a certificate.** Request one through PostPlus’s Let’s Encrypt panel (below), or use another provider. The certificate must cover `mail.example.com`; its PEM chain and matching unencrypted private key must be readable by the service account.
 5. **Configure TLS and listening.** In Server settings, enter those paths, disable local plaintext authentication, and choose a reachable bind address. `0.0.0.0` means all IPv4 interfaces; `127.0.0.1` means local access only. Keep the administration bind on loopback if you manage it through a tunnel. All configured ports must differ, including admin and Webmail.
 6. **Access the correct name.** Use `https://mail.example.com:8080/` for Webmail if that is the configured port and certificate name. Accessing by an IP or another domain can cause a certificate-name error. PostPlus uses one configured certificate/key pair for its TLS listeners.
@@ -232,9 +231,9 @@ The certificate panel is available in **Server settings** and in first-run setup
 4. Click **Load certificate authority terms**, read the linked terms, and check the agreement box if you accept them. Click **Request certificate**. Follow the status; you can cancel an in-progress request.
 5. After the staging request succeeds, select **Production · trusted certificate**, load and accept its terms, and request again. Staging certificates are not trusted by normal browsers or mail clients.
 6. When the production certificate is issued, click **Use these certificate paths**. This fills the certificate and private-key fields. Review the listening addresses and disable plaintext authentication for network access, then save the configuration.
-7. For an existing installation, stop PostPlus with **Ctrl+C** and run the same launch command to load the certificate. The first-run wizard starts services when its configuration is saved.
+7. For an existing supervised installation, saving automatically restarts affected services to load the certificate. Follow the restart panel and sign in again if administration restarts. Standalone services require a manual restart. The first-run wizard starts services when its configuration is saved.
 
-Certificates and account credentials are saved privately on the server. PostPlus does not configure DNS or your firewall, and successful local setup is not proof of public reachability. Automatic renewal is not implemented: track certificate expiry and request a replacement before it expires, then save and manually restart. You can still use a certificate obtained through another provider by entering its PEM paths directly.
+Certificates and account credentials are saved privately on the server. PostPlus does not configure DNS or your firewall, and successful local setup is not proof of public reachability. Automatic renewal is not implemented: track certificate expiry and request a replacement before it expires, then save to apply the new paths automatically. Independently launched services still require a manual restart. You can still use a certificate obtained through another provider by entering its PEM paths directly.
 
 ### Built-in direct delivery or an SMTP relay
 
@@ -309,11 +308,43 @@ The utility removes only the known authentication/mail SQLite database files and
 | Login requires TLS | Enable TLS, or use the explicit development option from loopback for a local trial. Public plaintext login is not supported. |
 | TLS files rejected | Use a readable PEM certificate chain and matching unencrypted PEM key on the server. Check paths and service-account permissions. |
 | Browser certificate error | Use the hostname covered by the certificate; check expiration and chain trust. The mail domain and TLS hostname can differ. |
-| Saved settings have not taken effect | Saving does not restart services. Stop the launcher with Ctrl+C, wait for shutdown, then run the same command. Use the new URL after startup. |
-| Page disconnected after restarting | Browser sessions expire when services stop. Wait for startup, use the new admin address, and sign in again. Inspect the terminal if the service does not return. |
+| Saved settings have not taken effect | Check the restart progress and logs. Supervised saves restart affected services automatically; independently launched services require a manual restart. Use the updated URL if the admin address changed. |
+| Page disconnected after restarting | An administration-service restart ends its browser session. Open the updated address and sign in again to check the result; inspect service logs if it does not return. Other service restarts preserve the administration session. |
 | No mail arrives | Confirm recipient exists, inspect Delivery queue, then check storage/delivery/filter/transfer logs. External sending requires enabled direct or relay delivery. |
 | Mail waits after enabling ClamAV | Confirm `clamd` is running and reachable and signatures are loaded. Scanner failures defer delivery. |
 | Internet sender cannot reach the mailbox | Check MX/A/AAAA records, inbound TCP 25, firewall/NAT/provider restrictions, and the configured local recipient. |
 | Mail client has missing folders/features | Compare its needs with the [protocol support matrix](protocols.md). Full IMAP compatibility is still in development. |
+
+### Sending works, but mail from Outlook or another provider never arrives
+
+Internet mail servers use the MX hostname on **TCP port 25**. They do not use
+the SMTP port entered in a mail client, and MX records cannot select port 2525.
+If PostPlus responds on 2525 while port 25 times out, incoming mail cannot reach
+it even when MX, SPF, DKIM and DMARC records match.
+
+In **Server settings**, set the SMTP port to `25` and save; PostPlus automatically restarts the affected services
+to apply it. On Linux, the supplied [systemd installer](systemd.md) grants the
+service account permission to bind privileged ports. Permit inbound TCP 25 in
+the VPS provider's firewall/security group and the host firewall; for example,
+when UFW is in use, `sudo ufw allow 25/tcp`. An existing controlled forwarding
+arrangement from public TCP 25 to PostPlus's 2525 listener also works. Check
+the local listener and test from another network:
+
+```sh
+sudo ss -ltnp '( sport = :25 or sport = :2525 )'
+nc -vz -w 5 mail.example.com 25
+```
+
+The listener must use a reachable address such as `0.0.0.0`, with TLS configured
+for public deployment. Preserve the existing configuration, DKIM key and
+accounts when adjusting these fields.
+
+For `alice@example.com`, set the mailbox domain to `example.com` and create
+that exact local account. `mail.example.com` is the server/MX hostname; it does
+not make `alice@mail.example.com` a local mailbox. Outside senders can deliver
+to existing local accounts without logging in, including when outgoing
+delivery is disabled. After SMTP accepts the message, inspect **Delivery
+queue** and the `delivery`, `storage` and `filter` logs if it is absent from
+the inbox; a queued or quarantined message may still need attention.
 
 For operational details, see [architecture](architecture.md), [configuration](configuration.md), and the [HTTP API](api.md).

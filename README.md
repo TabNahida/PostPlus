@@ -88,13 +88,13 @@ The native launcher starts and monitors all service processes. A standalone inst
 
 ## Configure and operate
 
-Storage-size fields offer byte, KiB, MiB, GiB, and TiB selectors while configuration files retain exact integer byte values. Per-user quotas in **User accounts → Storage quota** take effect immediately; global settings apply after a manual restart.
+Storage-size fields offer byte, KiB, MiB, GiB, and TiB selectors while configuration files retain exact integer byte values. Per-user quotas in **User accounts → Storage quota** take effect immediately; global settings automatically restart the affected services when the native supervisor is running.
 
 Open **Settings** near your account for language and appearance preferences. **User accounts → Account password policy** controls new accounts and password resets, with an eight-character default minimum and optional character requirements. Changes take effect immediately; existing passwords and saved policies continue to work. Setup, account creation, administration login, and Webmail login fill in `@domain` automatically; enter the mailbox name before it.
 
-Most day-to-day options are available in **Administration → Server settings**: listener addresses and ports, TLS, relay delivery, filtering, resource limits, sessions, and logging. Saving validates the configuration, creates a backup, and shows the addresses that will apply after restart. The current services keep running. When ready, press **Ctrl+C** in the launcher terminal, wait for shutdown, then run the same launch command to apply the saved settings.
+Most day-to-day options are available in **Administration → Server settings**: listener addresses and ports, TLS, relay delivery, filtering, resource limits, sessions, and logging. Saving validates the configuration, creates a backup, and automatically restarts only affected services through the native supervisor. The page shows restart progress and updated addresses. Your administration session remains available unless the administration service restarts; use the new address and sign in again in that case. Independently launched services require a manual restart.
 
-**Server settings → Server maintenance** lets you download a data backup or save the current server settings and shut down. Backups include accounts, mail, queues, configuration, and configured credentials; store them privately. The terminal reports shutdown progress for both the web action and **Ctrl+C**. See [backup, restore, and shutdown](docs/maintenance.md) for recovery instructions.
+**Server settings → Server maintenance** lets you download a data backup, restart all services with the saved configuration, or save the current server settings and shut down. The full-restart action automatically brings PostPlus back, including installations made with the supplied systemd script; shutdown leaves it stopped. Backups include accounts, mail, queues, configuration, and configured credentials; store them privately. The terminal reports shutdown progress for both the web action and **Ctrl+C**. See [backup, restore, and shutdown](docs/maintenance.md) for recovery instructions.
 
 - [Getting started](docs/getting-started.md) — from first launch to your first message.
 - [中文入门指南](docs/getting-started.zh-CN.md) — 本地试用、域名与 TLS、后台设置和常见问题。
@@ -115,7 +115,7 @@ PostPlus uses **C++20**, **standalone Asio**, **OpenSSL 3**, **SQLite**, and **x
 | `postplus` | Setup and service supervision | Setup: loopback 8081 |
 | `postplus-admin` | Administration, accounts, settings, queue and logs API | Loopback 8081 |
 | `postplus-web` | Webmail and mailbox API | Loopback 8080 |
-| `postplus-smtp` | ESMTP reception and authenticated submission | Loopback 2525 |
+| `postplus-smtp` | ESMTP reception and authenticated submission | Loopback 25 |
 | `postplus-pop3` | POP3 mailbox access | Loopback 1110 |
 | `postplus-imap` | IMAP mailbox access | Loopback 1143 |
 | `postplus-auth` | Accounts, password verification, administrator roles | Loopback 18081 |
@@ -156,7 +156,7 @@ tests/                 C++ tests, web checks, and integration suites
 ## Current scope
 
 - IMAP implements a [documented command subset](docs/protocols.md); full client compatibility, IDLE, ENVELOPE, and BODYSTRUCTURE remain outside the current scope. POP3 does not yet provide an exclusive maildrop lock.
-- Webmail reads and composes plain text across six built-in folders. Attachment upload/download, HTML rendering, and custom folder creation are not implemented. A Sent copy records successful submission to the queue, not proof of final delivery.
+- Webmail reads plain text, isolated HTML, and attached forwarded messages across six built-in folders, and composes plain text. Remote images stay blocked until requested. Attachment upload/download and custom folder creation are not implemented. A Sent copy records successful submission to the queue, not proof of final delivery.
 - Outbound delivery supports direct MX routing with DKIM signing or an SMTP relay. Incoming SPF/DKIM/DMARC verification, DSN generation, DANE, MTA-STS, multiple domains, and multi-host high availability are not implemented. Permanent delivery failures remain visible in the administration queue.
 - SMTP queues mail transactionally. Local delivery is idempotent; retrying outbound mail after an interrupted acknowledgement can produce a duplicate.
 - Sessions use bounded worker pools, SQLite serializes writes, and delivery uses one worker. Capacity for hundreds or thousands of active users requires representative workload testing and further development.

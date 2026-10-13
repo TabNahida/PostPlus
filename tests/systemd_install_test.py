@@ -76,7 +76,8 @@ def main():
         expected = (f"ExecStart=:{quote(str(install.resolve() / 'postplus'))} "
                     f"--config {quote(str(config.resolve()))}")
         assert expected in result.stdout, result.stdout
-        for setting in ("User=" + user, "Restart=on-failure", "KillMode=mixed",
+        for setting in ("User=" + user, "Restart=on-failure", "RestartForceExitStatus=75",
+                        "Environment=POSTPLUS_SERVICE_MANAGER=systemd", "KillMode=mixed",
                         "TimeoutStopSec=130s", "AmbientCapabilities=CAP_NET_BIND_SERVICE"):
             assert setting in result.stdout, setting
         default = run(*base_options, "--dry-run", env=environment)

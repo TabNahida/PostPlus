@@ -33,7 +33,7 @@
     "storage": 18082,
     "filter": 18083,
     "transfer": 18084,
-    "smtp": 2525,
+    "smtp": 25,
     "pop3": 1110,
     "imap": 1143,
     "web": 8080,

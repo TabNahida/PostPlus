@@ -49,6 +49,7 @@ public:
     }
     int integer(int column) const { return sqlite3_column_int(value_, column); }
     std::int64_t integer64(int column) const { return sqlite3_column_int64(value_, column); }
+    bool is_null(int column) const { return sqlite3_column_type(value_, column) == SQLITE_NULL; }
 private:
     sqlite3* db_;
     sqlite3_stmt* value_ = nullptr;
@@ -104,6 +105,27 @@ std::string password_hash(const std::string& password, const std::string& salt_v
     return result;
 }
 
+bool valid_api_key(std::string_view value) {
+    return value.size() == 67 && value.starts_with("pp_") &&
+        std::all_of(value.begin() + 3, value.end(), [](unsigned char ch) {
+            return (ch >= '0' && ch <= '9') || (ch >= 'a' && ch <= 'f');
+        });
+}
+
+std::string api_key_digest(std::string_view value) {
+    std::string result(32, '\0');
+    unsigned int count = 0;
+    if (EVP_Digest(value.data(), value.size(), reinterpret_cast<unsigned char*>(result.data()),
+                   &count, EVP_sha256(), nullptr) != 1 || count != result.size())
+        throw std::runtime_error("API key hashing failed");
+    return result;
+}
+
+std::int64_t unix_seconds() {
+    return std::chrono::duration_cast<std::chrono::seconds>(
+        std::chrono::system_clock::now().time_since_epoch()).count();
+}
+
 class AuthStore {
 public:
     explicit AuthStore(const Config& config)
@@ -135,7 +157,7 @@ public:
                 Transaction migration(db_);
                 {
                     Statement version(db_, "PRAGMA user_version");
-                    if (version.step() != SQLITE_ROW || version.integer(0) > 2)
+                    if (version.step() != SQLITE_ROW || version.integer(0) > 3)
                         throw std::runtime_error("unsupported authentication database version");
                 }
                 execute("CREATE TABLE IF NOT EXISTS users ("
@@ -149,7 +171,12 @@ public:
                     "require_digit INTEGER NOT NULL CHECK(require_digit IN (0,1)),"
                     "require_symbol INTEGER NOT NULL CHECK(require_symbol IN (0,1)),"
                     "revision INTEGER NOT NULL CHECK(revision BETWEEN 1 AND 9007199254740991));"
-                    "INSERT OR IGNORE INTO password_policy VALUES(1,8,0,0,0,0,1); PRAGMA user_version=2;");
+                    "INSERT OR IGNORE INTO password_policy VALUES(1,8,0,0,0,0,1);"
+                    "CREATE TABLE IF NOT EXISTS api_keys ("
+                    "id TEXT PRIMARY KEY, name TEXT NOT NULL CHECK(length(name) BETWEEN 1 AND 80),"
+                    "prefix TEXT NOT NULL, owner TEXT NOT NULL, digest BLOB NOT NULL UNIQUE CHECK(length(digest)=32),"
+                    "created_at INTEGER NOT NULL, expires_at INTEGER, last_used_at INTEGER, revoked_at INTEGER);"
+                    "CREATE INDEX IF NOT EXISTS api_keys_owner ON api_keys(owner); PRAGMA user_version=3;");
                 migration.commit();
             }
 #ifndef _WIN32
@@ -166,6 +193,9 @@ public:
     Json handle(const Json& request) {
         const auto operation = required_string(request, "op", 32);
         if (operation == "verify") return verify(request);
+        if (operation == "api_key_verify") return verify_api_key(request);
+        if (operation == "api_key_list" || operation == "api_key_create" || operation == "api_key_revoke")
+            return manage_api_keys(request, operation);
         if (operation == "password_policy_get") {
             std::lock_guard guard(mutex_);
             return policy_view();
@@ -241,6 +271,126 @@ public:
         return {{"ok", false}, {"error", "unknown authentication operation"}};
     }
 private:
+    static constexpr int max_active_keys = 100, max_stored_keys = 1000;
+
+    // Metadata deliberately excludes both the SHA256 digest and the usable key.
+    Json api_key_view(const Statement& query, std::int64_t now) const {
+        const auto expires = query.is_null(5) ? Json() : Json(query.integer64(5));
+        const auto revoked = query.is_null(7) ? Json() : Json(query.integer64(7));
+        const bool active = query.integer(8) != 0 && revoked.is_null() &&
+            (expires.is_null() || expires.get<std::int64_t>() > now);
+        return {{"id", query.string(0)}, {"name", query.string(1)}, {"prefix", query.string(2)},
+                {"owner", query.string(3)}, {"scope", "admin"}, {"created_at", query.integer64(4)},
+                {"expires_at", expires}, {"last_used_at", query.is_null(6) ? Json() : Json(query.integer64(6))},
+                {"revoked_at", revoked}, {"active", active}};
+    }
+
+    Json key_metadata(const std::string& id, std::int64_t now) {
+        Statement query(db_, "SELECT k.id,k.name,k.prefix,k.owner,k.created_at,k.expires_at,k.last_used_at,k.revoked_at,"
+                            "COALESCE(u.admin,0) FROM api_keys k LEFT JOIN users u ON u.username=k.owner WHERE k.id=?");
+        query.text(1, id);
+        if (query.step() != SQLITE_ROW) throw std::runtime_error("cannot read API key metadata");
+        return api_key_view(query, now);
+    }
+
+    Json manage_api_keys(const Json& request, const std::string& operation) {
+        const auto owner = username_from(request);
+        std::string name, id;
+        std::int64_t days = 0;
+        if (operation == "api_key_create") {
+            if (!request.contains("name") || !request.at("name").is_string())
+                return {{"ok", false}, {"code", "invalid_api_key"}, {"field", "name"}, {"error", "Enter a name for the API key."}};
+            name = trim(request.at("name").get<std::string>());
+            if (name.empty() || name.size() > 80 || std::any_of(name.begin(), name.end(), [](unsigned char ch) { return ch < 32 || ch == 127; }))
+                return {{"ok", false}, {"code", "invalid_api_key"}, {"field", "name"}, {"error", "API key names must contain 1..80 bytes without control characters."}};
+            if (request.contains("expires_in_days")) {
+                const auto& expiry = request.at("expires_in_days");
+                if (!expiry.is_number_integer() || (expiry.is_number_unsigned() && expiry.get<std::uint64_t>() > 3650) ||
+                    expiry.get<std::int64_t>() < 1 || expiry.get<std::int64_t>() > 3650)
+                    return {{"ok", false}, {"code", "invalid_api_key"}, {"field", "expires_in_days"}, {"error", "API key expiry must be 1..3650 whole days."}};
+                days = expiry.get<std::int64_t>();
+            }
+        } else if (operation == "api_key_revoke") {
+            id = required_string(request, "id", 32);
+            if (id.size() != 32 || !std::all_of(id.begin(), id.end(), [](unsigned char ch) {
+                return (ch >= '0' && ch <= '9') || (ch >= 'a' && ch <= 'f');
+            })) return {{"ok", false}, {"code", "invalid_api_key"}, {"field", "id"}, {"error", "Invalid API key ID."}};
+        }
+        std::lock_guard guard(mutex_);
+        Transaction transaction(db_);
+        Statement administrator(db_, "SELECT admin FROM users WHERE username=?");
+        administrator.text(1, owner);
+        const auto account = administrator.step();
+        if (account != SQLITE_ROW && account != SQLITE_DONE) throw std::runtime_error("cannot check API key administrator");
+        if (account != SQLITE_ROW || administrator.integer(0) != 1)
+            return {{"ok", false}, {"code", "administrator_required"}, {"error", "Administrator access is required."}};
+        const auto now = unix_seconds();
+        if (operation == "api_key_list") {
+            Statement query(db_, "SELECT k.id,k.name,k.prefix,k.owner,k.created_at,k.expires_at,k.last_used_at,k.revoked_at,"
+                                "COALESCE(u.admin,0) FROM api_keys k LEFT JOIN users u ON u.username=k.owner ORDER BY k.created_at DESC,k.id LIMIT 1000");
+            Json keys = Json::array();
+            for (int code; (code = query.step()) != SQLITE_DONE;) {
+                if (code != SQLITE_ROW) throw std::runtime_error("cannot list API keys");
+                keys.push_back(api_key_view(query, now));
+            }
+            transaction.commit();
+            return {{"ok", true}, {"api_keys", std::move(keys)}, {"max_active_keys", max_active_keys}, {"max_stored_keys", max_stored_keys}};
+        }
+        if (operation == "api_key_revoke") {
+            Statement revoke(db_, "UPDATE api_keys SET revoked_at=COALESCE(revoked_at,?) WHERE id=?");
+            revoke.integer64(1, now); revoke.text(2, id); revoke.done();
+            if (sqlite3_changes(db_) != 1)
+                return {{"ok", false}, {"code", "api_key_not_found"}, {"error", "API key not found."}};
+            const auto metadata = key_metadata(id, now);
+            transaction.commit();
+            log("auth", "administrator " + owner + " revoked API key " + id);
+            return {{"ok", true}, {"api_key", metadata}};
+        }
+        Statement count(db_, "SELECT COUNT(*) FROM api_keys k JOIN users u ON u.username=k.owner "
+                            "WHERE u.admin=1 AND k.revoked_at IS NULL AND (k.expires_at IS NULL OR k.expires_at>?)");
+        count.integer64(1, now);
+        if (count.step() != SQLITE_ROW) throw std::runtime_error("cannot count API keys");
+        if (count.integer(0) >= max_active_keys)
+            return {{"ok", false}, {"code", "api_key_limit"}, {"error", "Revoke an unused API key before creating another."}};
+        // Retain bounded audit metadata. Only inactive keys may be pruned.
+        Statement prune(db_, "DELETE FROM api_keys WHERE id IN (SELECT k.id FROM api_keys k LEFT JOIN users u ON u.username=k.owner "
+                            "WHERE k.revoked_at IS NOT NULL OR k.expires_at<=? OR COALESCE(u.admin,0)=0 ORDER BY k.created_at,k.id "
+                            "LIMIT MAX(0,(SELECT COUNT(*) FROM api_keys)-999))");
+        prune.integer64(1, now); prune.done();
+        const auto key = "pp_" + random_hex(32);
+        id = random_hex(16);
+        Statement insert(db_, "INSERT INTO api_keys(id,name,prefix,owner,digest,created_at,expires_at) VALUES(?,?,?,?,?,?,?)");
+        insert.text(1, id); insert.text(2, name); insert.text(3, key.substr(0, 11)); insert.text(4, owner);
+        insert.bytes(5, api_key_digest(key)); insert.integer64(6, now);
+        // Binding is initially NULL, which represents a key without expiry.
+        if (days != 0) insert.integer64(7, now + days * INT64_C(86400));
+        insert.done();
+        const auto metadata = key_metadata(id, now);
+        transaction.commit();
+        log("auth", "administrator " + owner + " created API key " + id);
+        return {{"ok", true}, {"key", key}, {"api_key", metadata}};
+    }
+
+    Json verify_api_key(const Json& request) {
+        if (!request.contains("key") || !request.at("key").is_string()) return {{"ok", true}, {"valid", false}};
+        const auto key = request.at("key").get<std::string>();
+        if (!valid_api_key(key)) return {{"ok", true}, {"valid", false}};
+        std::lock_guard guard(mutex_);
+        Transaction transaction(db_);
+        const auto now = unix_seconds();
+        Statement query(db_, "SELECT k.id,k.owner,k.prefix FROM api_keys k JOIN users u ON u.username=k.owner "
+                            "WHERE k.digest=? AND u.admin=1 AND k.revoked_at IS NULL AND (k.expires_at IS NULL OR k.expires_at>?)");
+        query.bytes(1, api_key_digest(key)); query.integer64(2, now);
+        const auto code = query.step();
+        if (code != SQLITE_ROW && code != SQLITE_DONE) throw std::runtime_error("cannot verify API key");
+        if (code != SQLITE_ROW) return {{"ok", true}, {"valid", false}};
+        const auto id = query.string(0), owner = query.string(1), prefix = query.string(2);
+        Statement used(db_, "UPDATE api_keys SET last_used_at=? WHERE id=?");
+        used.integer64(1, now); used.text(2, id); used.done();
+        transaction.commit();
+        return {{"ok", true}, {"valid", true}, {"username", owner}, {"admin", true}, {"id", id}, {"prefix", prefix}};
+    }
+
     // Call only while holding mutex_; this always reads the persisted revision.
     Json policy_view() {
         Statement query(db_, "SELECT min_length,require_uppercase,require_lowercase,require_digit,require_symbol,revision "

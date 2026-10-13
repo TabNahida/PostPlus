@@ -4,6 +4,7 @@ const t = (...args) => PostPlusI18n.t(...args);
 const $ = (id) => document.getElementById(id);
 const state = { user: null, messages: [], selected: null, previews: new Map(), view: "INBOX", loading: false, readVersion: 0, listVersion: 0, folders: [], usage: null, draftId: null, composeDirty: false, composeSaving: false };
 const folderLabels = {INBOX:"Inbox",Sent:"Sent",Drafts:"Drafts",Trash:"Trash",Junk:"Junk",Archive:"Archive"};
+const messageReader=PostPlusMailReader.create($("message-body"));
 let noticeTimer;
 const loginAddress=PostPlusAddress.create($("login-email"),$("login-domain"));
 const mailDomainReady=api("/api/public/config",{quiet:true}).then(data=>{loginAddress.setDomain(data.domain);return true;}).catch(()=>false);
@@ -71,7 +72,7 @@ function signedOut() {
   $("login-password").value = "";
   $("compose-form").reset();
   $("message-list").replaceChildren();
-  $("message-body").textContent = "";
+  messageReader.clear();
   $("message-raw").textContent = "";
   $("login-email").focus();
   document.title = t("PostPlus · Your mail, in order");
@@ -181,6 +182,8 @@ function renderMessages() {
 function clearReader() {
   state.selected = null;
   state.readVersion++;
+  messageReader.clear();
+  $("message-raw").textContent="";
   $("reader-content").hidden = true;
   $("reader-placeholder").hidden = false;
   document.querySelector(".mail-workspace").classList.remove("reading");
@@ -219,14 +222,15 @@ async function loadInbox() {
 }
 
 async function openMessage(id) {
-  const version = ++state.readVersion;
+  clearReader();const version = state.readVersion;
   $("reader").setAttribute("aria-busy", "true");
   try {
     const data = await api(`/api/messages/${encodeURIComponent(id)}`);
     if (version !== state.readVersion || !state.user) return;
     state.selected = id;
     const preview = data.message || {};
-    state.previews.set(id, preview);
+    // List/draft metadata must not retain rendered HTML and inline image data.
+    state.previews.set(id,{subject:preview.subject,from:preview.from,to:preview.to,date:preview.date,text:preview.text});
     const message = state.messages.find((item) => String(item.id) === id);
     if (message && !message.seen) {
       message.seen=true;const folder=state.folders.find(item=>item.name===state.view);
@@ -236,7 +240,7 @@ async function openMessage(id) {
     $("message-from").textContent = preview.from || "—";
     $("message-to").textContent = preview.to || state.user.username;
     $("message-date").textContent = preview.date || "—";
-    $("message-body").textContent = preview.text || t("(Empty message)");
+    messageReader.show(preview);
     $("message-raw").textContent = data.raw || "";
     document.querySelector(".raw-message").open = false;
     $("reader-placeholder").hidden = true;
@@ -357,7 +361,6 @@ document.addEventListener("postplus:language", () => {
   if (state.selected) {
     const preview = state.previews.get(state.selected) || {};
     $("message-subject").textContent = preview.subject || t("(No subject)");
-    $("message-body").textContent = preview.text || t("(Empty message)");
   }
 });
 document.title = t("PostPlus · Your mail, in order");

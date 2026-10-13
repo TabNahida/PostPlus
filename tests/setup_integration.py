@@ -352,9 +352,11 @@ def settings_roundtrip(server, ports, config_path, token, admin):
     old_admin = ports["admin"]
     old_children = child_processes(server.process.pid)
     secret_value = "relay-test-password-" + secrets.token_hex(12)
+    # Explicit staging remains available for operators who plan a later full
+    # restart. Ordinary saves apply automatically in restart_integration.py.
     values = {"ports":{"admin":new_admin}, "log_level":"debug", "smarthost_password":secret_value,
               "blocked_terms":["test blocked phrase"], "web_session_seconds":7200}
-    status, _, saved = http(old_admin, "POST", "/api/admin/config", {"revision":settings["revision"],"values":values}, authorized)
+    status, _, saved = http(old_admin, "POST", "/api/admin/config", {"revision":settings["revision"],"values":values,"apply":False}, authorized)
     assert status == 200 and saved["restart_required"] and saved["admin_url"] == f"http://127.0.0.1:{new_admin}/", (status,saved)
     assert http(old_admin, "POST", "/api/admin/config", request, authorized)[0] == 409, "stale form silently overwrote settings"
     new_config = json.loads(config_path.read_text())
@@ -367,21 +369,21 @@ def settings_roundtrip(server, ports, config_path, token, admin):
     assert backups and any(path.read_bytes() == original for path in backups)
     for backup in backups:
         assert_private(backup)
-    # Saved settings are pending until the operator explicitly restarts.
+    # An explicitly staged save waits for the operator's restart.
     time.sleep(3)
-    assert child_processes(server.process.pid) == old_children, "saving settings unexpectedly restarted services"
+    assert child_processes(server.process.pid) == old_children, "an explicitly staged save restarted services"
     pending = http(old_admin,"GET","/api/admin/config",headers=cookie)
     assert pending[0] == 200 and pending[2]["restart_required"], "saved settings were not marked pending"
     revision = pending[2]["revision"]
-    assert http(old_admin,"POST","/api/admin/config",{"revision":revision,"values":{"smarthost_password":""}},authorized)[0]==200
+    assert http(old_admin,"POST","/api/admin/config",{"revision":revision,"values":{"smarthost_password":""},"apply":False},authorized)[0]==200
     assert json.loads(config_path.read_text())["smarthost_password_file"]==str(secret_file), "blank relay password replaced the stored credential"
     revision = http(old_admin,"GET","/api/admin/config",headers=cookie)[2]["revision"]
     assert http(old_admin,"POST","/api/admin/config",{"revision":revision,"values":{"clear_smarthost_password":True,"smarthost_password":"conflict"}},authorized)[0]==400
-    assert http(old_admin,"POST","/api/admin/config",{"revision":revision,"values":{"clear_smarthost_password":True}},authorized)[0]==200
+    assert http(old_admin,"POST","/api/admin/config",{"revision":revision,"values":{"clear_smarthost_password":True},"apply":False},authorized)[0]==200
     cleared = http(old_admin,"GET","/api/admin/config",headers=cookie)[2]
     assert not cleared["secret_status"]["smarthost_password"] and "smarthost_password_file" not in json.loads(config_path.read_text())
     assert secret_file.is_file(), "password removal broke a configuration backup"
-    assert http(old_admin,"POST","/api/admin/config",{"revision":cleared["revision"],"values":{"smarthost_password":secret_value}},authorized)[0]==200
+    assert http(old_admin,"POST","/api/admin/config",{"revision":cleared["revision"],"values":{"smarthost_password":secret_value},"apply":False},authorized)[0]==200
     new_config=json.loads(config_path.read_text())
     assert_ports_closed({"pending_admin":new_admin})
     request_stop(server.process.pid)
@@ -409,7 +411,7 @@ def settings_roundtrip(server, ports, config_path, token, admin):
             assert secret_value not in contents and token not in contents
             if server.token:
                 assert server.token not in contents
-        print("PASS admin settings authorization, CSRF, validation, revisions, private backups/secrets and explicit manual restart", flush=True)
+        print("PASS admin settings authorization, CSRF, validation, revisions, private backups/secrets, explicit staging and manual restart", flush=True)
         return server, children
     except BaseException:
         server.close()
@@ -525,6 +527,7 @@ def run(binaries, directory):
                 assert time.monotonic() < deadline, "setup listener did not start"
                 time.sleep(0.05)
         assert status == 200 and defaults["ok"] is True
+        assert defaults["defaults"]["ports"]["smtp"] == 25
         assert any("setup is required" in line for line in server.lines)
         assert any(f"http://127.0.0.1:{ports['admin']}/setup" in line for line in server.lines)
         assert not any("/setup#token=" in line for line in server.lines)

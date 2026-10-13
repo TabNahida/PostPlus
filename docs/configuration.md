@@ -74,11 +74,13 @@ The settings page reads the current values and a revision of the file. A save:
 2. Checks supported fields, types, ranges, domain, listener addresses, distinct ports, TLS files, and related resource limits.
 3. Writes any new relay password into a private secret file.
 4. Creates a private configuration backup named `<config filename>.backup-<random suffix>` beside the configuration, then replaces the file atomically.
-5. Reports that a manual restart is required and returns the admin and Webmail URLs that will apply afterward. Current services continue running with their existing settings.
+5. Schedules an automatic restart of only the affected services when the native supervisor is available, and returns progress metadata plus the updated admin and Webmail URLs. Unaffected services continue running. Standalone service executables report that a manual restart is required.
 
 A concurrent edit returns a conflict; reload the settings before saving again. Configuration paths (`data_dir`, `web_root`, `log_dir`) are displayed read-only, and service-token configuration is not editable through the API. Save-generated backups and superseded relay-secret files are not automatically pruned. Keep the secrets needed by retained backups; remove obsolete copies deliberately after verifying recovery needs.
 
-To apply a saved change, press **Ctrl+C** in the launcher terminal, wait for all children to exit, then run the same launch command with the same configuration path. That restart closes connections and clears Web sessions. If a changed port is occupied or a dependency fails during startup, the launcher reports the error and stops. Restore the backup or correct the file and run again; automatic rollback is not provided. If you run service executables independently, restart them manually after a save.
+Watch the service-restart panel after saving. Only affected services close their connections and restart. An administration-service restart ends the administration browser session; open its updated address and sign in again to inspect the result. Other service restarts preserve that session. A failed restart is reported without claiming the saved configuration is active. The native supervisor attempts to restore the previous snapshots of affected services, reporting `rolled_back: true` if they are restored; the saved file still contains the new settings, which remain pending. Correct those settings or restore the backup before retrying. If restoration also fails, the group stops. A full systemd relaunch cannot restore the previous process configuration after the supervisor exits.
+
+**Server maintenance → Restart all services** restarts the complete group with the saved configuration. It does not save unsaved form edits. The supplied systemd installation automatically brings PostPlus back after this action. **Save and shut down** saves with automatic application disabled, then stops the service group without restarting it. Independently launched service executables have no supervisor, so restart them manually after a save using the same configuration path.
 
 ### Manual editing
 
@@ -106,7 +108,7 @@ Each PostPlus port must be a distinct integer from **1 to 65535**, even when lis
 | --- | --- | --- |
 | `ports.admin` | `8081` | Administration HTTP/HTTPS; only administrators can sign in. |
 | `ports.web` | `8080` | Webmail HTTP/HTTPS; regular users and administrators. |
-| `ports.smtp` | `2525` | SMTP reception and authenticated submission. Supports STARTTLS. |
+| `ports.smtp` | `25` | SMTP reception and authenticated submission. Supports STARTTLS. |
 | `ports.pop3` | `1110` | POP3 access; supports STLS. |
 | `ports.imap` | `1143` | IMAP command subset; supports STARTTLS. |
 | `ports.auth` | `18081` | Internal authentication RPC. |
@@ -158,7 +160,7 @@ Setup and **Administration → Server settings** include an ACME HTTP-01 certifi
 
 The hostname's public A/AAAA records must reach this server and public **TCP port 80** must reach the temporary PostPlus challenge listener. Open/forward that port and stop any conflicting HTTP server before applying. HTTP-01 does not issue wildcard certificates. Domain/DNS records, firewall rules, privileged-port permissions, and NAT forwarding remain administrator responsibilities. On Linux/macOS, the process account needs permission to bind port 80.
 
-ACME account credentials and issued PEM files are stored privately under `certificates/` beside the configuration file. Private-key contents are never returned through the API. After production issuance, use the returned file paths and save your settings. First-run setup starts the services with those paths; an existing installation needs a manual restart to apply them. A failed request leaves the active certificate unchanged. Request a replacement before expiry, save the new paths and restart; scheduled automatic renewal is not implemented. Use separate parent directories for independent installations' certificate stores.
+ACME account credentials and issued PEM files are stored privately under `certificates/` beside the configuration file. Private-key contents are never returned through the API. After production issuance, use the returned file paths and save your settings. First-run setup starts the services with those paths; an existing supervised installation automatically restarts the affected services when the new paths are saved. Independently launched services require a manual restart. A failed request leaves the active certificate unchanged. Request a replacement before expiry, save the new paths and restart; scheduled automatic renewal is not implemented. Use separate parent directories for independent installations' certificate stores.
 
 Administration and Webmail have separate processes, ports, session stores, and cookie names (`pp_admin_session` and `pp_session`). Cookies are HttpOnly and SameSite=Strict, and Secure over HTTPS. A browser still scopes cookies by hostname rather than port; avoid hosting untrusted applications on the same hostname and treat separate ports as routing separation, not a complete browser security boundary.
 
@@ -166,7 +168,7 @@ Administration and Webmail have separate processes, ports, session stores, and c
 
 The web form provides B, KiB, MiB, GiB, and TiB selectors. Configuration files and API payloads store integer bytes. **1 MiB = 1048576 bytes**; **1 GiB = 1073741824 bytes**. Switching display units preserves the exact byte count. Fractional amounts must convert to a whole number of bytes. These limits do not reserve disk space or establish a supported user count.
 
-**Administration → User accounts → Storage quota** supports independent user quotas. An inherited quota follows `max_mailbox_bytes`; a custom quota (1–1125899906842624 bytes) overrides it immediately and is stored in SQLite. All six folders, including Trash and Sent, count toward usage. Moving mail does not free space; permanently deleting it from Trash does. Lowering a quota below existing usage preserves mail and blocks further growth. Saving global defaults requires a restart as usual.
+**Administration → User accounts → Storage quota** supports independent user quotas. An inherited quota follows `max_mailbox_bytes`; a custom quota (1–1125899906842624 bytes) overrides it immediately and is stored in SQLite. All six folders, including Trash and Sent, count toward usage. Moving mail does not free space; permanently deleting it from Trash does. Lowering a quota below existing usage preserves mail and blocks further growth. Saving global defaults automatically restarts affected services when supervised; standalone services require a manual restart.
 
 | Field | Default | Browser-validated range | Meaning |
 | --- | --- | --- | --- |
@@ -289,7 +291,7 @@ For a new server, use the wizard instead of hand-creating this file. This abbrev
   "ports": {
     "admin": 8081,
     "web": 8080,
-    "smtp": 2525,
+    "smtp": 25,
     "pop3": 1110,
     "imap": 1143,
     "auth": 18081,

@@ -70,6 +70,7 @@ class Suite:
 
     def start(self, service):
         log = (self.directory / f"{service}.log").open("ab")
+        log_offset = log.tell()
         self.files.append(log)
         binary = self.binaries / (f"postplus-{service}" + (".exe" if os.name == "nt" else ""))
         child = subprocess.Popen([str(binary), "--config", str(self.path)], env=self.env,
@@ -80,6 +81,16 @@ class Suite:
         while time.monotonic() < deadline:
             if child.poll() is not None:
                 raise RuntimeError(f"{service} exited: {(self.directory / f'{service}.log').read_text(errors='replace')}")
+            if service == "delivery":
+                # Its listening socket is an exclusive worker lock, not an RPC
+                # listener. Read readiness from this start's log instead of
+                # filling an unaccepted TCP backlog with connection probes.
+                with (self.directory / "delivery.log").open("rb") as output:
+                    output.seek(log_offset)
+                    if b"queue worker started" in output.read():
+                        return
+                time.sleep(0.05)
+                continue
             try:
                 with socket.create_connection(("127.0.0.1", self.ports[service]), timeout=0.2):
                     return
@@ -215,7 +226,8 @@ def run(s):
     for service in ("web", "admin"):
         assert s.http(service, "GET", "/favicon.svg")[0] == 200
         for asset, media in (("preferences.js", "application/javascript"),
-                             ("preferences.css", "text/css"), ("icons.svg", "image/svg+xml")):
+                             ("preferences.css", "text/css"), ("icons.svg", "image/svg+xml"),
+                             ("mail-reader.js", "application/javascript"), ("mail-reader.css", "text/css")):
             status, asset_headers, content = s.http(service, "GET", "/" + asset)
             assert status == 200 and content and asset_headers.get("Content-Type", "").startswith(media), (service, asset, status)
     assert s.http("admin", "GET", "/")[0] == 200
@@ -315,7 +327,11 @@ def main():
                         "--bin-dir", str(binaries)], check=True)
         subprocess.run([os.sys.executable, str(ROOT / "tests/mailbox_web_integration.py"),
                         "--bin-dir", str(binaries)], check=True)
+        subprocess.run([os.sys.executable, str(ROOT / "tests/mail_rendering_integration.py"),
+                        "--bin-dir", str(binaries)], check=True)
         subprocess.run([os.sys.executable, str(ROOT / "tests/password_policy_integration.py"),
+                        "--bin-dir", str(binaries)], check=True)
+        subprocess.run([os.sys.executable, str(ROOT / "tests/api_keys_integration.py"),
                         "--bin-dir", str(binaries)], check=True)
         subprocess.run([os.sys.executable, str(ROOT / "tests/maintenance_integration.py"),
                         "--bin-dir", str(binaries)], check=True)
@@ -323,11 +339,15 @@ def main():
                         "--bin-dir", str(binaries)], check=True)
         subprocess.run([os.sys.executable, str(ROOT / "tests/protocol_security.py"),
                         "--bin-dir", str(binaries)], check=True)
+        subprocess.run([os.sys.executable, str(ROOT / "tests/inbound_smtp_integration.py"),
+                        "--bin-dir", str(binaries)], check=True)
         subprocess.run([os.sys.executable, str(ROOT / "tests/http_security.py"),
                         "--bin-dir", str(binaries)], check=True)
         subprocess.run([os.sys.executable, str(ROOT / "tests/setup_integration.py"),
                         "--bin-dir", str(binaries)], check=True)
         subprocess.run([os.sys.executable, str(ROOT / "tests/direct_setup_integration.py"),
+                        "--bin-dir", str(binaries)], check=True)
+        subprocess.run([os.sys.executable, str(ROOT / "tests/restart_integration.py"),
                         "--bin-dir", str(binaries)], check=True)
         subprocess.run([os.sys.executable, str(ROOT / "tests/setup_options_integration.py"),
                         "--bin-dir", str(binaries)], check=True)

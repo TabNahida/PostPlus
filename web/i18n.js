@@ -2,6 +2,14 @@
 // Only an explicit choice is persisted. A fresh browser always starts in English.
 window.PostPlusI18n = (() => {
   const chinese = {
+    "Forwarded message":"转发邮件",
+    "Formatted message (scroll to read)":"格式化邮件（滚动阅读）",
+    "Show formatted message":"查看格式化邮件",
+    "Show plain text":"查看纯文本",
+    "Load remote images":"加载远程图片",
+    "Remote images are blocked. Loading them contacts external servers and may reveal that you opened this message.":"远程图片已阻止。加载图片会联系外部服务器，并可能让发件人知道你已打开邮件。",
+    "Remote image blocked":"远程图片已阻止",
+    "Image unavailable":"图片无法显示",
     "PostPlus · Your mail, in order":"PostPlus · 邮件，井然有序", "PostPlus home":"PostPlus 首页", "YOUR MAIL. YOUR SPACE.":"你的邮箱，你的空间。", "A place for every message.":"每一封来信，都有自己的位置。", "From the first hello to the next good news.":"从第一句问候，到下一个好消息。", "C++20 · OPEN SOURCE":"C++20 · 开源", "Language":"语言", "WELCOME BACK":"欢迎回来", "Sign in to your mailbox":"回到你的邮箱", "Use the account provided by your administrator.":"使用管理员分配的账号登录。", "Email address":"邮箱地址", "Password":"密码", "Sign in":"登录", "Need an account or a password reset? Contact your mail administrator.":"需要账号或重置密码？请联系邮箱管理员。", "Simple communication. Your control.":"简单沟通，自在掌控。", "Compose":"写邮件", "WORKSPACE":"工作空间", "Mailbox navigation":"邮箱导航", "Inbox":"收件箱", "Administration":"管理后台", "Make room for what matters.":"留一点空间，给重要的消息。", "Sign out":"退出登录", "YOUR INBOX":"你的收件箱", "Ready":"准备就绪", "Refresh":"刷新", "Message list":"邮件列表", "All messages":"全部邮件", "No messages yet":"还没有新邮件", "New messages will appear here.":"新消息到达后，会出现在这里。", "Message content":"邮件内容", "A LITTLE ROOM TO READ":"留一点阅读的空间", "Open a message. Start a conversation.":"打开一封邮件，开始一段对话。", "Choose a message from the list.":"从列表选择一封来信。", "← Back to messages":"← 返回列表", "Delete message":"删除邮件", "From":"发件人", "To":"收件人", "Date":"时间", "View raw message / MIME":"查看原始邮件 / MIME", "SERVER ADMINISTRATION":"服务器管理", "Messages":"邮件总数", "Stored mail":"已存储的来信", "Queued":"待投递", "Awaiting delivery":"等待后台投递处理", "Storage":"邮件空间", "Mail content size":"当前邮件内容大小", "User accounts":"用户账号", "Manage accounts and administrator access.":"管理用户账号与管理员权限。", "＋ Create user":"＋ 新建用户", "Role":"角色", "Actions":"操作", "Delivery queue":"投递队列", "Up to 100 pending or quarantined jobs.":"最多显示 100 个待处理或隔离任务。", "Recipient":"收件人", "Status":"状态", "Attempts":"尝试次数", "Reason":"原因", "No messages in the queue.":"当前没有排队的邮件。", "Service logs":"服务日志", "Recent server events, newest first.":"最近的服务器事件，按时间倒序显示。", "Refresh logs":"刷新日志", "Service":"服务", "Level":"级别", "All services":"全部服务", "All levels":"全部级别", "Debug":"调试", "Info":"信息", "Warning":"警告", "Error":"错误", "Time":"时间", "Process ID":"进程 ID", "Event":"事件", "No events match these filters.":"没有符合筛选条件的日志。", "NEW MESSAGE":"新邮件", "Compose a message":"写一封邮件", "Close compose window":"关闭写邮件窗口", "Separate email addresses with commas":"多个邮箱使用逗号分隔", "Subject":"主题", "What is it about?":"关于……", "Message":"正文", "Hello,":"你好，", "Send from your signed-in account":"以当前账号发送", "Send message ↗":"发送邮件 ↗", "ACCOUNT MANAGEMENT":"账号管理", "Create user":"新建用户", "Close account window":"关闭账号窗口", "New password":"新密码", "At least 8 characters.":"至少 8 个字符。", "Grant administrator access":"授予管理员权限", "Cancel":"取消", "Save account":"保存账号", "Delete this message?":"删除这封邮件？", "The message will be permanently deleted from the server.":"邮件将从服务器永久删除。", "Delete permanently":"永久删除", "Cannot connect to the server. Check your connection and try again.":"暂时无法连接服务器，请检查网络后重试。", "The server returned an unreadable response.":"服务器返回了无法读取的响应。", "Your session has expired. Please sign in again.":"登录已过期，请重新登录。", "The request failed. Please try again.":"请求失败，请稍后重试。", "Message #{id}":"邮件 #{id}", "Unread, {title}":"未读，{title}", "Read":"已读", "Unread":"未读", "{count} message":"{count} 封邮件", "{count} messages":"{count} 封邮件", "Syncing…":"正在同步…", "Updated at {time}":"更新于 {time}", "Sync failed":"同步失败", "(No subject)":"（无主题）", "(Empty message)":"（空白邮件）", "Enter at least one recipient email address.":"请填写至少一个收件人邮箱。", "Your message has been queued for delivery.":"邮件已加入投递队列。", "Message deleted.":"邮件已删除。", "Administrator":"管理员", "User":"普通用户", "Reset password":"重置密码", "Reset password for {username}":"重置 {username} 的密码", "Pending":"等待投递", "Quarantined":"已隔离", "Password updated. Sign in with your new password.":"密码已更新，请使用新密码登录。", "Password updated. This user's sessions have been revoked.":"密码已更新，该用户的登录会话已失效。", "User account created.":"用户账号已创建。", "Loading logs…":"正在读取日志…", "Showing {count} recent events.":"显示最近 {count} 条事件。", "Showing {count} recent events. Older events are omitted.":"显示最近 {count} 条事件，更早的事件已省略。",
     "Use application/json for this request.":"请求必须使用 JSON 格式。", "A JSON object is required.":"请求需要一个 JSON 对象。", "Enter a full email address.":"请输入完整的邮箱地址。", "Passwords must contain at least 8 characters.":"密码必须至少包含 8 个字符。", "Invalid request data.":"请求数据无效。", "A required service is unavailable. Please retry.":"所需的服务暂不可用，请稍后重试。", "Too many sign-in attempts. Try again in one minute.":"登录尝试过多，请在一分钟后重试。", "HTTPS is required to access your account.":"必须使用 HTTPS 访问账号。", "Sign in to continue.":"请先登录。", "Security token is missing or expired. Refresh this page.":"安全令牌缺失或已过期，请刷新页面。", "Session capacity reached. Please try again later.":"当前登录会话已达上限，请稍后重试。", "Page not found.":"找不到页面。", "Invalid message ID.":"邮件标识无效。", "Administrator access is required.":"需要管理员权限。", "Account addresses must use the configured server domain.":"账号地址必须使用服务器配置的域名。", "API route not found.":"找不到 API 接口。", "Provide between 1 and 100 recipient addresses.":"请输入 1 至 100 个收件人地址。", "Recipient addresses must be strings.":"收件人地址格式无效。", "Invalid recipient address.":"收件人地址无效。", "External delivery is unavailable until an administrator configures a smarthost.":"管理员配置出站中继服务器后才能发送外部邮件。", "The message contains invalid headers or content.":"邮件头或正文内容无效。", "The encoded message exceeds the server size limit.":"编码后的邮件超出服务器大小限制。", "The message was rejected by the server mail filter.":"邮件被服务器过滤系统拒绝。", "Unable to load messages.":"无法读取邮件列表。", "Message not found.":"找不到邮件。", "Unable to update message flags.":"无法更新邮件标记。", "Unable to delete message.":"无法删除邮件。", "Unable to load accounts.":"无法读取用户账号。", "Unable to load server statistics.":"无法读取服务器统计信息。", "Unable to inspect the delivery queue.":"无法读取投递队列。", "Unable to create account. This address may already exist.":"无法创建账号，该邮箱地址可能已存在。", "Unable to change password.":"无法修改密码。", "Unable to validate recipients.":"无法验证收件人。", "The message scanning service is unavailable.":"邮件扫描服务暂不可用。", "Unable to queue your message.":"无法将邮件加入投递队列。", "Invalid email address or password.":"邮箱地址或密码错误。", "Invalid username or password.":"邮箱地址或密码错误。", "Unable to load service logs.":"无法读取服务日志。", "Invalid log filter.":"日志筛选条件无效。", "Missing text field: {field}":"缺少文本字段：{field}", "Field is too long: {field}":"字段过长：{field}", "A local recipient account does not exist: {recipient}":"本地收件人账号不存在：{recipient}",
     "PostPlus · First-run setup":"PostPlus · 首次配置", "FIRST-RUN SETUP":"首次配置", "Set up your mail server":"配置你的邮件服务器", "Choose your domain, create the first administrator, and connect your services.":"填写域名，创建首个管理员账号，并配置各项服务。", "Server identity":"服务器信息", "Mail domain":"邮箱域名", "Use the part after @ in your email addresses. For example, example.com.":"填写邮箱地址中 @ 后面的域名，例如 example.com。", "Mail data folder":"邮件数据目录", "PostPlus stores mail, accounts, and service logs in this folder.":"PostPlus 在此目录保存邮件、账号和服务日志。", "First administrator":"首个管理员", "Administrator email":"管理员邮箱", "Use an address on the mail domain above.":"使用上方邮箱域名下的地址。", "Create a password":"设置密码", "Confirm password":"确认密码", "Connections and security":"连接与安全", "Connection mode":"连接模式", "Local only (this computer)":"仅本机访问", "TLS (secure network access)":"TLS（安全网络访问）", "Local mode listens on this computer only. Choose TLS to allow network access.":"本地模式仅允许此电脑访问。需要通过网络访问时请选择 TLS。", "Listen address":"监听地址", "127.0.0.1 is local only. Use 0.0.0.0 to listen on all IPv4 interfaces.":"127.0.0.1 仅允许本机访问；0.0.0.0 监听所有 IPv4 网卡。", "TLS certificate file":"TLS 证书文件", "TLS private key file":"TLS 私钥文件", "Enter paths to existing PEM files on the server. The private key must be readable by PostPlus.":"填写服务器上已有 PEM 文件的路径，确保 PostPlus 可以读取私钥。", "Service ports":"服务端口", "Defaults avoid privileged ports. Use different ports for each service.":"默认端口无需特权权限，每项服务必须使用不同端口。", "Authentication":"认证服务", "Mail storage":"邮件存储", "Mail filter":"邮件过滤", "Mail transfer":"邮件传输", "Webmail and administration":"Webmail 与管理后台", "Delivery lock":"投递锁", "Optional services":"可选服务", "Outgoing mail relay":"出站邮件中继", "A relay (smarthost) sends mail to other domains. Leave blank for local mail only.":"中继服务器（smarthost）负责向其他域名发送邮件。仅使用本地邮件时可留空。", "Relay host":"中继服务器地址", "Port":"端口", "Relay encryption":"中继加密方式", "STARTTLS (recommended)":"STARTTLS（推荐）", "Implicit TLS":"隐式 TLS", "None":"无", "Relay username":"中继用户名", "Password environment variable":"密码环境变量名称", "Set this environment variable before starting PostPlus. Do not enter the relay password here.":"启动 PostPlus 前设置此环境变量，此处不要填写中继密码。", "ClamAV antivirus":"ClamAV 杀毒服务", "Connect an existing ClamAV daemon. Leave the host blank to skip antivirus integration.":"连接已有的 ClamAV 服务。如不接入杀毒服务，可将地址留空。", "ClamAV host":"ClamAV 地址", "Save configuration and start":"保存配置并启动", "Loading setup…":"正在加载配置…", "Saving configuration…":"正在保存配置…", "Your server is configured":"服务器配置完成", "PostPlus is starting. Open Webmail to sign in with your administrator account.":"PostPlus 正在启动。打开 Webmail 后，使用管理员账号登录。", "Open Webmail and administration":"打开 Webmail 与管理后台", "Setup link required. Open the complete setup URL printed by the PostPlus launcher.":"需要配置链接，请打开 PostPlus 主程序输出的完整配置网址。", "Passwords do not match.":"两次输入的密码不一致。", "The setup link is invalid or expired. Use the latest link from the launcher.":"配置链接无效或已过期，请使用主程序输出的最新链接。", "Check the highlighted fields and try again.":"请检查表单字段后重试。", "Enter a valid mail domain.":"请输入有效的邮箱域名。", "The administrator address must belong to your mail domain.":"管理员地址必须属于配置的邮箱域名。", "Choose a password with at least 8 characters.":"请设置至少 8 个字符的密码。", "Enter a valid listen address.":"请输入有效的监听地址。", "Choose a connection mode.":"请选择连接模式。", "Network access requires TLS and secure authentication.":"网络访问必须启用 TLS 和安全认证。", "The TLS certificate or key could not be loaded. Check the server paths and permissions.":"无法加载 TLS 证书或私钥，请检查服务器路径与读取权限。", "The data folder is invalid or cannot be used. Choose an empty folder.":"数据目录无效或不可使用，请选择空目录。", "Each service must use a different port.":"每项服务必须使用不同端口。", "A service port conflicts with the setup server.":"服务端口与配置页面服务冲突。", "Enter a valid environment variable name.":"请输入有效的环境变量名称。", "Choose a valid relay encryption mode. Authentication requires TLS.":"请选择有效的中继加密方式，使用认证时必须启用 TLS。", "Setup is only available from this computer.":"配置页面仅允许在本机访问。", "This setup request is not from the setup page. Reopen the launcher URL.":"配置请求来源无效，请重新打开主程序提供的网址。", "Setup is already saving. Wait for it to finish.":"配置正在保存，请等待完成。", "This server has already been configured.":"此服务器已完成配置。", "The setup request is invalid. Refresh using the launcher URL.":"配置请求无效，请使用主程序提供的网址刷新。", "Could not create the server data or administrator. Check the launcher output and folder permissions.":"无法创建服务器数据或管理员，请检查主程序输出和目录权限。", "Could not save the configuration file. Check the launcher output and file permissions.":"无法保存配置文件，请检查主程序输出和文件权限。", "Setup failed. Check the launcher output before trying again.":"配置失败，请检查主程序输出后重试。", "Ports must be whole numbers from 1 to 65535.":"端口必须为 1 至 65535 之间的整数。"
@@ -548,6 +556,97 @@ window.PostPlusI18n = (() => {
     "Configuration changed while it was being read. Reload the page.":"读取过程中配置已被修改，请重新加载页面。",
     "Load the current DKIM public record in the DNS guide before saving direct delivery.":"保存直接投递配置前，请先在 DNS 向导读取当前 DKIM 公共记录。"
   });
+  Object.assign(chinese, {
+    "API keys":"API 密钥",
+    "SMTP defaults to TCP 25 for Internet mail. Allow inbound TCP 25 and, on Unix, grant the service permission to bind this privileged port.":"互联网收信默认使用 TCP 25。请允许传入 TCP 25，并在 Unix 上授予服务绑定此特权端口的权限。",
+    "Use different ports for each service. A custom SMTP port requires forwarding from public TCP 25.":"每项服务必须使用不同端口。自定义 SMTP 端口需要从公网 TCP 25 转发。",
+    "API key":"API 密钥",
+    "ADMINISTRATION API":"管理 API",
+    "Connect trusted scripts and integrations to the administration API.":"将可信脚本和集成连接到管理 API。",
+    "Each key grants full administrator access and belongs to the administrator who creates it. Treat it like a password. Use HTTPS for remote requests.":"每个密钥拥有完整管理员权限，并归创建它的管理员所有。请像保护密码一样保管它，远程请求必须使用 HTTPS。",
+    "Create API key":"创建 API 密钥",
+    "Name / owner":"名称／所有者",
+    "Key prefix":"密钥前缀",
+    "Created":"创建时间",
+    "Expires":"到期时间",
+    "Last used":"上次使用",
+    "No API keys yet.":"尚未创建 API 密钥。",
+    "Loading API keys…":"正在读取 API 密钥…",
+    "{count} active keys · maximum {limit}":"{count} 个可用密钥 · 最多 {limit} 个",
+    "Active":"可用",
+    "Inactive":"不可用",
+    "Expired":"已到期",
+    "Revoked":"已撤销",
+    "Never expires":"永不到期",
+    "Never used":"尚未使用",
+    "Revoke":"撤销",
+    "Revoke API key {name}":"撤销 API 密钥 {name}",
+    "Close API key window":"关闭 API 密钥窗口",
+    "Key name":"密钥名称",
+    "Use a name that identifies the script or integration. Up to 80 UTF-8 bytes.":"使用能识别脚本或集成的名称，最多 80 个 UTF-8 字节。",
+    "Expires after (days)":"有效期（天）",
+    "Optional: 1–3650 days. Leave blank for no expiry.":"可选：1–3650 天。留空表示永不到期。",
+    "This key can read private mail and change server settings. Create it only for a trusted integration.":"此密钥可以读取私人邮件并更改服务器设置，请仅为可信集成创建。",
+    "Save your API key now":"请立即保存 API 密钥",
+    "The full key is shown only once. Closing this window clears it. Store it in your integration's secret manager.":"完整密钥仅显示这一次，关闭窗口后便会清除。请将它保存到集成的密钥管理器中。",
+    "Copy API key":"复制 API 密钥",
+    "API key copied.":"API 密钥已复制。",
+    "Copy is unavailable. The key is selected; copy it manually.":"无法自动复制，已选中密钥，请手动复制。",
+    "Enter a key name using at most {count} UTF-8 bytes.":"请填写密钥名称，且不超过 {count} 个 UTF-8 字节。",
+    "Choose an expiry from 1 to {count} whole days, or leave it blank.":"请填写 1–{count} 的整数天数，或留空。",
+    "API key created. Its secret is no longer available. Revoke it and create another if needed.":"API 密钥已创建，但完整密钥已清除。如需使用，请撤销后重新创建。",
+    "Revoke this API key?":"撤销此 API 密钥？",
+    "Requests using this key will stop working immediately. This cannot be undone; create a new key to restore access.":"使用此密钥的请求将立即失效。撤销无法恢复，如需重新访问，请创建新密钥。",
+    "Revoke API key":"撤销 API 密钥",
+    "API key revoked.":"API 密钥已撤销。"
+  });
+  Object.assign(chinese, {
+    "Check the API key name or expiry and try again.":"请检查 API 密钥名称或有效期后重试。",
+    "The API key was not found. Refresh the key list.":"找不到此 API 密钥，请刷新密钥列表。",
+    "The server's API key limit has been reached. Review existing keys or contact the server administrator.":"服务器的 API 密钥数量已达上限，请检查现有密钥或联系服务器管理员。",
+    "Use an administrator browser session to manage API keys.":"请使用管理员浏览器会话管理 API 密钥。"
+  });
+  Object.assign(chinese, {
+    "Internet mail arrives on TCP 25. Allow inbound traffic and grant permission to bind this privileged port on Unix. A different port requires forwarding from public TCP 25.":"互联网来信通过 TCP 25 到达。请开放传入流量，并在 Unix 上授予绑定此特权端口的权限。使用其他端口时，必须从公网 TCP 25 转发。",
+    "Wait for the service restart to finish before saving configuration.":"请等待服务重启完成后再保存配置。",
+    "The apply field must be a boolean.":"apply 字段必须为布尔值。",
+    "Wait for the backup or shutdown operation to finish before restarting services.":"请等待备份或关机操作完成后再重启服务。",
+    "Choose a restart mode: changed or all.":"请选择重启模式：changed（按需重启）或 all（全部重启）。",
+    "Start PostPlus with the native postplus launcher to use restart and shutdown.":"请通过 postplus 主程序启动，才能使用重启和关机功能。",
+    "The service group is still starting.":"服务组仍在启动，请稍后重试。",
+    "Wait for the restart operation to finish before shutdown.":"请等待重启操作完成后再关机。",
+    "Restart job not found.":"找不到此重启任务，请重新登录管理后台查看状态。",
+    "Running configuration is unavailable.":"无法读取正在运行的配置，请检查主程序状态。",
+    "Configuration changed before restart; reload and retry.":"重启前配置已被修改，请重新加载后重试。",
+    "Stop PostPlus before changing the data directory.":"修改数据目录前，请先停止 PostPlus。",
+    "A restart operation is already pending or running.":"已有重启操作正在等待或执行，请等待其完成。",
+    "Supervisor control does not match this server.":"主程序控制信息与当前服务器不匹配，请检查启动配置。",
+    "Supervisor state does not match this server.":"主程序状态与当前服务器不匹配，请检查启动配置。",
+    "Saved settings have not been applied. Restart PostPlus to apply them.":"已保存的设置尚未应用，请重启 PostPlus 以应用这些更改。",
+    "Saving validates the configuration and restarts only affected services. Other services continue running.":"保存时会校验配置，并仅重启受影响的服务，其他服务继续运行。",
+    "This standalone service saves settings without restarting. Restart the affected services manually after saving.":"此服务独立运行，保存设置不会自动重启。保存后请手动重启受影响的服务。",
+    "Settings saved. Affected services will restart automatically. Follow the progress below.":"设置已保存，受影响的服务将自动重启，请查看下方进度。",
+    "Settings saved without restarting services.":"设置已保存，服务未重启。",
+    "Settings saved, but automatic restart could not be scheduled. Check service logs and restart the services.":"设置已保存，但无法安排自动重启，请检查服务日志后重启服务。",
+    "Service restart completed. Your current administration session is available.":"服务重启已完成，当前管理会话有效。",
+    "Restart failed. The previous affected services were restored. Saved changes are still pending; correct them before retrying.":"重启失败，受影响的服务已恢复到之前的配置。已保存的更改仍待应用，请修正后再重试。",
+    "Reopen previous administration ↗":"打开原管理网址 ↗",
+    "Settings saved. This standalone service cannot restart automatically. Restart PostPlus manually using the same configuration, then open the updated addresses.":"设置已保存。此独立服务无法自动重启，请使用相同配置手动重启 PostPlus，然后打开更新后的网址。",
+    "Service restart":"服务重启",
+    "Restart all services":"重启全部服务",
+    "Restart the full service group using the saved configuration. With the supplied systemd installation, PostPlus restarts automatically.":"使用已保存的配置重启全部服务。通过附带的 systemd 脚本安装后，PostPlus 会自动重新启动。",
+    "Restart all services?":"重启全部服务？",
+    "All mail and administration connections will close briefly. PostPlus uses the saved configuration; unsaved form edits are not included.":"所有邮件和管理连接将暂时断开。PostPlus 使用已保存的配置，不会应用表单中尚未保存的更改。",
+    "If administration restarts, open its updated address and sign in again. Other service restarts keep your administration session.":"如果管理服务重启，请打开更新后的网址重新登录。其他服务重启时，管理会话会保留。",
+    "Affected services: {services}":"受影响的服务：{services}",
+    "Restarting affected services… Existing connections to those services may close.":"正在重启受影响的服务… 这些服务的现有连接可能断开。",
+    "Services restarted. Open administration and sign in again; its previous session has ended.":"服务已重启，请打开管理后台重新登录，之前的管理会话已失效。",
+    "Affected services restarted. Your administration session remains available.":"受影响的服务已重启，当前管理会话仍然有效。",
+    "Restart failed. Check service logs, correct the saved configuration, and try again.":"重启失败，请检查服务日志、修正已保存的配置后重试。",
+    "Administration is reconnecting. Open the updated administration address and sign in again to check that restarting completed.":"管理服务正在重新连接。请打开更新后的管理网址并重新登录，以确认重启是否完成。",
+    "Restart status needs a new sign-in. Open administration to check the result.":"需要重新登录才能读取重启状态，请打开管理后台检查结果。",
+    "Restart progress could not be confirmed. Open administration or check service logs before retrying.":"无法确认重启进度，重试前请打开管理后台或检查服务日志。"
+  });
   const acmeCodes = {
     ca_dns_failed:"Could not resolve the Let's Encrypt server. Check this server's DNS resolver and Internet connection.",
     ca_connection_failed:"Could not connect to Let's Encrypt. Allow outbound HTTPS (TCP port 443) and check the server's Internet connection.",
@@ -596,6 +695,10 @@ window.PostPlusI18n = (() => {
     document.querySelectorAll("[data-language]").forEach(select => { select.value = language; });
   }
   function error(data) {
+    if(data?.code==="invalid_api_key")return t("Check the API key name or expiry and try again.");
+    if(data?.code==="api_key_not_found")return t("The API key was not found. Refresh the key list.");
+    if(data?.code==="api_key_limit")return t("The server's API key limit has been reached. Review existing keys or contact the server administrator.");
+    if(data?.code==="administrator_required")return t("Administrator access is required.");
     if(data?.code==="password_policy_conflict")return t("The password policy changed. Reload it before saving again.");
     if(data?.code==="invalid_password_policy")return t("Check the password policy fields and try again.");
     if (acmeCodes[data?.code]) return t(acmeCodes[data.code]);

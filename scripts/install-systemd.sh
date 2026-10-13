@@ -139,6 +139,8 @@ User=$service_user
 WorkingDirectory=$(unit_directory "$working_dir")
 ExecStart=:$(unit_quote "$install_dir/postplus") --config $(unit_quote "$config_path")
 Restart=on-failure
+RestartForceExitStatus=75
+Environment=POSTPLUS_SERVICE_MANAGER=systemd
 RestartSec=5s
 KillMode=mixed
 TimeoutStopSec=130s

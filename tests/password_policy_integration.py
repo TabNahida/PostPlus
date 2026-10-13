@@ -154,7 +154,7 @@ def run(s):
     final_policy = save(strong_policy)
     with sqlite3.connect(s.directory / "data/auth.sqlite3") as database:
         before_users = database.execute("SELECT username,salt,password_hash,iterations,admin,created_at FROM users ORDER BY username").fetchall()
-        assert database.execute("PRAGMA user_version").fetchone()[0] == 2
+        assert database.execute("PRAGMA user_version").fetchone()[0] == 3
     assert s.path.read_bytes() == original_config, "Live policy changed the configuration file"
     assert {name: child.pid for name, child in s.children.items()} == pids, "Live policy restarted a process"
     s.stop("auth")
@@ -194,7 +194,7 @@ def migration_and_small_cap(binaries, directory):
         view = s.rpc("auth", op="password_policy_get")
         assert view["policy"] == DEFAULT and view["revision"] == 1 and view["max_password_bytes"] == 12
         with sqlite3.connect(data / "auth.sqlite3") as database:
-            assert database.execute("PRAGMA user_version").fetchone()[0] == 2
+            assert database.execute("PRAGMA user_version").fetchone()[0] == 3
             assert database.execute("SELECT * FROM users").fetchall() == [(username, salt, digest, 600000, 1, 1000000)]
         result = s.rpc("auth", op="password_policy_set", revision=1, policy=dict(DEFAULT, min_length=13))
         assert result["code"] == "invalid_password_policy" and result["errors"] == [dict(field="min_length", code="out_of_range", min=8, max=12)]

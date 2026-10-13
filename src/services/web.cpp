@@ -3,6 +3,7 @@
 #include "postplus/settings.hpp"
 #include "postplus/acme.hpp"
 #include "postplus/maintenance.hpp"
+#include "postplus/restart.hpp"
 
 #include <algorithm>
 #include <charconv>
@@ -121,6 +122,10 @@ bool forbidden_portal_route(const HttpRequest& request) {
         (admin_only && (path.starts_with("/api/messages") || path=="/api/folders" || path=="/api/drafts" || path=="/api/send"));
 }
 
+bool api_key_management_route(const std::string& path) {
+    return path == "/api/admin/api-keys" || path.starts_with("/api/admin/api-keys/");
+}
+
 Json log_query(const Config& config, const std::string& path) {
     std::string service, level;
     std::size_t limit = 100;
@@ -146,27 +151,107 @@ Json log_query(const Config& config, const std::string& path) {
     catch (const std::invalid_argument&) { throw ApiError(400,"Invalid log filters or limit."); }
 }
 
-std::optional<std::string> plain_text(const mime::Part& part) {
-    if (lower(mime::header(part, "content-disposition")).starts_with("attachment")) return std::nullopt;
-    if (part.content_type == "text/plain") return part.body;
-    for (const auto& child : part.parts) {
-        if (auto text = plain_text(child)) return text;
+struct ViewBudget {
+    std::size_t forwarded = 0, images = 0, image_bytes = 0;
+};
+struct ViewBody {
+    std::string text, html;
+    Json forwarded = Json::array(), inline_images = Json::array();
+};
+
+std::string content_id(const mime::Part& part) {
+    auto id = trim(mime::header(part, "content-id"));
+    if (id.size() >= 2 && id.front() == '<' && id.back() == '>') id = id.substr(1, id.size() - 2);
+    return id;
+}
+
+bool attachment(const mime::Part& part) {
+    const auto disposition = mime::header(part, "content-disposition");
+    return lower(trim(disposition.substr(0, disposition.find(';')))) == "attachment" ||
+        !mime::parameter(disposition, "filename").empty() ||
+        !mime::parameter(mime::header(part, "content-type"), "name").empty();
+}
+
+void inline_images(const mime::Part& part, ViewBody& out, ViewBudget& budget) {
+    // Never send active formats such as SVG, or images from an attached message.
+    if (part.content_type == "message/rfc822") return;
+    const auto disposition = lower(trim(mime::header(part, "content-disposition")));
+    if (disposition.starts_with("attachment")) return;
+    const auto id = content_id(part);
+    const bool raster = part.content_type == "image/png" || part.content_type == "image/jpeg" ||
+        part.content_type == "image/gif" || part.content_type == "image/webp";
+    constexpr std::size_t max_image_bytes = 5 * 1024 * 1024;
+    if (raster && !id.empty() && id.size() <= 998 && budget.images < 64 &&
+        part.body.size() <= max_image_bytes - budget.image_bytes) {
+        out.inline_images.push_back({{"cid", id}, {"content_type", part.content_type}, {"data", base64_encode(part.body)}});
+        ++budget.images; budget.image_bytes += part.body.size();
     }
-    return std::nullopt;
+    for (const auto& child : part.parts) inline_images(child, out, budget);
+}
+
+Json part_view(const mime::Part& part, ViewBudget& budget, std::size_t depth);
+
+ViewBody view_body(const mime::Part& part, ViewBudget& budget, std::size_t depth) {
+    ViewBody out;
+    if (part.content_type == "message/rfc822") {
+        if (!part.parts.empty() && budget.forwarded < 32 && depth < 8) {
+            ++budget.forwarded;
+            out.forwarded.push_back(part_view(part.parts.front(), budget, depth + 1));
+        }
+        return out;
+    }
+    if (part.content_type.starts_with("image/")) {
+        inline_images(part, out, budget);
+        return out;
+    }
+    if (attachment(part)) return out;
+    if (part.content_type == "text/plain") out.text = mime::decode_text(part);
+    else if (part.content_type == "text/html") out.html = mime::decode_text(part);
+    else if (part.content_type == "multipart/related" && !part.parts.empty()) {
+        auto start = mime::parameter(mime::header(part, "content-type"), "start");
+        if (start.size() >= 2 && start.front() == '<' && start.back() == '>') start = start.substr(1, start.size() - 2);
+        const mime::Part* root = &part.parts.front();
+        if (!start.empty()) {
+            for (const auto& child : part.parts) if (content_id(child) == start) { root = &child; break; }
+        }
+        out = view_body(*root, budget, depth);
+        for (const auto& child : part.parts) if (&child != root) inline_images(child, out, budget);
+    } else if (part.content_type.starts_with("multipart/")) {
+        const bool alternative = part.content_type == "multipart/alternative";
+        for (const auto& child : part.parts) {
+            auto body = view_body(child, budget, depth);
+            auto merge = [alternative](std::string& target, std::string& value) {
+                if (value.empty()) return;
+                if (alternative || target.empty()) target = std::move(value);
+                else target += "\n" + value;
+            };
+            merge(out.text, body.text); merge(out.html, body.html);
+            for (auto& forward : body.forwarded) out.forwarded.push_back(std::move(forward));
+            for (auto& image : body.inline_images) out.inline_images.push_back(std::move(image));
+        }
+    }
+    return out;
+}
+
+Json part_view(const mime::Part& part, ViewBudget& budget, std::size_t depth) {
+    auto body = view_body(part, budget, depth);
+    return {{"subject", mime::decode_header(mime::header(part, "subject"))},
+            {"from", mime::decode_header(mime::header(part, "from"))},
+            {"to", mime::decode_header(mime::header(part, "to"))},
+            {"date", mime::header(part, "date")},
+            {"text", std::move(body.text)}, {"html", std::move(body.html)},
+            {"forwarded", std::move(body.forwarded)}, {"inline_images", std::move(body.inline_images)}};
 }
 
 Json message_view(const std::string& raw) {
     try {
         auto part = mime::parse(raw);
-        auto text = plain_text(part);
-        return {{"subject", mime::decode_header(mime::header(part, "subject"))},
-                {"from", mime::decode_header(mime::header(part, "from"))},
-                {"to", mime::decode_header(mime::header(part, "to"))},
-                {"date", mime::header(part, "date")},
-                {"text", text.value_or("This message has no readable plain-text part. View the original message below.")}};
+        ViewBudget budget;
+        return part_view(part, budget, 0);
     } catch (const std::exception&) {
         return {{"subject", ""}, {"from", ""}, {"to", ""}, {"date", ""},
-                {"text", "The message could not be decoded. View the original message below."}};
+                {"text", "The message could not be decoded. View the original message below."},
+                {"html", ""}, {"forwarded", Json::array()}, {"inline_images", Json::array()}};
     }
 }
 
@@ -174,6 +259,7 @@ struct WebSession {
     std::string username, csrf, credential_version;
     bool admin = false;
     Clock::time_point expires;
+    std::string api_key_id;
 };
 
 class Web {
@@ -198,6 +284,8 @@ public:
         load_static(root, "/favicon.svg", "favicon.svg", "image/svg+xml");
         load_static(root, "/i18n.js", "i18n.js", "application/javascript; charset=utf-8");
         load_static(root, "/style.css", "style.css", "text/css; charset=utf-8");
+        load_static(root, "/mail-reader.js", "mail-reader.js", "application/javascript; charset=utf-8");
+        load_static(root, "/mail-reader.css", "mail-reader.css", "text/css; charset=utf-8");
     }
 
     HttpResponse handle(const HttpRequest& request) {
@@ -220,7 +308,7 @@ public:
         response.headers["X-Frame-Options"] = "DENY";
         response.headers["Referrer-Policy"] = "no-referrer";
         response.headers["Permissions-Policy"] = "camera=(), microphone=(), geolocation=()";
-        response.headers["Content-Security-Policy"] = "default-src 'none'; script-src 'self'; style-src 'self'; connect-src 'self'; img-src 'self' data:; font-src 'self'; form-action 'self'; base-uri 'none'; frame-ancestors 'none'";
+        response.headers["Content-Security-Policy"] = "default-src 'none'; script-src 'self'; style-src 'self' 'unsafe-inline'; connect-src 'self'; img-src 'self' data: https: http:; frame-src 'self'; font-src 'self'; form-action 'self'; base-uri 'none'; frame-ancestors 'none'";
         return response;
     }
 
@@ -296,6 +384,28 @@ private:
     }
 
     WebSession authenticate(const HttpRequest& request) {
+        // An explicitly supplied credential is authoritative. Never fall back
+        // to a browser cookie when a Bearer credential is invalid or misplaced.
+        if (request.headers.contains("authorization")) {
+            if (!request.encrypted && !request.peer_loopback)
+                throw ApiError(403, "HTTPS is required to use an API key remotely.");
+            const auto path = request.path.substr(0, request.path.find('?'));
+            if (!admin_only || !path.starts_with("/api/admin/"))
+                throw ApiError(401, "API keys are accepted only by the administrator API.");
+            if (api_key_management_route(path))
+                throw ApiError(403, "Use an administrator browser session to manage API keys.");
+            const auto authorization = header(request, "authorization");
+            if (authorization.size() != 74 || lower(authorization.substr(0, 7)) != "bearer ")
+                throw ApiError(401, "Invalid or expired API key.");
+            const auto account = rpc(config_, "auth", {{"op", "api_key_verify"}, {"key", authorization.substr(7)}});
+            require_ok(account, "A required service is unavailable. Please retry.");
+            if (!account.value("valid", false)) throw ApiError(401, "Invalid or expired API key.");
+            WebSession session;
+            session.username = account.at("username").get<std::string>();
+            session.admin = true;
+            session.api_key_id = account.at("id").get<std::string>();
+            return session;
+        }
         require_transport(request);
         auto token = session_cookie(request);
         if (token.size() != 64) throw ApiError(401, "Sign in to continue.");
@@ -319,6 +429,7 @@ private:
     }
 
     void require_csrf(const HttpRequest& request, const WebSession& session) const {
+        if (!session.api_key_id.empty()) return;
         if (!secure_equal(header(request, "x-csrf-token"), session.csrf))
             throw ApiError(403, "Security token is missing or expired. Refresh this page.");
     }
@@ -335,7 +446,7 @@ private:
         if (admin_only && !user.value("admin",false)) throw ApiError(403,"Administrator access is required.");
         auto token = random_hex(32);
         WebSession session{user.at("username").get<std::string>(), random_hex(32), user.at("credential_version").get<std::string>(), user.value("admin", false),
-                           Clock::now() + std::chrono::seconds(session_seconds_)};
+                           Clock::now() + std::chrono::seconds(session_seconds_), {}};
         {
             std::lock_guard lock(mutex_);
             prune(Clock::now());
@@ -431,10 +542,47 @@ private:
         if (request.path.starts_with("/api/admin/")) {
             if (!admin_only) throw ApiError(404,"API route not found.");
             if (!session.admin) throw ApiError(403, "Administrator access is required.");
+            if (!session.api_key_id.empty() && request.method != "GET")
+                log(service_name, "API key " + session.api_key_id + " owned by administrator " + session.username +
+                    " requested " + request.method + " " + path);
+            if (api_key_management_route(path)) {
+                Json command{{"username", session.username}};
+                if (path == "/api/admin/api-keys") {
+                    if (request.method == "GET") command["op"] = "api_key_list";
+                    else if (request.method == "POST") {
+                        const auto input = request_json(request);
+                        for (const auto& item : input.items())
+                            if (item.key() != "name" && item.key() != "expires_in_days")
+                                throw ApiError(400, "Unexpected API key field: " + item.key());
+                        if (input.contains("name")) command["name"] = input.at("name");
+                        if (input.contains("expires_in_days")) command["expires_in_days"] = input.at("expires_in_days");
+                        command["op"] = "api_key_create";
+                    } else throw ApiError(405, "Use GET or POST.");
+                } else {
+                    if (request.method != "DELETE") throw ApiError(405, "Use DELETE to revoke an API key.");
+                    const auto id = path.substr(std::string("/api/admin/api-keys/").size());
+                    if (id.size() != 32 || !std::all_of(id.begin(), id.end(), [](unsigned char ch) {
+                        return (ch >= '0' && ch <= '9') || (ch >= 'a' && ch <= 'f');
+                    })) throw ApiError(400, "Invalid API key ID.");
+                    command["op"] = "api_key_revoke";
+                    command["id"] = id;
+                }
+                auto result = rpc(config_, "auth", command);
+                if (!result.value("ok", false)) {
+                    const auto code = result.value("code", std::string{});
+                    if (code == "invalid_api_key") return json_response(result, 400);
+                    if (code == "api_key_not_found") return json_response(result, 404);
+                    if (code == "api_key_limit") return json_response(result, 409);
+                    if (code == "administrator_required") return json_response(result, 403);
+                    require_ok(result, "Unable to manage API keys.");
+                }
+                return json_response(result, request.method == "POST" ? 201 : 200);
+            }
             if (request.method == "POST" && path == "/api/admin/backup") {
                 (void)request_json(request);
                 std::lock_guard lock(maintenance_mutex_);
                 if (shutting_down_) throw ApiError(409, "The server is shutting down.");
+                if(supervisor_restart_busy(config_)) throw ApiError(409,"Wait for the service restart to finish before starting a backup.");
                 const auto result = backups_->start();
                 log(service_name, "administrator " + session.username + " requested a data backup");
                 return json_response(result, 202);
@@ -452,6 +600,7 @@ private:
                 std::lock_guard lock(maintenance_mutex_);
                 if (shutting_down_) throw ApiError(409, "The server is already shutting down.");
                 if (backups_->busy()) throw ApiError(409, "Wait for the data backup to finish before shutting down.");
+                if(supervisor_restart_busy(config_)) throw ApiError(409,"Wait for the service restart to finish before shutting down.");
                 request_supervisor_shutdown(config_);
                 shutting_down_ = true;
                 log(service_name, "administrator " + session.username + " requested server shutdown");
@@ -528,12 +677,45 @@ private:
                 if (request.method == "POST") {
                     std::lock_guard lock(maintenance_mutex_);
                     if (shutting_down_ || backups_->busy()) throw ApiError(409, "Wait for the backup or shutdown operation to finish before saving configuration.");
-                    return json_response(save_settings(config_, request_json(request)));
+                    if(supervisor_restart_busy(config_)) throw ApiError(409,"Wait for the service restart to finish before saving configuration.");
+                    auto input=request_json(request);
+                    bool apply=true;
+                    if(input.contains("apply")) {
+                        if(!input.at("apply").is_boolean()) throw ApiError(400,"The apply field must be a boolean.");
+                        apply=input.at("apply").get<bool>();
+                        input.erase("apply");
+                    }
+                    auto result=save_settings(config_,input);
+                    result["restart_available"]=supervisor_restart_available(config_);
+                    if(apply && result.at("restart_available").get<bool>()) {
+                        try {
+                            result["restart"]=request_supervisor_restart(config_,Config::from_file(config_.source));
+                            result["restart_required"]=false;
+                        } catch(const MaintenanceError& error) {
+                            result["restart_error"]=error.what();
+                        }
+                    }
+                    return json_response(result);
                 }
+            }
+            if(path=="/api/admin/restart") {
+                if(request.method=="GET") return json_response(supervisor_restart_status(config_,parameter("job_id")));
+                if(request.method=="POST") {
+                    std::lock_guard lock(maintenance_mutex_);
+                    if(shutting_down_ || backups_->busy()) throw ApiError(409,"Wait for the backup or shutdown operation to finish before restarting services.");
+                    const auto input=request_json(request);
+                    if(!input.is_object() || input.size()!=1 || !input.contains("mode") || !input.at("mode").is_string())
+                        throw ApiError(400,"Choose a restart mode: changed or all.");
+                    const auto mode=input.at("mode").get<std::string>();
+                    if(mode!="changed" && mode!="all") throw ApiError(400,"Choose a restart mode: changed or all.");
+                    return json_response(request_supervisor_restart(config_,Config::from_file(config_.source),mode),202);
+                }
+                throw ApiError(405,"Use GET or POST.");
             }
             if(request.path=="/api/admin/dkim" && request.method=="POST") {
                 std::lock_guard lock(maintenance_mutex_);
                 if(shutting_down_ || backups_->busy()) throw ApiError(409,"Wait for the backup or shutdown operation to finish before saving configuration.");
+                if(supervisor_restart_busy(config_)) throw ApiError(409,"Wait for the service restart to finish before saving configuration.");
                 return json_response(prepare_dkim(Config::from_file(config_.source),request_json(request)));
             }
             if (request.method == "GET" && (request.path == "/api/admin/logs" || request.path.starts_with("/api/admin/logs?")))

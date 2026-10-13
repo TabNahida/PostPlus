@@ -1,5 +1,5 @@
 set_project("PostPlus")
-set_version("0.2.0")
+set_version("0.2.1")
 set_xmakever("2.9.8")
 set_languages("c++20")
 set_warnings("allextra")
@@ -28,6 +28,7 @@ target("postplus-core")
     else
         add_syslinks("pthread", {public = true})
         if is_plat("macosx") then
+            add_syslinks("iconv", {public = true})
             add_frameworks("Security", "CoreFoundation", {public = true})
         end
     end
@@ -120,6 +121,12 @@ target("postplus-process-tests")
     add_files("tests/process_test.cpp")
     add_deps("postplus-core")
     add_tests("process")
+
+target("postplus-restart-tests")
+    set_kind("binary")
+    add_files("tests/restart_test.cpp")
+    add_deps("postplus-core")
+    add_tests("restart")
 
 target("postplus-acme-tests")
     set_kind("binary")
