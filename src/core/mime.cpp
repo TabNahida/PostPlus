@@ -14,6 +14,9 @@
 #include <windows.h>
 #else
 #include <iconv.h>
+#ifdef __APPLE__
+#include <CoreFoundation/CoreFoundation.h>
+#endif
 #endif
 
 namespace postplus::mime {
@@ -282,6 +285,33 @@ std::string system_text(std::string_view input, const Charset& charset) {
         if (result != static_cast<std::size_t>(-1)) continue;
         if (error == E2BIG) continue;
         if (error != EILSEQ && error != EINVAL) return display_fallback(input);
+#ifdef __APPLE__
+        // Apple's iconv can reject valid GB18030 four-byte sequences. Its
+        // native string converter supports those sequences, including the
+        // supplementary planes. Keep iconv's fast path for all other text.
+        if (charset.codepage == 54936 && remaining >= 4) {
+            const auto* bytes = reinterpret_cast<const UInt8*>(source);
+            if (bytes[0] >= 0x81 && bytes[0] <= 0xfe && bytes[1] >= 0x30 && bytes[1] <= 0x39 &&
+                bytes[2] >= 0x81 && bytes[2] <= 0xfe && bytes[3] >= 0x30 && bytes[3] <= 0x39) {
+                const auto text = CFStringCreateWithBytes(kCFAllocatorDefault, bytes, 4,
+                    kCFStringEncodingGB_18030_2000, false);
+                if (text) {
+                    UInt8 converted[8]; CFIndex used = 0;
+                    const auto length = CFStringGetLength(text);
+                    const auto count = CFStringGetBytes(text, CFRangeMake(0, length),
+                        kCFStringEncodingUTF8, 0, false, converted, sizeof(converted), &used);
+                    CFRelease(text);
+                    if (length > 0 && count == length && used > 0) {
+                        append_display(out, std::string_view(reinterpret_cast<const char*>(converted),
+                            static_cast<std::size_t>(used)));
+                        source += 4; remaining -= 4;
+                        iconv(descriptor, nullptr, nullptr, nullptr, nullptr);
+                        continue;
+                    }
+                }
+            }
+        }
+#endif
         append_scalar(out, 0xfffd);
         ++source; --remaining;
         iconv(descriptor, nullptr, nullptr, nullptr, nullptr);

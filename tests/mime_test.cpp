@@ -36,6 +36,11 @@ int main() {
         const TextCase cases[] = {
             {"GBK", gbk, chinese},
             {"GB18030", gbk + "\x95\x32\x82\x36", chinese + supplementary},
+            {"GB18030", "\x81\x30\x81\x30", "\xc2\x80"},
+            {"GB18030", "\x90\x30\x81\x30", "\xf0\x90\x80\x80"},
+            {"GB18030", "\xe3\x32\x9a\x35", "\xf4\x8f\xbf\xbf"},
+            {"GB18030", std::string("\x95\x32\x82\x36") + "\xff" + gbk + "\x95\x32\x82\x36",
+                supplementary + replacement + chinese + supplementary},
             {"Big5", "\xa4\xa4\xa4\xe5", chinese},
             {"WINDOWS-1252", "caf\xe9 \x97 \x80", "caf\xc3\xa9 \xe2\x80\x94 \xe2\x82\xac"},
             {"ISO-8859-1", "caf\xe9\x80", "caf\xc3\xa9\xc2\x80"},
