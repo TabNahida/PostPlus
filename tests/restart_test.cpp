@@ -6,6 +6,7 @@
 #include <iostream>
 #include <mutex>
 #include <thread>
+#include <utility>
 #ifdef _WIN32
 #include <windows.h>
 #endif
@@ -35,6 +36,15 @@ void plan(const Config& current, const std::string& key, Json value, std::vector
     next.values[key] = std::move(value);
     check(restart_plan(current, next) == expected, "incorrect policy restart scope");
 }
+// macOS 15's standard library does not provide jthread. Retain automatic
+// joining with the std::thread interface supported by every release target.
+struct TestThread {
+    std::thread value;
+    template<class F> explicit TestThread(F&& operation) : value(std::forward<F>(operation)) {}
+    TestThread(TestThread&&) noexcept = default;
+    ~TestThread() { if (value.joinable()) value.join(); }
+    void join() { value.join(); }
+};
 #ifdef _WIN32
 struct TestHandle {
     HANDLE value = INVALID_HANDLE_VALUE;
@@ -71,7 +81,7 @@ void concurrent_state_reads(SupervisorControl& control, const Config& initial,
         check(blocker.value != INVALID_HANDLE_VALUE, "cannot establish transient publication conflict");
         std::atomic<bool> started = false;
         std::exception_ptr failure;
-        std::jthread writer([&] {
+        TestThread writer([&] {
             started.store(true);
             try { control.restart_running(request); } catch (...) { failure = std::current_exception(); }
         });
@@ -95,7 +105,7 @@ void concurrent_state_reads(SupervisorControl& control, const Config& initial,
         if (!failure) failure = std::current_exception();
         stop.store(true);
     };
-    std::vector<std::jthread> readers;
+    std::vector<TestThread> readers;
     for (unsigned i = 0; i < 4; ++i) readers.emplace_back([&] {
         ++started;
         try {
