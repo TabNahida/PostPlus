@@ -1,4 +1,5 @@
 #include <postplus/core.hpp>
+#include <postplus/forwarding.hpp>
 #include <postplus/process.hpp>
 #include <algorithm>
 #include <csignal>
@@ -31,10 +32,12 @@ void process(const Config& config, const Json& job) {
         return;
     }
     const auto local_domain = lower(config.text("domain","localhost"));
-    if (recipient.substr(recipient.find('@') + 1) == local_domain) {
-        const auto exists = require_ok(rpc(config,"auth",{{"op","exists"},{"username",recipient}}));
-        if (!exists.value("exists",false)) throw std::runtime_error("local recipient no longer exists");
-        require_ok(rpc(config,"storage",{{"op","deliver"},{"username",recipient},{"raw",raw},{"delivery_id",id}}));
+    if (job.value("local_route",false) || recipient.substr(recipient.find('@') + 1) == local_domain) {
+        const auto route = resolve_local_recipient(config,recipient,id);
+        if (!route.value("exists",false)) throw std::runtime_error("local destination mailbox no longer exists");
+        Json request{{"op","deliver"},{"username",route.at("destination")},{"raw",raw},{"delivery_id",id}};
+        if (job.contains("submission_id")) request["submission_id"] = job.at("submission_id");
+        require_ok(rpc(config,"storage",request));
     } else {
         const auto sent=rpc(config,"transfer",{{"op","send"},{"sender",job.at("sender")},{"recipient",recipient},{"raw",raw}});
         if(!sent.value("ok",false) && sent.value("permanent",false)) {

@@ -88,8 +88,11 @@ def run(s):
         for bad in ("0", "1,", "1::3", "4294967296", "1:0", "1,,2"):
             rejected_imap(client, client.uid, "fetch", bad, "(FLAGS)")
             rejected_imap(client, client.uid, "search", None, "UID", bad)
-        for bad in ("(BODYSTRUCTURE)", "(BODY[99])", "(BODY[]<0.0>)", "(FLAGS UNKNOWN)", "(ALL)"):
+        for bad in ("(BODY[]<0.0>)", "(FLAGS UNKNOWN)", "(BODY[0])"):
             rejected_imap(client, client.fetch, "1", bad)
+        assert client.fetch("1", "(BODYSTRUCTURE)")[0] == "OK"
+        assert client.fetch("1", "(ALL)")[0] == "OK"
+        assert client.fetch("1", "(BODY.PEEK[99])")[1] == [b"1 (BODY[99] NIL)"]
         assert client.fetch("1", "(BODY.PEEK[HEADER.FIELDS (SUBJECT)] BODY.PEEK[TEXT]<0.5>)")[0] == "OK"
         assert not s.rpc("storage", op="list", username=bob)["messages"][0]["seen"]
         status, fetch = client.fetch("1", "(BODY[])")
@@ -100,7 +103,7 @@ def run(s):
         assert not s.rpc("storage", op="list", username=bob)["messages"][1]["seen"]
         assert client.close()[0] == "OK"
         assert client.select()[0] == "OK"
-        rejected_imap(client, client.store, "1", "+FLAGS", "(\\Flagged)")
+        rejected_imap(client, client.store, "1", "+FLAGS", "(\\Unsupported)")
         assert client.uid("store", f"{uids[-1]}:{uids[0]}", "+FLAGS.SILENT", "(\\Deleted)")[0] == "OK"
         assert client.expunge()[0] == "OK"
         assert client.uid("search", None, "ALL")[1] == [b""]

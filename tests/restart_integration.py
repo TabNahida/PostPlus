@@ -56,7 +56,8 @@ def provision(binaries, directory, label="selective", environment=None, tls=Fals
         token = Path(config["service_token_file"]).read_text().strip()
         verify_services(server, ports, token, "admin@localhost", tls=context)
         owner = browser(ports["admin"], context)
-        status, _, issued = http(ports["admin"], "POST", "/api/admin/api-keys", {"name": "Restart integration"}, owner, context=context)
+        from api_keys_integration import ADMIN_PERMISSIONS
+        status, _, issued = http(ports["admin"], "POST", "/api/admin/api-keys", {"name": "Restart integration", "permissions": ADMIN_PERMISSIONS}, owner, context=context)
         assert status == 201 and issued["ok"], (status, issued)
         return server, ports, path, token, owner, {"Authorization": "Bearer " + issued["key"]}
     except BaseException:

@@ -38,6 +38,7 @@ async function main(){
   const f=fixture();
   assert.equal(f.inputs.hostname.value,"mail.example.com","Mail server uses a subdomain; root website remains independent");
   assert.deepEqual(f.domains,["mail.example.com"]);
+  const mailDomain=fixture({domain:"mail.example.com"});assert.equal(mailDomain.inputs.hostname.value,"mail.example.com","Do not duplicate an existing mail hostname prefix");assert.equal(mailDomain.copy("mx","Value / content").value,"mail.example.com.");
   assert.equal(f.copy("mx","Name / host").value,"@");
   assert.equal(f.copy("mx","Value / content").value,"mail.example.com.");
   assert.equal(f.card("a").dataset.status,"not_configured","Never fabricate an IP");

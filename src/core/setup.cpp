@@ -63,11 +63,11 @@ std::string text_field(const Json& input, const std::string& name, const std::st
     return value;
 }
 
-int port_field(const Json& input, const std::string& name, int fallback) {
+int port_field(const Json& input, const std::string& name, int fallback, bool optional = false) {
     if (!input.contains(name)) return fallback;
     if (!input.at(name).is_number_integer()) throw SetupError("invalid_port", "Ports must be whole numbers from 1 to 65535.");
     const auto value = input.at(name).get<std::int64_t>();
-    if (value < 1 || value > 65535) throw SetupError("invalid_port", "Ports must be whole numbers from 1 to 65535.");
+    if (value < (optional ? 0 : 1) || value > 65535) throw SetupError("invalid_port", optional ? "TLS client ports must be 0 (disabled) or whole numbers from 1 to 65535." : "Ports must be whole numbers from 1 to 65535.");
     return static_cast<int>(value);
 }
 
@@ -162,7 +162,8 @@ Json setup_defaults(const SetupOptions& options) {
         {"allow_insecure_auth", true}, {"admin_username", "admin@localhost"},
         {"tls_certificate", ""}, {"tls_private_key", ""},
         {"ports", {{"auth", 18081}, {"storage", 18082}, {"filter", 18083}, {"transfer", 18084},
-            {"smtp", 25}, {"pop3", 1110}, {"imap", 1143}, {"web", 8080}, {"admin", options.port==8080?8081:options.port}, {"delivery_lock", 18085}}},
+            {"smtp", 25}, {"submission", 587}, {"smtps", 465}, {"pop3", 110}, {"pop3s", 995}, {"imap", 143}, {"imaps", 993},
+            {"web", 80}, {"admin", options.port==8080?8081:options.port}, {"delivery_lock", 18085}}},
         {"smarthost_host", ""}, {"smarthost_port", 587}, {"smarthost_tls", "starttls"},
         {"smarthost_username", ""}, {"smarthost_password_env", "POSTPLUS_SMARTHOST_PASSWORD"},
         {"clamav_host", ""}, {"clamav_port", 3310}};
@@ -178,10 +179,12 @@ Json setup_defaults(const SetupOptions& options) {
     if (base.values.contains("ports") && base.values.at("ports").is_object())
         for (const auto& entry : base.values.at("ports").items())
             if (result["ports"].contains(entry.key())) result["ports"][entry.key()]=entry.value();
+    if (!base.values.contains("ports") || !base.values.at("ports").contains("web"))
+        result["ports"]["web"] = result.at("tls_certificate").get<std::string>().empty() ? 80 : 443;
     if (base.values.contains("delivery_lock_port")) result["ports"]["delivery_lock"]=base.values.at("delivery_lock_port");
     if (!base.text("data_dir").empty()) result["data_dir"]=absolute_field(base.text("data_dir"),parent).string();
     result["outbound_mode"]=base.outbound_mode();
-    result["mail_hostname"]=base.text("mail_hostname",result.at("domain").get<std::string>()=="localhost"?"localhost":"mail."+result.at("domain").get<std::string>());
+    result["mail_hostname"]=base.mail_hostname();
     for (const auto* key : {"tls_certificate","tls_private_key"})
         if (!result.at(key).get<std::string>().empty()) result[key]=absolute_field(result.at(key).get<std::string>(),parent).string();
     result["admin_username"]="admin@"+result.at("domain").get<std::string>();
@@ -246,8 +249,11 @@ Config validate_input(const Json& input, const Json& defaults, const SetupOption
     if (!ports.is_object()) throw SetupError("invalid_port", "Service ports must be a JSON object.");
     std::set<int> assigned;
     for (const auto& entry : defaults.at("ports").items()) {
-        const int port = port_field(ports, entry.key(), entry.value().get<int>());
-        if (!assigned.insert(port).second) throw SetupError("duplicate_port", "Every PostPlus service must use a different port.");
+        const auto& name = entry.key();
+        const bool optional = name == "submission" || name == "smtps" || name == "pop3s" || name == "imaps";
+        const int fallback = name == "web" && !ports.contains("web") ? (certificate.empty() ? 80 : 443) : entry.value().get<int>();
+        const int port = port_field(ports, name, fallback, optional);
+        if (port && !assigned.insert(port).second) throw SetupError("duplicate_port", "Every PostPlus listener must use a different nonzero port.");
         if (entry.key() == "delivery_lock") values["delivery_lock_port"] = port;
         else values["ports"][entry.key()] = port;
     }
@@ -260,6 +266,8 @@ Config validate_input(const Json& input, const Json& defaults, const SetupOption
     for (const auto& entry : defaults.at("ports").items()) {
         const auto& service = entry.key();
         const int port = service == "delivery_lock" ? values.at("delivery_lock_port").get<int>() : config.port(service);
+        const bool optional = service == "submission" || service == "smtps" || service == "pop3s" || service == "imaps";
+        if (!port || (optional && certificate.empty())) continue;
         if (port == options.port) continue; // Released when setup completes.
         const bool internal = service == "auth" || service == "storage" || service == "filter" || service == "transfer" || service == "delivery_lock";
         std::error_code port_error;
@@ -348,6 +356,7 @@ bool run_setup(const SetupOptions& options, SetupProvision provision) {
         {"i18n.js", "application/javascript; charset=utf-8"}, {"settings.js", "application/javascript; charset=utf-8"},
         {"size.js", "application/javascript; charset=utf-8"}, {"acme.js", "application/javascript; charset=utf-8"},
         {"address.js", "application/javascript; charset=utf-8"}, {"dns.js", "application/javascript; charset=utf-8"},
+        {"mail-clients.js", "application/javascript; charset=utf-8"},
         {"preferences.js", "application/javascript; charset=utf-8"}, {"preferences.css", "text/css; charset=utf-8"},
         {"icons.svg", "image/svg+xml"},
         {"favicon.svg", "image/svg+xml"}, {"style.css", "text/css; charset=utf-8"}}) {
@@ -440,7 +449,7 @@ bool run_setup(const SetupOptions& options, SetupProvision provision) {
                 return error_response("not_found", "Not found.", 404);
             }
             if (request.method == "GET") return protected_response(json_response({{"ok", true}, {"defaults", defaults},
-                {"schema",settings_schema(Config{})},{"completing_existing",options.existing_config.has_value()}}));
+                {"schema",settings_schema(Config{defaults,{}})},{"completing_existing",options.existing_config.has_value()}}));
             if (request.method != "POST") return error_response("method_not_allowed", "Use GET or POST.", 405);
             if (trim(lower(header(request, "content-type")).substr(0, header(request, "content-type").find(';'))) != "application/json")
                 return error_response("invalid_content_type", "Use application/json for setup.", 415);

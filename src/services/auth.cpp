@@ -1,6 +1,7 @@
 #include <postplus/core.hpp>
 #include <postplus/data_lock.hpp>
 #include <postplus/password_policy.hpp>
+#include <postplus/access.hpp>
 #include <openssl/evp.h>
 #include <openssl/rand.h>
 #include <sqlite3.h>
@@ -10,6 +11,7 @@
 #include <chrono>
 #include <climits>
 #include <mutex>
+#include <set>
 #include <stdexcept>
 
 namespace postplus {
@@ -130,7 +132,9 @@ class AuthStore {
 public:
     explicit AuthStore(const Config& config)
         : rounds_(config.number("auth_pbkdf2_iterations", 600000)),
-          max_password_(config.number("max_password_bytes", 1024)), dummy_salt_(salt()) {
+          max_password_(config.number("max_password_bytes", 1024)), dummy_salt_(salt()),
+          domain_(lower(trim(config.text("domain", "localhost")))) {
+        if (!valid_address("postmaster@" + domain_)) throw std::invalid_argument("invalid invitation domain");
         if (rounds_ < 600000 || rounds_ > 2000000)
             throw std::invalid_argument("auth_pbkdf2_iterations must be 600000..2000000");
         if (max_password_ < 12 || max_password_ > 4096)
@@ -157,7 +161,7 @@ public:
                 Transaction migration(db_);
                 {
                     Statement version(db_, "PRAGMA user_version");
-                    if (version.step() != SQLITE_ROW || version.integer(0) > 3)
+                    if (version.step() != SQLITE_ROW || version.integer(0) > 4)
                         throw std::runtime_error("unsupported authentication database version");
                 }
                 execute("CREATE TABLE IF NOT EXISTS users ("
@@ -176,7 +180,28 @@ public:
                     "id TEXT PRIMARY KEY, name TEXT NOT NULL CHECK(length(name) BETWEEN 1 AND 80),"
                     "prefix TEXT NOT NULL, owner TEXT NOT NULL, digest BLOB NOT NULL UNIQUE CHECK(length(digest)=32),"
                     "created_at INTEGER NOT NULL, expires_at INTEGER, last_used_at INTEGER, revoked_at INTEGER);"
-                    "CREATE INDEX IF NOT EXISTS api_keys_owner ON api_keys(owner); PRAGMA user_version=3;");
+                    "CREATE INDEX IF NOT EXISTS api_keys_owner ON api_keys(owner);");
+                std::set<std::string> columns;
+                {
+                    Statement schema(db_, "PRAGMA table_info(api_keys)");
+                    for (int code; (code = schema.step()) != SQLITE_DONE;) {
+                        if (code != SQLITE_ROW) throw std::runtime_error("cannot inspect API key schema");
+                        columns.insert(schema.string(1));
+                    }
+                }
+                if (!columns.contains("audience")) execute("ALTER TABLE api_keys ADD COLUMN audience TEXT NOT NULL DEFAULT 'admin';");
+                if (!columns.contains("permissions")) {
+                    execute("ALTER TABLE api_keys ADD COLUMN permissions TEXT NOT NULL DEFAULT '[]';");
+                    Statement migrate(db_, "UPDATE api_keys SET permissions=?");
+                    migrate.text(1, Json(api_key_permission_ids("admin")).dump()); migrate.done();
+                }
+                execute("CREATE TABLE IF NOT EXISTS invitations ("
+                    "id TEXT PRIMARY KEY, name TEXT NOT NULL CHECK(length(name) BETWEEN 1 AND 80),"
+                    "owner TEXT NOT NULL, digest BLOB NOT NULL UNIQUE CHECK(length(digest)=32),"
+                    "domain TEXT NOT NULL, localpart TEXT NOT NULL, created_at INTEGER NOT NULL,"
+                    "expires_at INTEGER NOT NULL, max_uses INTEGER NOT NULL CHECK(max_uses BETWEEN 1 AND 100),"
+                    "uses INTEGER NOT NULL DEFAULT 0 CHECK(uses>=0 AND uses<=max_uses), revoked_at INTEGER);"
+                    "PRAGMA user_version=4;");
                 migration.commit();
             }
 #ifndef _WIN32
@@ -194,8 +219,11 @@ public:
         const auto operation = required_string(request, "op", 32);
         if (operation == "verify") return verify(request);
         if (operation == "api_key_verify") return verify_api_key(request);
-        if (operation == "api_key_list" || operation == "api_key_create" || operation == "api_key_revoke")
+        if (operation == "api_key_list" || operation == "api_key_create" || operation == "api_key_update" || operation == "api_key_revoke")
             return manage_api_keys(request, operation);
+        if (operation == "invite_create" || operation == "invite_list" || operation == "invite_revoke")
+            return manage_invitations(request, operation);
+        if (operation == "invite_inspect" || operation == "invite_redeem") return redeem_invitation(request, operation);
         if (operation == "password_policy_get") {
             std::lock_guard guard(mutex_);
             return policy_view();
@@ -277,17 +305,20 @@ private:
     Json api_key_view(const Statement& query, std::int64_t now) const {
         const auto expires = query.is_null(5) ? Json() : Json(query.integer64(5));
         const auto revoked = query.is_null(7) ? Json() : Json(query.integer64(7));
-        const bool active = query.integer(8) != 0 && revoked.is_null() &&
+        const auto audience = query.string(9);
+        const auto permissions = Json::parse(query.string(10));
+        if (!api_permissions_valid(permissions, audience)) throw std::runtime_error("invalid stored API key permissions");
+        const bool active = (audience == "mailbox" ? query.integer(8) >= 0 : query.integer(8) == 1) && revoked.is_null() &&
             (expires.is_null() || expires.get<std::int64_t>() > now);
         return {{"id", query.string(0)}, {"name", query.string(1)}, {"prefix", query.string(2)},
-                {"owner", query.string(3)}, {"scope", "admin"}, {"created_at", query.integer64(4)},
+                {"owner", query.string(3)}, {"scope", audience}, {"audience", audience}, {"permissions", permissions}, {"created_at", query.integer64(4)},
                 {"expires_at", expires}, {"last_used_at", query.is_null(6) ? Json() : Json(query.integer64(6))},
                 {"revoked_at", revoked}, {"active", active}};
     }
 
     Json key_metadata(const std::string& id, std::int64_t now) {
         Statement query(db_, "SELECT k.id,k.name,k.prefix,k.owner,k.created_at,k.expires_at,k.last_used_at,k.revoked_at,"
-                            "COALESCE(u.admin,0) FROM api_keys k LEFT JOIN users u ON u.username=k.owner WHERE k.id=?");
+                            "COALESCE(u.admin,-1),k.audience,k.permissions FROM api_keys k LEFT JOIN users u ON u.username=k.owner WHERE k.id=?");
         query.text(1, id);
         if (query.step() != SQLITE_ROW) throw std::runtime_error("cannot read API key metadata");
         return api_key_view(query, now);
@@ -295,8 +326,19 @@ private:
 
     Json manage_api_keys(const Json& request, const std::string& operation) {
         const auto owner = username_from(request);
+        const auto audience = request.value("audience", std::string("admin"));
+        if (audience != "admin" && audience != "mailbox")
+            return {{"ok", false}, {"code", "invalid_api_key"}, {"field", "audience"}, {"error", "Choose an API key audience."}};
         std::string name, id;
         std::int64_t days = 0;
+        Json permissions;
+        if (operation == "api_key_create" || operation == "api_key_update") {
+            if (!request.contains("permissions") || !api_permissions_valid(request.at("permissions"), audience))
+                return {{"ok", false}, {"code", "invalid_api_key"}, {"field", "permissions"}, {"error", "Choose valid API key permissions explicitly."}};
+            // Canonical storage makes permission edits and audit views stable.
+            auto values = request.at("permissions").get<std::vector<std::string>>();
+            std::sort(values.begin(), values.end()); permissions = values;
+        }
         if (operation == "api_key_create") {
             if (!request.contains("name") || !request.at("name").is_string())
                 return {{"ok", false}, {"code", "invalid_api_key"}, {"field", "name"}, {"error", "Enter a name for the API key."}};
@@ -310,7 +352,7 @@ private:
                     return {{"ok", false}, {"code", "invalid_api_key"}, {"field", "expires_in_days"}, {"error", "API key expiry must be 1..3650 whole days."}};
                 days = expiry.get<std::int64_t>();
             }
-        } else if (operation == "api_key_revoke") {
+        } else if (operation == "api_key_revoke" || operation == "api_key_update") {
             id = required_string(request, "id", 32);
             if (id.size() != 32 || !std::all_of(id.begin(), id.end(), [](unsigned char ch) {
                 return (ch >= '0' && ch <= '9') || (ch >= 'a' && ch <= 'f');
@@ -322,52 +364,64 @@ private:
         administrator.text(1, owner);
         const auto account = administrator.step();
         if (account != SQLITE_ROW && account != SQLITE_DONE) throw std::runtime_error("cannot check API key administrator");
-        if (account != SQLITE_ROW || administrator.integer(0) != 1)
+        if (account != SQLITE_ROW || (audience == "admin" && administrator.integer(0) != 1))
             return {{"ok", false}, {"code", "administrator_required"}, {"error", "Administrator access is required."}};
         const auto now = unix_seconds();
         if (operation == "api_key_list") {
             Statement query(db_, "SELECT k.id,k.name,k.prefix,k.owner,k.created_at,k.expires_at,k.last_used_at,k.revoked_at,"
-                                "COALESCE(u.admin,0) FROM api_keys k LEFT JOIN users u ON u.username=k.owner ORDER BY k.created_at DESC,k.id LIMIT 1000");
+                                "COALESCE(u.admin,-1),k.audience,k.permissions FROM api_keys k LEFT JOIN users u ON u.username=k.owner "
+                                "WHERE k.audience=? AND (?='admin' OR k.owner=?) ORDER BY k.created_at DESC,k.id LIMIT 1000");
+            query.text(1, audience); query.text(2, audience); query.text(3, owner);
             Json keys = Json::array();
             for (int code; (code = query.step()) != SQLITE_DONE;) {
                 if (code != SQLITE_ROW) throw std::runtime_error("cannot list API keys");
                 keys.push_back(api_key_view(query, now));
             }
             transaction.commit();
-            return {{"ok", true}, {"api_keys", std::move(keys)}, {"max_active_keys", max_active_keys}, {"max_stored_keys", max_stored_keys}};
+            return {{"ok", true}, {"api_keys", std::move(keys)}, {"permissions", api_key_permission_ids(audience)},
+                {"audience", audience}, {"max_active_keys", max_active_keys}, {"max_stored_keys", max_stored_keys}};
         }
-        if (operation == "api_key_revoke") {
-            Statement revoke(db_, "UPDATE api_keys SET revoked_at=COALESCE(revoked_at,?) WHERE id=?");
-            revoke.integer64(1, now); revoke.text(2, id); revoke.done();
+        if (operation == "api_key_revoke" || operation == "api_key_update") {
+            Statement revoke(db_, operation == "api_key_revoke" ?
+                "UPDATE api_keys SET revoked_at=COALESCE(revoked_at,?) WHERE id=? AND audience=? AND (?='admin' OR owner=?)" :
+                "UPDATE api_keys SET permissions=? WHERE id=? AND audience=? AND (?='admin' OR owner=?) AND revoked_at IS NULL");
+            if (operation == "api_key_revoke") revoke.integer64(1, now); else revoke.text(1, permissions.dump());
+            revoke.text(2, id); revoke.text(3, audience); revoke.text(4, audience); revoke.text(5, owner); revoke.done();
             if (sqlite3_changes(db_) != 1)
                 return {{"ok", false}, {"code", "api_key_not_found"}, {"error", "API key not found."}};
             const auto metadata = key_metadata(id, now);
             transaction.commit();
-            log("auth", "administrator " + owner + " revoked API key " + id);
+            log("auth", "account " + owner + (operation == "api_key_revoke" ? " revoked API key " : " updated API key permissions ") + id);
             return {{"ok", true}, {"api_key", metadata}};
         }
         Statement count(db_, "SELECT COUNT(*) FROM api_keys k JOIN users u ON u.username=k.owner "
-                            "WHERE u.admin=1 AND k.revoked_at IS NULL AND (k.expires_at IS NULL OR k.expires_at>?)");
-        count.integer64(1, now);
+                            "WHERE (k.audience='mailbox' OR u.admin=1) AND k.audience=? AND (?='admin' OR k.owner=?) "
+                            "AND k.revoked_at IS NULL AND (k.expires_at IS NULL OR k.expires_at>?)");
+        count.text(1, audience); count.text(2, audience); count.text(3, owner); count.integer64(4, now);
         if (count.step() != SQLITE_ROW) throw std::runtime_error("cannot count API keys");
         if (count.integer(0) >= max_active_keys)
             return {{"ok", false}, {"code", "api_key_limit"}, {"error", "Revoke an unused API key before creating another."}};
         // Retain bounded audit metadata. Only inactive keys may be pruned.
         Statement prune(db_, "DELETE FROM api_keys WHERE id IN (SELECT k.id FROM api_keys k LEFT JOIN users u ON u.username=k.owner "
-                            "WHERE k.revoked_at IS NOT NULL OR k.expires_at<=? OR COALESCE(u.admin,0)=0 ORDER BY k.created_at,k.id "
+                            "WHERE k.revoked_at IS NOT NULL OR k.expires_at<=? OR u.username IS NULL OR (k.audience='admin' AND u.admin=0) ORDER BY k.created_at,k.id "
                             "LIMIT MAX(0,(SELECT COUNT(*) FROM api_keys)-999))");
         prune.integer64(1, now); prune.done();
+        Statement stored(db_, "SELECT COUNT(*) FROM api_keys");
+        if (stored.step() != SQLITE_ROW) throw std::runtime_error("cannot count stored API keys");
+        if (stored.integer(0) >= max_stored_keys)
+            return {{"ok", false}, {"code", "api_key_limit"}, {"error", "The server API key limit was reached."}};
         const auto key = "pp_" + random_hex(32);
         id = random_hex(16);
-        Statement insert(db_, "INSERT INTO api_keys(id,name,prefix,owner,digest,created_at,expires_at) VALUES(?,?,?,?,?,?,?)");
+        Statement insert(db_, "INSERT INTO api_keys(id,name,prefix,owner,digest,created_at,expires_at,audience,permissions) VALUES(?,?,?,?,?,?,?,?,?)");
         insert.text(1, id); insert.text(2, name); insert.text(3, key.substr(0, 11)); insert.text(4, owner);
         insert.bytes(5, api_key_digest(key)); insert.integer64(6, now);
         // Binding is initially NULL, which represents a key without expiry.
         if (days != 0) insert.integer64(7, now + days * INT64_C(86400));
+        insert.text(8, audience); insert.text(9, permissions.dump());
         insert.done();
         const auto metadata = key_metadata(id, now);
         transaction.commit();
-        log("auth", "administrator " + owner + " created API key " + id);
+        log("auth", "account " + owner + " created " + audience + " API key " + id);
         return {{"ok", true}, {"key", key}, {"api_key", metadata}};
     }
 
@@ -378,17 +432,188 @@ private:
         std::lock_guard guard(mutex_);
         Transaction transaction(db_);
         const auto now = unix_seconds();
-        Statement query(db_, "SELECT k.id,k.owner,k.prefix FROM api_keys k JOIN users u ON u.username=k.owner "
-                            "WHERE k.digest=? AND u.admin=1 AND k.revoked_at IS NULL AND (k.expires_at IS NULL OR k.expires_at>?)");
+        Statement query(db_, "SELECT k.id,k.owner,k.prefix,k.audience,k.permissions FROM api_keys k JOIN users u ON u.username=k.owner "
+                            "WHERE k.digest=? AND (k.audience='mailbox' OR (k.audience='admin' AND u.admin=1)) "
+                            "AND k.revoked_at IS NULL AND (k.expires_at IS NULL OR k.expires_at>?)");
         query.bytes(1, api_key_digest(key)); query.integer64(2, now);
         const auto code = query.step();
         if (code != SQLITE_ROW && code != SQLITE_DONE) throw std::runtime_error("cannot verify API key");
         if (code != SQLITE_ROW) return {{"ok", true}, {"valid", false}};
         const auto id = query.string(0), owner = query.string(1), prefix = query.string(2);
+        const auto audience = query.string(3); const auto permissions = Json::parse(query.string(4));
+        if (!api_permissions_valid(permissions, audience)) throw std::runtime_error("invalid stored API key permissions");
         Statement used(db_, "UPDATE api_keys SET last_used_at=? WHERE id=?");
         used.integer64(1, now); used.text(2, id); used.done();
         transaction.commit();
-        return {{"ok", true}, {"valid", true}, {"username", owner}, {"admin", true}, {"id", id}, {"prefix", prefix}};
+        return {{"ok", true}, {"valid", true}, {"username", owner}, {"admin", audience == "admin"},
+                {"audience", audience}, {"permissions", permissions}, {"id", id}, {"prefix", prefix}};
+    }
+
+    static Json invitation_error(const std::string& code, const std::string& message, const std::string& field = {}) {
+        Json result{{"ok", false}, {"code", code}, {"error", message}};
+        if (!field.empty()) result["field"] = field;
+        return result;
+    }
+    static bool identifier(std::string_view value) {
+        return value.size() == 32 && value.find_first_not_of("0123456789abcdef") == value.npos;
+    }
+    bool valid_localpart(const std::string& value) const {
+        return !value.empty() && value.size() <= 64 && value.find('@') == std::string::npos && valid_address(value + "@" + domain_);
+    }
+    Json invitation_view(const Statement& query, std::int64_t now) const {
+        return {{"id", query.string(0)}, {"name", query.string(1)}, {"owner", query.string(2)},
+            {"domain", query.string(3)}, {"localpart", query.string(4)}, {"created_at", query.integer64(5)},
+            {"expires_at", query.integer64(6)}, {"max_uses", query.integer(7)}, {"uses", query.integer(8)},
+            {"revoked_at", query.is_null(9) ? Json() : Json(query.integer64(9))},
+            {"active", query.is_null(9) && query.integer64(6) > now && query.integer(8) < query.integer(7) && query.string(3) == domain_}};
+    }
+    Json invitation_metadata(const std::string& id, std::int64_t now) {
+        Statement query(db_, "SELECT id,name,owner,domain,localpart,created_at,expires_at,max_uses,uses,revoked_at FROM invitations WHERE id=?");
+        query.text(1, id);
+        if (query.step() != SQLITE_ROW) throw std::runtime_error("cannot read invitation metadata");
+        return invitation_view(query, now);
+    }
+    Json manage_invitations(const Json& request, const std::string& operation) {
+        const auto owner = username_from(request);
+        std::string name, localpart, id;
+        std::int64_t days = 7, max_uses = 1;
+        if (operation == "invite_create") {
+            if (!request.contains("name") || !request.at("name").is_string())
+                return invitation_error("invalid_invitation", "Enter an invitation name.", "name");
+            name = trim(request.at("name").get<std::string>());
+            if (name.empty() || name.size() > 80 || std::any_of(name.begin(), name.end(), [](unsigned char ch) { return ch < 32 || ch == 127; }))
+                return invitation_error("invalid_invitation", "Invitation names must contain 1..80 bytes without control characters.", "name");
+            for (const auto& field : {"expires_in_days", "max_uses"}) {
+                if (!request.contains(field)) continue;
+                const auto& value = request.at(field); const auto maximum = std::string_view(field) == "max_uses" ? 100 : 365;
+                if (!value.is_number_integer() || (value.is_number_unsigned() && value.get<std::uint64_t>() > static_cast<std::uint64_t>(maximum)) ||
+                    value.get<std::int64_t>() < 1 || value.get<std::int64_t>() > maximum)
+                    return invitation_error("invalid_invitation", "Invitation expiration or use limit is outside its allowed range.", field);
+                if (std::string_view(field) == "max_uses") max_uses = value.get<std::int64_t>(); else days = value.get<std::int64_t>();
+            }
+            if (request.contains("domain") && (!request.at("domain").is_string() || lower(trim(request.at("domain").get<std::string>())) != domain_))
+                return invitation_error("invalid_invitation", "Invitations must use the configured mail domain.", "domain");
+            if (request.contains("localpart")) {
+                if (!request.at("localpart").is_string()) return invitation_error("invalid_invitation", "Enter a valid mailbox name.", "localpart");
+                localpart = lower(trim(request.at("localpart").get<std::string>()));
+                if (!localpart.empty() && !valid_localpart(localpart)) return invitation_error("invalid_invitation", "Enter a valid mailbox name.", "localpart");
+            }
+            if (!localpart.empty() && max_uses != 1)
+                return invitation_error("invalid_invitation", "A fixed mailbox invitation can be used only once.", "max_uses");
+        } else if (operation == "invite_revoke") {
+            if (!request.contains("id") || !request.at("id").is_string() || !identifier(request.at("id").get<std::string>()))
+                return invitation_error("invalid_invitation", "Invalid invitation ID.", "id");
+            id = request.at("id").get<std::string>();
+        }
+        std::lock_guard guard(mutex_); Transaction transaction(db_);
+        Statement administrator(db_, "SELECT admin FROM users WHERE username=?"); administrator.text(1, owner);
+        const auto account = administrator.step();
+        if (account != SQLITE_ROW && account != SQLITE_DONE) throw std::runtime_error("cannot check invitation administrator");
+        if (account != SQLITE_ROW || administrator.integer(0) != 1)
+            return invitation_error("administrator_required", "Administrator access is required.");
+        const auto now = unix_seconds();
+        if (operation == "invite_list") {
+            Statement query(db_, "SELECT id,name,owner,domain,localpart,created_at,expires_at,max_uses,uses,revoked_at "
+                                 "FROM invitations ORDER BY created_at DESC,id LIMIT 1000");
+            Json invitations = Json::array();
+            for (int code; (code = query.step()) != SQLITE_DONE;) {
+                if (code != SQLITE_ROW) throw std::runtime_error("cannot list invitations");
+                invitations.push_back(invitation_view(query, now));
+            }
+            transaction.commit();
+            return {{"ok", true}, {"invitations", invitations}, {"domain", domain_}, {"max_active_invitations", 100}, {"max_stored_invitations", 1000}};
+        }
+        if (operation == "invite_revoke") {
+            Statement revoke(db_, "UPDATE invitations SET revoked_at=COALESCE(revoked_at,?) WHERE id=?");
+            revoke.integer64(1, now); revoke.text(2, id); revoke.done();
+            if (sqlite3_changes(db_) != 1) return invitation_error("invitation_not_found", "Invitation not found.");
+            auto metadata = invitation_metadata(id, now); transaction.commit();
+            log("auth", "administrator " + owner + " revoked invitation " + id);
+            return {{"ok", true}, {"invitation", metadata}};
+        }
+        if (!localpart.empty()) {
+            Statement exists(db_, "SELECT 1 FROM users WHERE username=?"); exists.text(1, localpart + "@" + domain_);
+            if (exists.step() == SQLITE_ROW) return invitation_error("user_exists", "This mailbox already exists.", "localpart");
+        }
+        Statement count(db_, "SELECT COUNT(*) FROM invitations WHERE revoked_at IS NULL AND expires_at>? AND uses<max_uses");
+        count.integer64(1, now);
+        if (count.step() != SQLITE_ROW) throw std::runtime_error("cannot count invitations");
+        if (count.integer(0) >= 100) return invitation_error("invitation_limit", "Revoke an unused invitation before creating another.");
+        Statement prune(db_, "DELETE FROM invitations WHERE id IN (SELECT id FROM invitations "
+            "WHERE revoked_at IS NOT NULL OR expires_at<=? OR uses>=max_uses ORDER BY created_at,id "
+            "LIMIT MAX(0,(SELECT COUNT(*) FROM invitations)-999))"); prune.integer64(1, now); prune.done();
+        Statement stored(db_, "SELECT COUNT(*) FROM invitations");
+        if (stored.step() != SQLITE_ROW) throw std::runtime_error("cannot count stored invitations");
+        if (stored.integer(0) >= 1000) return invitation_error("invitation_limit", "The server invitation limit was reached.");
+        const auto token = "pp_inv_" + random_hex(32); id = random_hex(16);
+        Statement insert(db_, "INSERT INTO invitations(id,name,owner,digest,domain,localpart,created_at,expires_at,max_uses) VALUES(?,?,?,?,?,?,?,?,?)");
+        insert.text(1, id); insert.text(2, name); insert.text(3, owner); insert.bytes(4, api_key_digest(token));
+        insert.text(5, domain_); insert.text(6, localpart); insert.integer64(7, now); insert.integer64(8, now + days * INT64_C(86400));
+        insert.integer64(9, max_uses); insert.done();
+        auto metadata = invitation_metadata(id, now); transaction.commit();
+        log("auth", "administrator " + owner + " created invitation " + id);
+        return {{"ok", true}, {"token", token}, {"invitation", metadata}};
+    }
+    std::optional<Json> invitation_for_token(const std::string& token) {
+        Statement query(db_, "SELECT id,name,owner,domain,localpart,created_at,expires_at,max_uses,uses,revoked_at FROM invitations WHERE digest=?");
+        query.bytes(1, api_key_digest(token)); const auto code = query.step();
+        if (code != SQLITE_ROW && code != SQLITE_DONE) throw std::runtime_error("cannot inspect invitation");
+        if (code != SQLITE_ROW) return {};
+        auto view = invitation_view(query, unix_seconds());
+        if (!view.at("active").get<bool>()) return {};
+        return view;
+    }
+    Json redeem_invitation(const Json& request, const std::string& operation) {
+        const auto unavailable = invitation_error("invitation_unavailable", "This invitation is invalid, expired, revoked, or fully used.");
+        if (!request.contains("token") || !request.at("token").is_string()) return unavailable;
+        const auto token = request.at("token").get<std::string>();
+        if (token.size() != 71 || !token.starts_with("pp_inv_") || token.find_first_not_of("0123456789abcdef", 7) != token.npos) return unavailable;
+        {
+            std::lock_guard guard(rate_mutex_);
+            const auto now = std::chrono::steady_clock::now();
+            if (invitation_attempts_.expires <= now) invitation_attempts_ = {now + std::chrono::minutes(1), 0};
+            if (++invitation_attempts_.count > 600) return invitation_error("rate_limit", "Invitation request rate limit reached.");
+        }
+        std::string localpart, password;
+        {
+            std::lock_guard guard(mutex_);
+            const auto invite = invitation_for_token(token); if (!invite) return unavailable;
+            if (operation == "invite_inspect") {
+                auto view = policy_view(); view["domain"] = domain_; view["localpart"] = invite->at("localpart");
+                view["expires_at"] = invite->at("expires_at"); return view;
+            }
+            if (request.contains("admin")) return invitation_error("invalid_invitation", "Invitations create ordinary mailboxes only.");
+            if (!request.contains("password") || !request.at("password").is_string())
+                return invitation_error("invalid_invitation", "Enter an account password.", "password");
+            password = request.at("password").get<std::string>();
+            if (const auto failure = check_password(password)) return *failure;
+            if (request.contains("localpart")) {
+                if (!request.at("localpart").is_string()) return invitation_error("invalid_invitation", "Enter a valid mailbox name.", "localpart");
+                localpart = lower(trim(request.at("localpart").get<std::string>()));
+            }
+            const auto fixed = invite->at("localpart").get<std::string>();
+            if (!fixed.empty()) {
+                if (!localpart.empty() && localpart != fixed) return invitation_error("invalid_invitation", "Use the mailbox name assigned to this invitation.", "localpart");
+                localpart = fixed;
+            }
+            if (!valid_localpart(localpart)) return invitation_error("invalid_invitation", "Enter a valid mailbox name.", "localpart");
+        }
+        auto salt_value = salt(); auto hash = password_hash(password, salt_value, rounds_);
+        std::lock_guard guard(mutex_); Transaction transaction(db_);
+        const auto invite = invitation_for_token(token); if (!invite) return unavailable;
+        if (const auto failure = check_password(password)) return *failure;
+        const auto username = localpart + "@" + domain_;
+        Statement insert(db_, "INSERT INTO users(username,salt,password_hash,iterations,admin) VALUES(?,?,?,?,0)");
+        insert.text(1, username); insert.bytes(2, salt_value); insert.bytes(3, hash); insert.integer(4, rounds_);
+        const auto inserted = insert.step();
+        if (inserted == SQLITE_CONSTRAINT) return invitation_error("user_exists", "This mailbox already exists.", "localpart");
+        if (inserted != SQLITE_DONE) throw std::runtime_error("cannot create invited mailbox");
+        Statement consume(db_, "UPDATE invitations SET uses=uses+1 WHERE id=? AND revoked_at IS NULL AND expires_at>? AND uses<max_uses");
+        consume.text(1, invite->at("id").get<std::string>()); consume.integer64(2, unix_seconds()); consume.done();
+        if (sqlite3_changes(db_) != 1) return unavailable;
+        transaction.commit();
+        log("auth", "invited account created: " + username);
+        return {{"ok", true}, {"username", username}, {"admin", false}};
     }
 
     // Call only while holding mutex_; this always reads the persisted revision.
@@ -514,11 +739,12 @@ private:
     sqlite3* db_ = nullptr;
     std::unique_ptr<DataDirectoryLock> data_lock_;
     int rounds_, max_password_;
-    std::string dummy_salt_;
+    std::string dummy_salt_, domain_;
     std::mutex mutex_;
     struct Rate { std::chrono::steady_clock::time_point expires; unsigned count = 0; };
     std::map<std::string, Rate> attempts_;
     Rate global_attempts_{};
+    Rate invitation_attempts_{};
     std::mutex rate_mutex_;
 };
 }

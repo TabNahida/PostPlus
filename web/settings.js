@@ -34,7 +34,8 @@ window.PostPlusSettings = (() => {
   }
   function create(root, schema, values, options = {}) {
     const controls = new Map();
-    let deliverySection=null,dkimPanel=null,disposed=false;
+    let deliverySection=null,dkimPanel=null,clientPanel=null,disposed=false;
+    const clientEvents=[];
     const prefix = options.prefix || "settings";
     root.replaceChildren();
     for (const [group, [title, description]] of Object.entries(groups)) {
@@ -101,6 +102,31 @@ window.PostPlusSettings = (() => {
       section.append(grid);
       root.append(section);
     }
+    if(options.mailClients && window.PostPlusMailClients){
+      const networkSection=[...root.children].find(section=>section.querySelector?.('[data-config-key="ports.smtp"]'));
+      function clientConfig(){
+        const result={...values,ports:{...values.ports}};
+        for(const key of ["domain","mail_hostname","bind","allow_insecure_auth","tls_certificate","tls_private_key","outbound_mode",...Object.keys(values.ports || {}).map(name=>"ports."+name)]){
+          const control=controls.get(key);if(control)set(result,key,control.field.type==="number"?Number(control.input.value):control.field.type==="boolean"?control.input.value==="true":control.input.value);
+        }
+        // Newly introduced listeners may not be present in an older saved configuration.
+        for(const name of ["submission","smtps","pop3s","imaps"]){const control=controls.get("ports."+name);if(control)result.ports[name]=Number(control.input.value);}
+        return result;
+      }
+      if(networkSection){
+        const preset=node("div","standard-ports"),button=node("button","button secondary","Apply standard ports"),hint=node("p","field-hint","Existing custom ports stay unchanged until you apply this preset and save."),legacy=node("p","legacy-port-hint","Legacy port values detected. Apply standard ports and save to switch to public defaults.");
+        legacy.hidden=!PostPlusMailClients.legacyPorts(clientConfig().ports);legacy.setAttribute("role","status");
+        button.type="button";button.id=`${prefix}-standard-ports`;hint.setAttribute("role","status");hint.setAttribute("aria-live","polite");preset.append(legacy,node("p","field-hint","Public defaults are SMTP 25, POP3 110, IMAP 143, and Webmail 80 (443 with TLS). On Unix, grant PostPlus permission to bind privileged ports."),button,hint);networkSection.insertBefore(preset,networkSection.children[2]);
+        const clients=node("section","mail-clients");clients.append(node("h3","","Connect mail apps"));const guide=node("div");clients.append(guide);networkSection.append(clients);
+        clientPanel=PostPlusMailClients.create(guide,{readConfig:clientConfig,prefix:`${prefix}-clients`});
+        button.addEventListener("click",()=>{
+          const config=clientConfig(),secure=Boolean(config.tls_certificate?.trim()&&config.tls_private_key?.trim());
+          for(const [name,value] of Object.entries(PostPlusMailClients.standardPorts(secure))){const control=controls.get("ports."+name);if(control&&!control.field.readonly){control.input.value=String(value);control.input.removeAttribute("aria-invalid");}}
+          hint.dataset.i18n="Standard ports are filled in. Save the configuration to apply them.";hint.textContent=t(hint.dataset.i18n);legacy.hidden=!PostPlusMailClients.legacyPorts(clientConfig().ports);clientPanel.render();
+        });
+        const updateClients=event=>{if(!disposed&&!event.target.closest?.(".mail-clients")){legacy.hidden=!PostPlusMailClients.legacyPorts(clientConfig().ports);clientPanel?.render();}};for(const event of ["input","change"]){root.addEventListener(event,updateClients);clientEvents.push([event,updateClients]);}
+      }
+    }
     if(options.generateDkim&&deliverySection&&["domain","outbound_mode","dkim_selector"].every(key=>controls.has(key))){
       const panel=node("section","settings-dkim"),button=node("button","button primary","Generate / load DKIM public record"),status=node("p","field-hint"),error=node("p","form-error"),record=node("div","dns-record-grid");
       button.type="button";button.id=`${prefix}-generate-dkim`;status.setAttribute("role","status");error.setAttribute("role","alert");panel.append(node("h3","","DKIM public DNS record"),node("p","field-hint","Publish this TXT record at your DNS provider. Only the public key is shown; keep private backups secure."),button,status,error,record);deliverySection.append(panel);
@@ -150,7 +176,7 @@ window.PostPlusSettings = (() => {
       }
       return result;
     }
-    return {read,translate:() => {PostPlusI18n.apply(root);dkimPanel?.render();},dispose(){disposed=true;dkimPanel?.dispose();},highlight:key => {const control = controls.get(key); if(control) reveal(control.input);},clearSecrets:() => controls.forEach(({field,input}) => {if(field.type === "password") input.value = "";})};
+    return {read,translate:() => {PostPlusI18n.apply(root);dkimPanel?.render();clientPanel?.translate();},dispose(){disposed=true;dkimPanel?.dispose();clientPanel?.dispose();for(const [event,handler] of clientEvents)root.removeEventListener(event,handler);},highlight:key => {const control = controls.get(key); if(control) reveal(control.input);},clearSecrets:() => controls.forEach(({field,input}) => {if(field.type === "password") input.value = "";})};
   }
   return {create};
 })();

@@ -197,6 +197,7 @@ int main() {
         fs::create_directory(directory / "data");
         environment("POSTPLUS_RESTART_TEST_TOKEN", random_hex(32));
         save(source, {{"domain", "example.test"}, {"data_dir", (directory / "data").string()},
+            {"web_root", fs::absolute("web").string()},
             {"service_token_env", "POSTPLUS_RESTART_TEST_TOKEN"}});
         auto initial = Config::from_file(source);
         environment("POSTPLUS_SUPERVISOR_CONTROL", "");
@@ -238,6 +239,33 @@ int main() {
             check(!supervisor_restart_busy(initial), "completed job kept the reservation");
             check(supervisor_running_config(initial)->values == updated.values, "applied config remains stale in unchanged admin child");
             concurrent_state_reads(control, initial, updated, *request);
+
+            save(control_directory / "update.request", {{"token", std::string(64, '0')}});
+            check(!control.update_requested(), "forged update capability accepted");
+            rejects(400, [&] { request_supervisor_update(initial, "stage", "../escape"); });
+            rejects(409, [&] { request_supervisor_update(initial, "apply", "missing"); });
+            const auto update_job = request_supervisor_update(initial, "stage", "0.3.0");
+            check(update_job.at("state") == "pending_download" && !update_job.contains("token"), "update scheduling metadata");
+            check(supervisor_restart_busy(initial), "update download did not reserve maintenance");
+            rejects(409, [&] { request_supervisor_restart(initial, updated); });
+            rejects(409, [&] { request_supervisor_shutdown(initial); });
+            rejects(409, [&] { request_supervisor_update(initial, "stage", "0.3.1"); });
+            check(!control.update_requested(), "update started before response delay");
+            std::this_thread::sleep_for(std::chrono::milliseconds(320));
+            const auto update = control.update_requested();
+            check(update && update->action == "stage", "update stage mailbox lost");
+            control.update_progress(*update, {{"state", "downloading"}});
+            check(supervisor_update_status(initial).at("state") == "downloading", "update progress missing");
+            control.update_finished(*update, {{"state", "staged"}, {"services", Json::array({"web", "admin"})}});
+            check(!supervisor_restart_busy(initial), "staged update blocks normal operations");
+            const auto apply_job = request_supervisor_update(initial, "apply", update->job_id);
+            check(apply_job.at("state") == "pending_apply", "update apply mailbox state");
+            std::this_thread::sleep_for(std::chrono::milliseconds(320));
+            const auto applying = control.update_requested();
+            check(applying && applying->action == "apply", "update apply request lost");
+            control.update_finished(*applying, {{"state", "failed"}, {"rolled_back", true}, {"error", "simulated failed readiness"}});
+            check(supervisor_update_status(initial, applying->job_id).at("rolled_back") == true, "update rollback status missing");
+            check(!supervisor_restart_busy(initial), "failed update blocks restart");
 
             auto failed = updated;
             failed.values["blocked_terms"] = Json::array({"another"});

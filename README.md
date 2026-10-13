@@ -23,7 +23,10 @@
 - **Make it comfortable.** Switch between English and Simplified Chinese, choose light or dark mode, or follow your device's appearance. Adjust reading preferences and use the same tools on your phone.
 - **Connect mail clients.** Send through SMTP and read through POP3 or the supported IMAP commands, with TLS support.
 - **Keep mail on disk.** Accounts, mailboxes, delivery queues, and retries survive restarts. Rejected mail is retained in quarantine.
-- **Choose who has an account.** Administrators create users; Webmail has no public registration.
+- **Choose who has an account.** Administrators create users or issue expiring invitation links for ordinary mailbox registration.
+- **Copy recent verification codes.** Webmail recognizes codes from recent inbox mail without marking it read; integrations can use the owner-bound code API.
+- **Route mailbox prefixes.** Wildcard forwarding sends matching local addresses to an existing local inbox.
+- **Limit integration access.** Choose API key permissions independently for administration and personal mailbox APIs. See [mailbox features and permissions](docs/access.md).
 
 <p align="center">
   <img src="docs/assets/preview.svg" alt="Illustrated overview of PostPlus setup, administration, and Webmail" width="920">
@@ -69,7 +72,7 @@ Open that address, enter the setup password, then choose your domain and create 
 | Interface | Local development default |
 | --- | --- |
 | Administration | `http://127.0.0.1:8081/` |
-| Webmail | `http://127.0.0.1:8080/` |
+| Webmail | `http://127.0.0.1:80/` |
 
 Sign in to administration to create users and adjust settings. Sign in to Webmail to read or compose mail. **Ctrl+C** stops the whole service group; the same launch command loads your saved installation next time. TLS-enabled installations use HTTPS.
 
@@ -94,6 +97,8 @@ Open **Settings** near your account for language and appearance preferences. **U
 
 Most day-to-day options are available in **Administration → Server settings**: listener addresses and ports, TLS, relay delivery, filtering, resource limits, sessions, and logging. Saving validates the configuration, creates a backup, and automatically restarts only affected services through the native supervisor. The page shows restart progress and updated addresses. Your administration session remains available unless the administration service restarts; use the new address and sign in again in that case. Independently launched services require a manual restart.
 
+Use **Apply standard ports** to replace old saved port values, and **Mail clients** for encrypted SMTP/IMAP/POP parameters and DNS discovery records. **Update PostPlus** downloads verified changed modules from the latest stable Release, retains configuration and data, and restarts affected services. See [mail client settings](docs/mail-clients.md) and [the upgrade guide](docs/updates.md).
+
 **Server settings → Server maintenance** lets you download a data backup, restart all services with the saved configuration, or save the current server settings and shut down. The full-restart action automatically brings PostPlus back, including installations made with the supplied systemd script; shutdown leaves it stopped. Backups include accounts, mail, queues, configuration, and configured credentials; store them privately. The terminal reports shutdown progress for both the web action and **Ctrl+C**. See [backup, restore, and shutdown](docs/maintenance.md) for recovery instructions.
 
 - [Getting started](docs/getting-started.md) — from first launch to your first message.
@@ -114,10 +119,10 @@ PostPlus uses **C++20**, **standalone Asio**, **OpenSSL 3**, **SQLite**, and **x
 | --- | --- | --- |
 | `postplus` | Setup and service supervision | Setup: loopback 8081 |
 | `postplus-admin` | Administration, accounts, settings, queue and logs API | Loopback 8081 |
-| `postplus-web` | Webmail and mailbox API | Loopback 8080 |
+| `postplus-web` | Webmail and mailbox API | Loopback 80 |
 | `postplus-smtp` | ESMTP reception and authenticated submission | Loopback 25 |
-| `postplus-pop3` | POP3 mailbox access | Loopback 1110 |
-| `postplus-imap` | IMAP mailbox access | Loopback 1143 |
+| `postplus-pop3` | POP3 mailbox access | Loopback 110 |
+| `postplus-imap` | IMAP mailbox access | Loopback 143 |
 | `postplus-auth` | Accounts, password verification, administrator roles | Loopback 18081 |
 | `postplus-storage` | Mailboxes, persistent UIDs, MIME, delivery queue | Loopback 18082 |
 | `postplus-filter` | MIME inspection, spam rules, EICAR detection, ClamAV client | Loopback 18083 |

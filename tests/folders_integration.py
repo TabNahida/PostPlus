@@ -96,6 +96,7 @@ def checks(services):
     # Draft replacement consumes only its current bytes and rotates its IMAP UID.
     draft = rpc("draft_save", username=OWNER, raw=RAW)
     assert draft["ok"] and draft["folder"] == "Drafts"
+    assert listing("Drafts")["messages"][0]["draft"]
     replacement = RAW + "edited\r\n"
     changed = rpc("draft_save", username=OWNER, id=draft["id"], uid=draft["uid"], raw=replacement)
     assert changed["id"] == draft["id"] and changed["uid"] > draft["uid"]
@@ -119,6 +120,7 @@ def checks(services):
     assert len({item["id"] for item in results}) == 1
     assert all(item["sent_id"] == draft["id"] for item in results)
     assert not listing("Drafts")["messages"] and len(listing("Sent")["messages"]) == 1
+    assert not listing("Sent")["messages"][0]["draft"]
     assert usage()["messages"] == 2 and usage()["bytes"] == len(RAW) * 2
     assert rpc("stats")["queued"] == 1
     assert not rpc("enqueue", **dict(submission, raw=RAW + "different"))["ok"]

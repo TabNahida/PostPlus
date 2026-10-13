@@ -55,6 +55,15 @@ unchanged. The new unit's `RestartForceExitStatus=75` is required for the
 administration **Restart all services** action to relaunch through systemd.
 Confirm the installed unit with `systemctl cat postplus.service`.
 
+The unit also runs the native `.postplus-recovery --recover-launcher --config PATH`
+helper before every start. It checks a pending launcher upgrade and restores
+the previous modules if the new launcher failed before it could acknowledge
+readiness. The complete release must include an executable `postplus-update`
+accessible to the service account. Rerun this installer once when upgrading an
+older managed installation to add `ExecStartPre`; replacing binaries alone
+does not add this recovery protection. The installer copies `postplus-update`
+to this stable recovery executable; online module upgrades preserve that copy.
+
 The new SMTP default is TCP 25. Upgrading does not rewrite an explicit
 `ports.smtp: 2525` in an existing configuration. Change it to 25 in Server
 settings and save, or retain controlled forwarding from public TCP 25 to the
@@ -121,6 +130,12 @@ paths after stopping the service.
 再以原配置路径和服务账户重新运行安装脚本。只替换二进制不会更新旧 unit；
 新版 unit 的 `RestartForceExitStatus=75` 是后台“重启全部服务”后自动重新启动的
 必要条件。可用 `systemctl cat postplus.service` 核对。
+
+新版 unit 还会在每次启动前执行原生 `.postplus-recovery --recover-launcher --config PATH`
+助手。如果升级后的启动器在确认服务就绪前崩溃，下一次启动会恢复旧模块。
+发行版必须包含服务账户能够执行的 `postplus-update`。从旧 unit 升级后，需要按原参数
+重新运行一次安装脚本，加入 `ExecStartPre`；只替换程序文件不会加入此恢复保护。
+安装脚本从 `postplus-update` 创建稳定的恢复副本，在线模块升级会保留该副本。
 
 新版 SMTP 默认端口为 25，但不会自动改写已有配置中显式保存的 `2525`。
 请在后台将 SMTP 端口改为 25 并保存，或保留公网 25 到原端口的受控转发；

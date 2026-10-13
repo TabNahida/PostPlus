@@ -2,11 +2,18 @@
 
 Each service is a separate executable. Internal HTTP listeners bind loopback and require `Authorization: Bearer <service_token>` for POST /rpc. JSON bodies and replies; failures use `{"ok":false,"error":"..."}`. The `rpc` helper throws on HTTP errors, but returns application-level `ok:false` replies. All inputs are untrusted. No passwords or message bodies in logs.
 
-Config is JSON. `Config::load` accepts `--config PATH` (default config/postplus.json). Ports map: auth 18081, storage 18082, filter 18083, transfer 18084, smtp 25, pop3 1110, imap 1143, web 8080, admin 8081. `delivery_lock_port` defaults 18085. `service_token_env` defaults POSTPLUS_SERVICE_TOKEN; when unset or empty, `service_token_file` supplies the shared token. Tokens must contain 32–1024 bytes with no embedded CR, LF, or NUL. The first-run wizard generates a private token file. Paths resolve relative to the config file. Shared limits: max_message_bytes (10485760), max_connections (32), timeout_seconds (30), max_auth_attempts (5). `bind` and independent `admin_bind` default 127.0.0.1. `domain` defaults localhost. TLS certificate/key optional (`tls_certificate`, `tls_private_key`); authentication without TLS only if `allow_insecure_auth` is explicitly true AND socket peer is loopback. `data_dir` path. `web_root` path. Structured service logs default to `<data_dir>/logs`; `log_level`, `log_max_bytes`, and `log_backups` control severity and retention. The [configuration reference](configuration.md) defines additional settings and browser editability.
+Config is JSON. `Config::load` accepts `--config PATH` (default config/postplus.json). Ports map: auth 18081, storage 18082, filter 18083, transfer 18084, smtp 25, pop3 110, imap 143, web 80, admin 8081. `delivery_lock_port` defaults 18085. `service_token_env` defaults POSTPLUS_SERVICE_TOKEN; when unset or empty, `service_token_file` supplies the shared token. Tokens must contain 32–1024 bytes with no embedded CR, LF, or NUL. The first-run wizard generates a private token file. Paths resolve relative to the config file. Shared limits: max_message_bytes (10485760), max_connections (32), timeout_seconds (30), max_auth_attempts (5). `bind` and independent `admin_bind` default 127.0.0.1. `domain` defaults localhost. TLS certificate/key optional (`tls_certificate`, `tls_private_key`); authentication without TLS only if `allow_insecure_auth` is explicitly true AND socket peer is loopback. `data_dir` path. `web_root` path. Structured service logs default to `<data_dir>/logs`; `log_level`, `log_max_bytes`, and `log_backups` control severity and retention. The [configuration reference](configuration.md) defines additional settings and browser editability.
 
 `raw` fields in this document describe the in-process API. On the HTTP wire they are encoded as `raw_base64` strings, including raw fields inside queue job arrays; core performs conversion. Messages may contain non-UTF-8 bytes but not literal NUL; binary attachments use MIME transfer encoding. JSON nesting is bounded to 64. Replies without raw fields use ordinary JSON.
 
 ## Auth
+
+Auth schema version 4 adds audience/permission arrays to API key digests and a digest-only invitation table. Legacy administrator keys keep their prior permissions. Every external key verification checks current ownership/expiry/revocation; browser-only key edits preserve the digest and apply immediately.
+
+- api_key_create/list/update/revoke: username (actor), audience (`admin` or `mailbox`); create requires name and explicit permissions, optional expires_in_days; update requires id and permissions; revoke requires id. Admin audience requires administrator; mailbox audience is owner-filtered. List returns available permissions; only create returns the full key.
+- api_key_verify: key -> ok,valid,username,admin,audience,permissions,id,prefix. Unknown, expired or revoked keys return valid:false.
+- invite_create/list/revoke: username (administrator actor); create takes name, optional localpart, expires_in_days1..365 and max_uses1..100; assigned localpart requires max_uses1. Only create returns token. List/revoke expose metadata only.
+- invite_inspect/redeem: token; inspect returns domain/localpart/password policy; redeem takes localpart,password and atomically creates an ordinary account and consumes a use. Failed validation/creation rolls consumption back.
 
 - create: username (full normalized email), password, admin(bool) -> ok, username. Reject duplicates and passwords that fail the current account policy.
 - verify: username, password, session(optional bool) -> ok, username, admin. Invalid credentials -> ok:false. With session:true, successful verification also returns credential_version for server-side session validation; it must not be exposed through the browser API.
@@ -23,10 +30,14 @@ Minimum length counts UTF-8 Unicode code points. Optional categories require ASC
 
 ## Storage
 
+- forwarding_list: limit1..1000, offset0..10000 -> ok,rules,total; forwarding_create: pattern,destination -> ok,rule; forwarding_delete: positive id -> ok,deleted. Patterns/destinations are confined to the configured domain and targets must exist in auth.
+- resolve_recipient: recipient, optional queue_id -> ok,exists,recipient,destination,forwarded,rule. Existing accounts precede local globs. Queue resolution uses durable accepted routes. Enqueue accepts recipient_routes keyed by original local address with destination and nullable rule; canonical destinations are deduplicated without rewriting raw mail.
+- verification_candidates: username, max_age_seconds1..86400(default900), limit1..50(default30) -> ok,messages:[{id,raw,internal_date}]. Newest eligible INBOX messages, excluding drafts/future dates and bounded by a source-byte budget; no flag changes. Raw uses the same binary-safe codec.
+
 SQLite owned exclusively by storage process; auth owns a separate auth SQLite DB.
 
 - enqueue: sender, recipients:[full email], raw, sent_username(optional authenticated account), draft_id(optional), submission_id(optional retry key) -> ok,id,sent_id(optional). Persists recipients, Sent copy, and removal of a consumed draft in one transaction. Retry keys require identical raw bytes and envelope and remain deduplicated after queue completion.
-- queue_list: limit optional -> ok,jobs:[{id,sender,recipient,raw,attempts}] (only due jobs; delivery is single worker).
+- queue_list: limit optional -> ok,jobs:[{id,sender,recipient,raw,attempts,submission_id,local_route}] (only due jobs; delivery is single worker). local_route means an accepted local route is pinned; such jobs never enter external transfer after a domain edit.
 - queue_finish: id -> ok (remove job).
 - queue_retry: id,delay(seconds),error -> ok (increment attempts, set next due; no automatic dropping).
 - queue_reject: id,error -> ok (persistent quarantined state, excluded from queue_list).

@@ -11,7 +11,7 @@ import tempfile
 
 ROOT = Path(__file__).resolve().parents[1]
 SCRIPT = ROOT / "scripts/install-systemd.sh"
-BINARIES = ("postplus", "postplus-admin", "postplus-auth", "postplus-storage",
+BINARIES = ("postplus", "postplus-update", "postplus-admin", "postplus-auth", "postplus-storage",
             "postplus-filter", "postplus-transfer", "postplus-delivery",
             "postplus-smtp", "postplus-pop3", "postplus-imap", "postplus-web")
 
@@ -66,7 +66,11 @@ def main():
         result = run(*options, env=environment)
         assert result.returncode == 0, (result.stdout, result.stderr)
         assert not systemctl_log.exists(), "dry run called systemctl"
+        recovery = install / ".postplus-recovery"
+        assert not recovery.exists(), "dry run wrote the recovery copy"
         if shutil.which("systemd-analyze"):
+            # A real installation creates this executable before enabling the unit.
+            shutil.copy2(install / "postplus-update", recovery)
             unit = root / "postplus.service"
             unit.write_text(result.stdout.split("\n\n", 1)[1], encoding="utf-8")
             verify = subprocess.run(["systemd-analyze", "verify", "--man=no", str(unit)],
@@ -76,6 +80,10 @@ def main():
         expected = (f"ExecStart=:{quote(str(install.resolve() / 'postplus'))} "
                     f"--config {quote(str(config.resolve()))}")
         assert expected in result.stdout, result.stdout
+        expected_recovery = (f"ExecStartPre=:{quote(str(recovery.resolve()))} "
+                             f"--recover-launcher --config {quote(str(config.resolve()))}")
+        assert expected_recovery in result.stdout, result.stdout
+        assert "postplus-update" not in expected_recovery, "recovery must survive updater replacement"
         for setting in ("User=" + user, "Restart=on-failure", "RestartForceExitStatus=75",
                         "Environment=POSTPLUS_SERVICE_MANAGER=systemd", "KillMode=mixed",
                         "TimeoutStopSec=130s", "AmbientCapabilities=CAP_NET_BIND_SERVICE"):
@@ -83,6 +91,17 @@ def main():
         default = run(*base_options, "--dry-run", env=environment)
         assert default.returncode == 0, (default.stdout, default.stderr)
         assert "User=" + pwd.getpwuid(os.getuid()).pw_name in default.stdout
+        if not recovery.exists():
+            shutil.copy2(install / "postplus-update", recovery)
+        recovery.unlink()
+        recovery.symlink_to(install / "postplus-update")
+        unsafe = run(*options, env=environment)
+        assert unsafe.returncode != 0 and "refusing to replace" in unsafe.stderr
+        recovery.unlink()
+        os.link(install / "postplus-update", recovery)
+        unsafe = run(*options, env=environment)
+        assert unsafe.returncode != 0 and "hard-linked recovery helper" in unsafe.stderr
+        recovery.unlink()
 
         unsupported_install = root / 'unsupported "install'
         unsupported_install.mkdir()
@@ -96,10 +115,25 @@ def main():
         result = run(*options)
         assert result.returncode != 0 and "setup is required" in result.stderr
         config.write_text('{"setup_complete": true}\n', encoding="utf-8")
+        helper = install / "postplus-update"
+        helper.chmod(0o644)
+        result = run(*options)
+        assert result.returncode != 0 and "missing executable" in result.stderr and "postplus-update" in result.stderr
+        helper.chmod(0o755)
+        if os.getuid() == 0:
+            helper.chmod(0o700)
+            result = run(*options)
+            assert result.returncode != 0 and f"{user} cannot execute" in result.stderr and "postplus-update" in result.stderr
+            helper.chmod(0o755)
+        helper.unlink()
+        result = run(*options)
+        assert result.returncode != 0 and "missing executable" in result.stderr and "postplus-update" in result.stderr
+        helper.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+        helper.chmod(0o755)
         (install / "postplus-web").unlink()
         result = run(*options)
         assert result.returncode != 0 and "missing executable" in result.stderr
-    print("PASS systemd installer preview, escaping, and setup checks")
+    print("PASS systemd installer preview, recovery helper requirements, escaping, and setup checks")
 
 
 if __name__ == "__main__":

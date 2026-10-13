@@ -102,15 +102,19 @@ Relative filesystem paths resolve from the **configuration file's directory**, i
 
 ### Ports
 
-Each PostPlus port must be a distinct integer from **1 to 65535**, even when listeners use different addresses. The administration port cannot equal the Webmail port. Low ports can require OS permissions. Internal listeners always use IPv4 loopback; do not publish them through a proxy or firewall.
+Each enabled PostPlus port must be a distinct integer from **1 to 65535**, even when listeners use different addresses. The four optional client ports (`submission`, `smtps`, `pop3s`, `imaps`) also accept **0** to disable their listeners. The administration port cannot equal the Webmail port. Low ports can require OS permissions. Internal listeners always use IPv4 loopback; do not publish them through a proxy or firewall.
 
 | Configuration field | Default | Listener and intended clients |
 | --- | --- | --- |
 | `ports.admin` | `8081` | Administration HTTP/HTTPS; only administrators can sign in. |
-| `ports.web` | `8080` | Webmail HTTP/HTTPS; regular users and administrators. |
+| `ports.web` | `80` or `443` | Webmail HTTP, or HTTPS when TLS is configured. Explicit saved ports remain unchanged. |
 | `ports.smtp` | `25` | SMTP reception and authenticated submission. Supports STARTTLS. |
-| `ports.pop3` | `1110` | POP3 access; supports STLS. |
-| `ports.imap` | `1143` | IMAP command subset; supports STARTTLS. |
+| `ports.pop3` | `110` | POP3 access; supports STLS. |
+| `ports.imap` | `143` | IMAP command subset; supports STARTTLS. |
+| `ports.submission` | `587` | SMTP submission with STARTTLS and required mailbox authentication. |
+| `ports.smtps` | `465` | SMTP submission with implicit TLS and required mailbox authentication. |
+| `ports.pop3s` | `995` | POP3 over implicit TLS. |
+| `ports.imaps` | `993` | IMAP over implicit TLS. |
 | `ports.auth` | `18081` | Internal authentication RPC. |
 | `ports.storage` | `18082` | Internal mailbox and queue RPC. |
 | `ports.filter` | `18083` | Internal filtering RPC. |
@@ -119,7 +123,7 @@ Each PostPlus port must be a distinct integer from **1 to 65535**, even when lis
 
 The setup API uses `ports.delivery_lock` for the form and translates it to `delivery_lock_port`. Installed settings and configuration files use the top-level field.
 
-Changing a port does not enable another protocol mode. The server's SMTP/POP3/IMAP listeners support TLS upgrades, not implicit TLS. Enabling the certificate changes both browser interfaces to HTTPS. To receive mail directly from internet senders, arrange inbound TCP 25: DNS MX does not specify a custom port. See the [domain setup guide](getting-started.md#6-move-from-a-local-trial-to-a-real-domain).
+SMTP 25, POP3 110 and IMAP 143 support TLS upgrades. The four dedicated client listeners start only when a certificate and private key are configured; set any to `0` to disable it. Their protocol mode follows the listener name, so changing its port preserves its TLS mode. Enabling the certificate changes both browser interfaces to HTTPS. Use **Apply standard ports** and save to replace old defaults in an existing configuration. Incoming Internet mail requires public TCP 25 because MX records cannot select a custom port. See [mail client settings](mail-clients.md).
 
 ## TLS and account security
 
@@ -290,10 +294,10 @@ For a new server, use the wizard instead of hand-creating this file. This abbrev
   "allow_insecure_auth": true,
   "ports": {
     "admin": 8081,
-    "web": 8080,
+    "web": 80,
     "smtp": 25,
-    "pop3": 1110,
-    "imap": 1143,
+    "pop3": 110,
+    "imap": 143,
     "auth": 18081,
     "storage": 18082,
     "filter": 18083,

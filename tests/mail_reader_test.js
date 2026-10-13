@@ -73,7 +73,7 @@ for(const [portal,app,prefix] of [["index.html","app.js","message"],["admin.html
   const adminPending=admin.run('inspectMessage({id:"late",folder:"INBOX"})');for(let i=0;i<6;i++)await Promise.resolve();admin.run("signedOut()");finishAdmin({ok:true,message:{html:"<p>Stale private mail</p>"},raw:"stale raw"});await adminPending;
   assert.equal(adminShown.length,1,"A stale inspection response cannot redisplay private mail after logout");assert.equal(admin.id("inspect-raw").textContent,"");
   const web=adminFixture();const webShown=[];let webCleared=0;const webSandbox={...web.sandbox,window:{},
-    document:{...web.sandbox.document,querySelector:selector=>web.id(selector)},PostPlusMailReader:{create:()=>({show:value=>webShown.push(value),clear:()=>{webCleared++;}})}};
+    document:{...web.sandbox.document,querySelector:selector=>web.id(selector)},PostPlusVerificationCode:{create:()=>({load(){},reset(){},translate(){}})},PostPlusMailReader:{create:()=>({show:value=>webShown.push(value),clear:()=>{webCleared++;}})}};
   vm.createContext(webSandbox);vm.runInContext(fs.readFileSync(path.join(root,"web/app.js"),"utf8"),webSandbox);for(let i=0;i<12;i++)await Promise.resolve();
   const webRun=code=>vm.runInContext(code,webSandbox);webRun('state.user={username:"reader@example.com",csrf:"test"};');
   webSandbox.fetch=async()=>({ok:true,status:200,json:async()=>({ok:true,message:{subject:"Current",text:"Plain",html:"<p>Private HTML</p>",inline_images:[{cid:"secret",data:png}]},raw:"private raw"})});

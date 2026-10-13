@@ -91,15 +91,21 @@ For a first trial on one computer, use the values below. Expand advanced section
 | Data directory | Keep the suggested directory | Stores accounts, messages, queues, and default logs. Choose a persistent, writable disk location. |
 | Connections and security | Loopback addresses; local development enabled | Allows a local trial without certificates. Clients on other computers cannot use this mode for plaintext login. |
 | Administration port | `8081` | Server management page; separate from Webmail. |
-| Webmail port | `8080` | Reading and composing mail in a browser. |
-| SMTP / POP3 / IMAP | `25` / `1110` / `1143` | SMTP uses the Internet receiving port; Unix requires permission to bind TCP 25. |
+| Webmail port | `80` | Reading and composing mail in a browser. |
+| SMTP / POP3 / IMAP | `25` / `110` / `143` | SMTP uses the Internet receiving port; Unix requires permission to bind TCP 25. |
 | Internal ports | Keep the suggested values | Private communication between service processes; each must be distinct. |
 | Outgoing delivery | Choose disabled for the local trial | Local recipients work. A real-domain deployment can select built-in direct delivery or an SMTP relay. |
 | ClamAV | Leave host empty for this trial | Built-in filtering remains active; full malware scanning needs a separate ClamAV service. |
 
 Save the form. PostPlus validates the values, creates the administrator and private configuration files, closes setup, and starts the service group. Use the success page's links or the addresses printed by the launcher.
 
-On Linux, a normal user without permission to bind low ports can temporarily select SMTP `2525` to finish setup. Stop that terminal instance with **Ctrl+C**, then [install the systemd service](systemd.md), whose unit grants `CAP_NET_BIND_SERVICE`. After it starts, change SMTP to `25` in administration and save. Existing installations using this managed unit already have the required permission.
+On Linux, the standard ports require permission to bind ports below 1024. For an initial terminal setup, grant that capability to the launcher and public listeners using the paths in your extracted release:
+
+```sh
+sudo setcap cap_net_bind_service=+ep ./postplus ./postplus-smtp ./postplus-pop3 ./postplus-imap ./postplus-web
+```
+
+Alternatively, temporarily use high ports for **all** public listeners (for example SMTP 2525, POP3 1110, IMAP 1143 and Web 8080). Stop with **Ctrl+C** after setup and [install the systemd service](systemd.md), which grants `CAP_NET_BIND_SERVICE`. Then use **Apply standard ports** in administration and save. Existing managed systemd installations already have the capability. Terminal file capabilities must be re-applied after replacing a binary; prefer systemd for automatic upgrades.
 
 The generated internal service token lives in a private file referenced by `service_token_file`. You do not need to copy it into the browser or set `POSTPLUS_SERVICE_TOKEN` for a wizard-created installation. Your administrator password is stored as a salted password hash in the authentication database, not in the configuration.
 
@@ -108,7 +114,7 @@ The generated internal service token lives in a private file referenced by `serv
 1. Open **Administration** at `http://127.0.0.1:8081/` for the local trial.
 2. Sign in with the permanent administrator address and password created in setup.
 3. Open **User accounts**. Enter `alice` and `bob` to create `alice@localhost` and `bob@localhost`, each with a password that meets the displayed rules (at least 8 characters by default). Leave administrator privileges disabled for regular users.
-4. Open **Webmail** at `http://127.0.0.1:8080/`. Sign in as Alice.
+4. Open **Webmail** at `http://127.0.0.1:80/`. Sign in as Alice.
 5. Compose a message to `bob@localhost`, add a subject and text, and send it.
 6. Sign out, sign in as Bob, and refresh the inbox. Delivery is queued, so a message can take a short time to appear.
 
@@ -155,13 +161,13 @@ For the local trial, use this manual account configuration:
 | Username | Full address, such as `alice@localhost` |
 | Password | That account's permanent password |
 | Incoming server | `127.0.0.1` |
-| Incoming protocol | IMAP on `1143`, or POP3 on `1110` |
+| Incoming protocol | IMAP on `143`, or POP3 on `110` |
 | Outgoing server | `127.0.0.1`, SMTP on `25` |
 | Local trial encryption | None, only with explicit loopback development mode |
 | TLS installation encryption | STARTTLS for SMTP and IMAP; STLS/STARTTLS for POP3 |
 | SMTP authentication | Enabled, with the full address and password |
 
-Use the real server hostname and configured ports after deployment. Implicit TLS ports such as SMTP 465, IMAP 993, and POP3 995 are not implemented for incoming client connections. Merely changing the port number does not change this. The [protocol matrix](protocols.md) lists the supported IMAP commands; clients requiring IDLE or other unsupported extensions may need additional development.
+For deployment, use the server hostname and the **Mail clients** section in setup or administration. With a certificate configured, IMAP 993 and POP3 995 use SSL/TLS; SMTP 587 uses STARTTLS and SMTP 465 uses SSL/TLS. Both SMTP submission listeners require authentication and encryption. See [client and DNS settings](mail-clients.md) for discovery records and compatibility details.
 
 ## 5. Change settings in administration
 
@@ -186,7 +192,7 @@ Suppose you control `example.com` and want addresses such as `alice@example.com`
 3. **Arrange inbound SMTP.** Other mail servers deliver to TCP port 25. The default SMTP port is `25`. If you choose a custom port such as `2525`, configure controlled forwarding from public TCP 25. Confirm the hosting provider and firewall permit inbound SMTP. A port value in the page does not create firewall/NAT rules or give the process permission to bind privileged ports.
 4. **Obtain a certificate.** Request one through PostPlus’s Let’s Encrypt panel (below), or use another provider. The certificate must cover `mail.example.com`; its PEM chain and matching unencrypted private key must be readable by the service account.
 5. **Configure TLS and listening.** In Server settings, enter those paths, disable local plaintext authentication, and choose a reachable bind address. `0.0.0.0` means all IPv4 interfaces; `127.0.0.1` means local access only. Keep the administration bind on loopback if you manage it through a tunnel. All configured ports must differ, including admin and Webmail.
-6. **Access the correct name.** Use `https://mail.example.com:8080/` for Webmail if that is the configured port and certificate name. Accessing by an IP or another domain can cause a certificate-name error. PostPlus uses one configured certificate/key pair for its TLS listeners.
+6. **Access the correct name.** Use `https://mail.example.com/` with standard HTTPS port 443 and that certificate name. Apply standard ports and save to update old configurations; append a port when deliberately using a custom listener. Accessing by an IP or another domain can cause a certificate-name error. PostPlus uses one configured certificate/key pair for its TLS listeners.
 7. **Configure outgoing delivery.** Choose built-in direct delivery or an SMTP relay as described below, then create addresses in the real domain and test a local message before testing an external recipient.
 
 You can run the administration port on a separate network address without making it publicly accessible. DNS, TLS, firewall rules, and relay permission must all agree with the names and ports you actually use. The setup form validates local settings but does not prove external reachability or email deliverability.

@@ -16,12 +16,12 @@ from setup_integration import (NativeServer, assert_ports_closed, http,
                                request_stop, reserve_ports, verify_services)
 
 sys.path.insert(0, str(ROOT / "scripts"))
-from release_manifest import version
+from release_manifest import version, installed_manifest
 
 BINARIES = ("postplus", "postplus-admin", "postplus-web", "postplus-auth",
             "postplus-storage", "postplus-filter", "postplus-smtp", "postplus-pop3",
             "postplus-imap", "postplus-delivery", "postplus-transfer", "postplus-ctl",
-            "postplus-clean-data")
+            "postplus-clean-data", "postplus-update")
 
 
 def unpack(archive, destination, prefix):
@@ -89,9 +89,10 @@ def dependencies(binary):
         assert not any(name in output for name in ("libssl", "libcrypto", "libsqlite", ".xmake")), output
 
 
-def verify_inventory(root, platform):
+def verify_inventory(root, platform, arch):
     suffix = ".exe" if platform == "windows" else ""
     expected = {name + suffix for name in BINARIES}
+    expected.add("postplus-update.json")
     document_files = [ROOT / name for name in ("README.md", "LICENSE", "THIRD_PARTY_NOTICES.md",
                                                "config/postplus.example.json", "scripts/install-systemd.sh")]
     for directory in ("docs", "web", "licenses"):
@@ -102,6 +103,9 @@ def verify_inventory(root, platform):
         assert (root / relative).read_bytes() == source.read_bytes(), f"missing/stale file: {relative}"
     actual = {path.relative_to(root).as_posix() for path in root.rglob("*") if path.is_file()}
     assert actual == expected, ("archive file allowlist mismatch", sorted(actual - expected), sorted(expected - actual))
+    metadata = json.loads((root / "postplus-update.json").read_text(encoding="utf-8"))
+    files = {name: (root / name).read_bytes() for name in actual if name != "postplus-update.json"}
+    assert metadata == installed_manifest(files, platform, arch), "installed component baseline differs from package"
     for name in BINARIES:
         binary = root / (name + suffix)
         assert binary.stat().st_size > 0
@@ -125,7 +129,7 @@ def native_smoke(root, directory):
             assert status == 200 and body, path
         headers = {"X-Setup-Token": server.token}
         status, _, defaults = http(ports["admin"], "GET", "/api/setup", headers=headers)
-        assert status == 200
+        assert status == 200, (status, defaults)
         payload = defaults["defaults"]
         payload.update(domain="package.example", admin_username="admin@package.example",
                        admin_password=PASSWORD, data_dir=str(directory / "smoke-mail"),
@@ -166,7 +170,7 @@ def main():
     directory.mkdir(parents=True)
     try:
         root = unpack(archive, directory, "postplus-" + release)
-        verify_inventory(root, args.platform)
+        verify_inventory(root, args.platform, args.arch)
         native_smoke(root, directory)
     except BaseException:
         print(f"Package test diagnostics: {directory}", flush=True)

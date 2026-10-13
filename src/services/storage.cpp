@@ -1,6 +1,7 @@
 #include <postplus/core.hpp>
 #include <postplus/mime.hpp>
 #include <postplus/data_lock.hpp>
+#include <postplus/forwarding.hpp>
 #include <sqlite3.h>
 #include <openssl/evp.h>
 
@@ -169,7 +170,7 @@ Json envelope(std::string_view headers) {
 class Storage {
 public:
     explicit Storage(const Config& config)
-        : max_message_(integer_field(config.values, "max_message_bytes", 10485760, 1, 104857600)),
+        : config_(config), max_message_(integer_field(config.values, "max_message_bytes", 10485760, 1, 104857600)),
           max_queue_bytes_(integer_field(config.values, "max_queue_bytes", 1073741824, 1, maximum_quota_bytes)),
           max_queue_messages_(integer_field(config.values, "max_queue_messages", 100000, 1, 1000000)),
           max_mailbox_bytes_(integer_field(config.values, "max_mailbox_bytes", 1073741824, 1, maximum_quota_bytes)),
@@ -228,9 +229,23 @@ public:
                 "ALTER TABLE mailboxes ADD COLUMN quota_messages INTEGER CHECK(quota_messages > 0);");
             execute(db_,
                 "CREATE INDEX IF NOT EXISTS messages_folder ON messages(username,folder,uid);"
+                "CREATE TABLE IF NOT EXISTS message_flags("
+                "id TEXT PRIMARY KEY REFERENCES messages(id) ON DELETE CASCADE,"
+                "answered INTEGER NOT NULL DEFAULT 0 CHECK(answered IN(0,1)),"
+                "flagged INTEGER NOT NULL DEFAULT 0 CHECK(flagged IN(0,1)),"
+                "draft INTEGER NOT NULL DEFAULT 0 CHECK(draft IN(0,1)));"
                 "CREATE TABLE IF NOT EXISTS submissions("
                 "username TEXT NOT NULL, request_id TEXT NOT NULL, fingerprint TEXT NOT NULL,"
                 "submission_id TEXT NOT NULL, sent_id TEXT NOT NULL, PRIMARY KEY(username,request_id));"
+                "CREATE TABLE IF NOT EXISTS forwarding_rules("
+                "id INTEGER PRIMARY KEY AUTOINCREMENT,domain TEXT NOT NULL,pattern TEXT NOT NULL,"
+                "destination TEXT NOT NULL,created_at INTEGER NOT NULL,UNIQUE(domain,pattern));"
+                "CREATE TABLE IF NOT EXISTS queue_routes("
+                "queue_id TEXT PRIMARY KEY,recipient TEXT NOT NULL,destination TEXT NOT NULL,"
+                "rule_id INTEGER,pattern TEXT NOT NULL DEFAULT '');"
+                "CREATE TABLE IF NOT EXISTS submission_deliveries("
+                "username TEXT NOT NULL,submission_id TEXT NOT NULL,message_id TEXT NOT NULL,"
+                "PRIMARY KEY(username,submission_id));"
                 "PRAGMA user_version=2;");
             transaction.commit();
 #ifndef _WIN32
@@ -247,11 +262,18 @@ public:
         std::lock_guard guard(mutex_);
         if (op == "enqueue") return enqueue(request);
         if (op == "deliver") return deliver(request);
+        if (op == "forwarding_list") return forwarding_list(request);
+        if (op == "forwarding_create") return forwarding_create(request);
+        if (op == "forwarding_delete") return forwarding_delete(request);
+        if (op == "resolve_recipient") return resolve_recipient(request);
+        if (op == "verification_candidates") return verification_candidates(request);
         if (op == "list") return list(request);
         if (op == "folders") return folders(request);
         if (op == "quota_get") return quota_get(request);
         if (op == "quota_set") return quota_set(request);
         if (op == "draft_save") return draft_save(request);
+        if (op == "append") return append(request);
+        if (op == "copy") return copy(request);
         if (op == "move") return move(request);
         if (op == "get") {
             auto username = address(request, "username"); auto id = identifier(request, "id");
@@ -268,12 +290,21 @@ public:
         if (op == "delete") return remove(request);
         if (op == "flags") {
             auto username = address(request, "username"); auto id = identifier(request, "id");
-            if (!request.contains("seen") || !request.at("seen").is_boolean()) throw std::invalid_argument("seen must be boolean");
+            bool provided = false;
+            for (const auto* name : {"seen", "answered", "flagged", "draft"}) if (request.contains(name)) {
+                provided = true; if (!request.at(name).is_boolean()) throw std::invalid_argument("message flags must be boolean");
+            }
+            if (!provided) throw std::invalid_argument("message flags are required");
             const auto expected_uid = integer_field(request, "uid", 0, 1, 0xffffffffLL);
+            Transaction transaction(db_);
+            Statement current(db_, "SELECT seen FROM messages WHERE username=? AND id=? AND (?=0 OR uid=?)");
+            current.text(1, username); current.text(2, id); current.integer(3, expected_uid); current.integer(4, expected_uid);
+            if (!current.row()) return {{"ok", false}, {"error", "message does not exist"}};
             Statement update(db_, "UPDATE messages SET seen=? WHERE username=? AND id=? AND (?=0 OR uid=?)");
-            update.integer(1, request.at("seen").get<bool>() ? 1 : 0); update.text(2, username); update.text(3, id);
+            update.integer(1, request.value("seen", current.integer(0) != 0) ? 1 : 0); update.text(2, username); update.text(3, id);
             update.integer(4, expected_uid); update.integer(5, expected_uid); update.done();
-            if (sqlite3_changes(db_) != 1) return {{"ok", false}, {"error", "message does not exist"}};
+            save_flags(id, request);
+            transaction.commit();
             return {{"ok", true}};
         }
         if (op == "queue_list") return queue_list(request);
@@ -305,6 +336,96 @@ public:
         return {{"ok", false}, {"error", "unknown storage operation"}};
     }
 private:
+    std::string local_domain() const { return lower(config_.text("domain", "localhost")); }
+    bool local_address(const std::string& value) const { return value.substr(value.find('@') + 1) == local_domain(); }
+    bool mailbox_exists(const std::string& username) const {
+        const auto result = rpc(config_, "auth", {{"op", "exists"}, {"username", username}});
+        if (!result.value("ok", false)) throw std::runtime_error("Recipient account service unavailable.");
+        return result.value("exists", false);
+    }
+    Json rule_row(Statement& query) const {
+        return {{"id", query.integer(0)}, {"pattern", query.string(1)}, {"destination", query.string(2)},
+                {"domain", local_domain()}, {"created_at", query.integer(3)}};
+    }
+    Json forwarding_list(const Json& request) {
+        const auto limit = integer_field(request, "limit", 100, 1, 1000);
+        const auto offset = integer_field(request, "offset", 0, 0, 10000);
+        Statement count(db_, "SELECT COUNT(*) FROM forwarding_rules WHERE domain=?"); count.text(1, local_domain()); count.row();
+        Statement query(db_, "SELECT id,pattern,destination,created_at FROM forwarding_rules WHERE domain=? ORDER BY id LIMIT ? OFFSET ?");
+        query.text(1, local_domain()); query.integer(2, limit); query.integer(3, offset);
+        Json rules = Json::array(); while (query.row()) rules.push_back(rule_row(query));
+        return {{"ok", true}, {"rules", std::move(rules)}, {"total", count.integer(0)}, {"domain", local_domain()}};
+    }
+    Json forwarding_create(const Json& request) {
+        const auto pattern = forwarding_pattern(field(request, "pattern", 254), local_domain());
+        const auto destination = address(request, "destination");
+        if (!local_address(destination)) return {{"ok", false}, {"code", "nonlocal_destination"}, {"error", "Forwarding destination must be an existing mailbox in the configured local domain."}};
+        if (!mailbox_exists(destination)) return {{"ok", false}, {"code", "unknown_destination"}, {"error", "Forwarding destination mailbox does not exist."}};
+        Statement duplicate(db_, "SELECT 1 FROM forwarding_rules WHERE domain=? AND pattern=?"); duplicate.text(1, local_domain()); duplicate.text(2, pattern);
+        if (duplicate.row()) return {{"ok", false}, {"code", "duplicate_rule"}, {"error", "A forwarding rule for this pattern already exists."}};
+        Statement count(db_, "SELECT COUNT(*) FROM forwarding_rules"); count.row();
+        if (count.integer(0) >= 1000) return {{"ok", false}, {"code", "rule_limit"}, {"error", "At most 1000 forwarding rules are supported."}};
+        const auto created = now();
+        Statement insert(db_, "INSERT INTO forwarding_rules(domain,pattern,destination,created_at) VALUES(?,?,?,?)");
+        insert.text(1, local_domain()); insert.text(2, pattern); insert.text(3, destination); insert.integer(4, created); insert.done();
+        return {{"ok", true}, {"rule", {{"id", sqlite3_last_insert_rowid(db_)}, {"domain", local_domain()},
+                {"pattern", pattern}, {"destination", destination}, {"created_at", created}}}};
+    }
+    Json forwarding_delete(const Json& request) {
+        const auto id = integer_field(request, "id", 0, 1, std::numeric_limits<std::int64_t>::max());
+        if (!id) throw std::invalid_argument("forwarding rule ID is required");
+        Statement remove(db_, "DELETE FROM forwarding_rules WHERE domain=? AND id=?"); remove.text(1, local_domain()); remove.integer(2, id); remove.done();
+        return {{"ok", true}, {"deleted", sqlite3_changes(db_) == 1}};
+    }
+    Json resolution(const std::string& recipient, const std::string& destination, const Json& rule = nullptr) const {
+        return {{"ok", true}, {"exists", !destination.empty()}, {"recipient", recipient}, {"destination", destination},
+                {"forwarded", !destination.empty() && destination != recipient}, {"rule", rule}};
+    }
+    void pin_route(const std::string& id, const std::string& recipient, const Json& route) {
+        Statement insert(db_, "INSERT INTO queue_routes(queue_id,recipient,destination,rule_id,pattern) VALUES(?,?,?,?,?)");
+        insert.text(1, id); insert.text(2, recipient); insert.text(3, route.at("destination").get<std::string>());
+        const auto rule = route.value("rule", Json(nullptr));
+        if (rule.is_null()) { insert.null_parameter(4); insert.text(5, ""); }
+        else { insert.integer(4, rule.at("id").get<std::int64_t>()); insert.text(5, rule.value("pattern", "")); }
+        insert.done();
+    }
+    Json resolve_recipient(const Json& request) {
+        const auto recipient = address(request, "recipient");
+        const auto queue_id = request.contains("queue_id") ? identifier(request, "queue_id") : std::string{};
+        if (!queue_id.empty()) {
+            Statement pinned(db_, "SELECT recipient,destination,rule_id,pattern FROM queue_routes WHERE queue_id=?"); pinned.text(1, queue_id);
+            if (pinned.row()) {
+                if (pinned.string(0) != recipient) throw std::invalid_argument("queued original recipient does not match route");
+                const auto destination = pinned.string(1);
+                Json rule = pinned.null(2) ? Json(nullptr) : Json{{"id", pinned.integer(2)}, {"pattern", pinned.string(3)},
+                    {"destination", destination}, {"domain", local_domain()}};
+                return resolution(recipient, local_address(destination) && mailbox_exists(destination) ? destination : "", rule);
+            }
+            Statement queued(db_, "SELECT recipient FROM queue WHERE id=?"); queued.text(1, queue_id);
+            if (!queued.row() || queued.string(0) != recipient) throw std::invalid_argument("queue item does not match original recipient");
+        }
+        if (!local_address(recipient)) return resolution(recipient, "");
+        Json result = resolution(recipient, "");
+        if (mailbox_exists(recipient)) result = resolution(recipient, recipient);
+        else {
+            Statement query(db_, "SELECT id,pattern,destination,created_at FROM forwarding_rules WHERE domain=? ORDER BY id"); query.text(1, local_domain());
+            Json selected = nullptr; std::array<unsigned, 3> best{};
+            const auto prefix = recipient.substr(0, recipient.find('@'));
+            while (query.row()) {
+                const auto pattern = query.string(1);
+                if (!forwarding_matches(pattern, prefix)) continue;
+                const auto rank = forwarding_specificity(pattern);
+                if (selected.is_null() || rank[0] > best[0] || (rank[0] == best[0] && rank[1] < best[1]) ||
+                    (rank[0] == best[0] && rank[1] == best[1] && rank[2] < best[2])) { selected = rule_row(query); best = rank; }
+            }
+            if (!selected.is_null()) {
+                const auto destination = selected.at("destination").get<std::string>();
+                result = resolution(recipient, local_address(destination) && mailbox_exists(destination) ? destination : "", selected);
+            }
+        }
+        if (!queue_id.empty() && result.at("exists") == true) pin_route(queue_id, recipient, result);
+        return result;
+    }
     Json enqueue(const Json& request) {
         auto sender = address(request, "sender", true);
         auto raw = field(request, "raw", static_cast<std::size_t>(max_message_));
@@ -327,6 +448,33 @@ private:
             throw std::invalid_argument("submission_id requires Sent owner");
         const auto digest = sent_username.empty() ? std::string{} : fingerprint(Json{
             {"sender", sender}, {"recipients", recipients}, {"raw_sha256", fingerprint(raw)}, {"draft_id", draft_id}}.dump());
+        Json routes = Json::object();
+        if (request.contains("recipient_routes")) {
+            const auto& supplied = request.at("recipient_routes");
+            if (!supplied.is_object() || supplied.size() > recipients.size())
+                throw std::invalid_argument("recipient_routes must map requested local recipients");
+            for (const auto& [recipient, route] : supplied.items()) {
+                if (!recipients.contains(recipient) || !local_address(recipient) || !route.is_object())
+                    throw std::invalid_argument("recipient route does not match requested local recipient");
+                const auto destination = address(route, "destination");
+                if (!local_address(destination)) throw std::invalid_argument("recipient route destination must be local");
+                const auto rule = route.value("rule", Json(nullptr));
+                if (!rule.is_null()) {
+                    if (!rule.is_object()) throw std::invalid_argument("recipient route rule must be an object");
+                    const auto rule_id = integer_field(rule, "id", 0, 1, std::numeric_limits<std::int64_t>::max());
+                    if (!rule_id) throw std::invalid_argument("recipient route rule ID is required");
+                    const auto pattern = forwarding_pattern(field(rule, "pattern", 64), local_domain());
+                    if (!forwarding_matches(pattern, recipient.substr(0, recipient.find('@'))))
+                        throw std::invalid_argument("recipient route rule does not match original recipient");
+                    routes[recipient] = resolution(recipient, destination, {{"id", rule_id}, {"pattern", pattern}});
+                } else {
+                    if (destination != recipient) throw std::invalid_argument("forwarded recipient requires a rule");
+                    routes[recipient] = resolution(recipient, destination);
+                }
+            }
+            for (const auto& recipient : recipients) if (local_address(recipient) && !routes.contains(recipient))
+                throw std::invalid_argument("local recipient route is missing");
+        }
         const auto submission = random_hex(16);
         Transaction transaction(db_);
         if (!sent_username.empty()) {
@@ -337,10 +485,20 @@ private:
                 return {{"ok", true}, {"id", previous.string(1)}, {"sent_id", previous.string(2)}, {"duplicate", true}};
             }
         }
+        // The accepted RCPT route survives rule edits between acceptance and DATA.
+        // Recheck account existence and pin it with the queue transaction. Legacy
+        // internal enqueue callers can omit routes and resolve at delivery time.
+        std::set<std::string> destinations, queued_recipients;
+        for (const auto& recipient : recipients) {
+            const auto destination = routes.contains(recipient) ? routes.at(recipient).at("destination").get<std::string>() : recipient;
+            if (routes.contains(recipient) && !destinations.contains(destination) && !mailbox_exists(destination))
+                return {{"ok", false}, {"code", "unknown_destination"}, {"error", "Local destination mailbox no longer exists."}};
+            if (destinations.insert(destination).second) queued_recipients.insert(recipient);
+        }
         {
             Statement query(db_, "SELECT COUNT(*),COALESCE(SUM(size),0) FROM queue"); query.row();
-            if (static_cast<std::int64_t>(recipients.size()) > max_queue_messages_ - query.integer(0) ||
-                static_cast<std::int64_t>(raw.size()) * static_cast<std::int64_t>(recipients.size()) > max_queue_bytes_ - query.integer(1))
+            if (static_cast<std::int64_t>(queued_recipients.size()) > max_queue_messages_ - query.integer(0) ||
+                static_cast<std::int64_t>(raw.size()) * static_cast<std::int64_t>(queued_recipients.size()) > max_queue_bytes_ - query.integer(1))
                 return {{"ok", false}, {"error", "mail queue quota exceeded"}};
         }
         std::string sent_id;
@@ -362,16 +520,19 @@ private:
                 Statement update(db_, "UPDATE messages SET folder='Sent',uid=?,raw=?,size=?,seen=1,created_at=? WHERE username=? AND id=?");
                 update.integer(1, uid); update.blob(2, raw); update.integer(3, static_cast<std::int64_t>(raw.size()));
                 update.integer(4, now()); update.text(5, sent_username); update.text(6, draft_id); update.done();
+                save_flags(draft_id, {{"draft", false}});
             }
             Statement receipt(db_, "INSERT INTO submissions(username,request_id,fingerprint,submission_id,sent_id) VALUES(?,?,?,?,?)");
             receipt.text(1, sent_username); receipt.text(2, request_id); receipt.text(3, digest);
             receipt.text(4, submission); receipt.text(5, sent_id); receipt.done();
         }
         const auto created = now();
-        for (const auto& recipient : recipients) {
+        for (const auto& recipient : queued_recipients) {
+            const auto queue_id = random_hex(16);
             Statement insert(db_, "INSERT INTO queue(id,submission_id,sender,recipient,raw,size,next_attempt,created_at) VALUES(?,?,?,?,?,?,?,?)");
-            insert.text(1, random_hex(16)); insert.text(2, submission); insert.text(3, sender); insert.text(4, recipient);
+            insert.text(1, queue_id); insert.text(2, submission); insert.text(3, sender); insert.text(4, recipient);
             insert.blob(5, raw); insert.integer(6, static_cast<std::int64_t>(raw.size())); insert.integer(7, created); insert.integer(8, created); insert.done();
+            if (routes.contains(recipient)) pin_route(queue_id, recipient, routes.at(recipient));
         }
         transaction.commit();
         Json result{{"ok", true}, {"id", submission}};
@@ -418,15 +579,91 @@ private:
         insert.integer(5, static_cast<std::int64_t>(raw.size())); insert.integer(6, now());
         insert.text(7, target); insert.integer(8, seen ? 1 : 0); insert.done();
     }
+    void save_flags(const std::string& id, const Json& request) {
+        Statement existing(db_, "SELECT answered,flagged,draft FROM message_flags WHERE id=?");
+        existing.text(1, id); const bool present=existing.row();
+        Statement save(db_, "INSERT INTO message_flags(id,answered,flagged,draft) VALUES(?,?,?,?) "
+            "ON CONFLICT(id) DO UPDATE SET answered=excluded.answered,flagged=excluded.flagged,draft=excluded.draft");
+        save.text(1,id);
+        const std::array<const char*,3> names{"answered","flagged","draft"};
+        for(std::size_t i=0;i<names.size();++i) {
+            if(request.contains(names[i]) && !request.at(names[i]).is_boolean()) throw std::invalid_argument("message flags must be boolean");
+            save.integer(static_cast<int>(i+2),request.value(names[i],present && existing.integer(static_cast<int>(i))!=0)?1:0);
+        }
+        save.done();
+    }
+    Json append(const Json& request) {
+        const auto username=address(request,"username"), target=folder(request);
+        const auto raw=field(request,"raw",static_cast<std::size_t>(max_message_));
+        for(const auto* name:{"seen","answered","flagged","draft"}) if(request.contains(name) && !request.at(name).is_boolean()) throw std::invalid_argument("message flags must be boolean");
+        const auto date=integer_field(request,"internal_date",now(),-2208988800LL,253402300799LL);
+        Transaction transaction(db_); ensure_mailbox(username);
+        if(!fits_quota(username,static_cast<std::int64_t>(raw.size()),1)) return {{"ok",false},{"error","mailbox quota exceeded"}};
+        const auto id=random_hex(16); const auto uid=allocate_uid(username);
+        insert_message(username,id,uid,raw,target,request.value("seen",false)); save_flags(id,request);
+        Statement update(db_,"UPDATE messages SET created_at=? WHERE id=?"); update.integer(1,date); update.text(2,id); update.done();
+        Statement mailbox(db_,"SELECT uidvalidity FROM mailboxes WHERE username=?"); mailbox.text(1,username); mailbox.row();
+        const auto validity=mailbox.integer(0); transaction.commit();
+        return {{"ok",true},{"id",id},{"uid",uid},{"uidvalidity",validity}};
+    }
+    Json copy(const Json& request) {
+        const auto username=address(request,"username"), target=folder(request), source=folder(request,"source_folder");
+        const auto ids=message_ids(request); const auto expected=request.value("expected_uids",Json::object());
+        if(!expected.is_object()) throw std::invalid_argument("expected_uids must be an object");
+        if(request.contains("move") && !request.at("move").is_boolean()) throw std::invalid_argument("move must be boolean");
+        const bool move=request.value("move",false);
+        Transaction transaction(db_); ensure_mailbox(username);
+        Json records=Json::array(); std::int64_t added_bytes=0;
+        for(const auto& id:ids) {
+            const auto uid=integer_field(expected,id.c_str(),0,1,0xffffffffLL);
+            Statement query(db_,"SELECT m.size,m.uid,m.seen,m.created_at,COALESCE(f.answered,0),COALESCE(f.flagged,0),COALESCE(f.draft,0) "
+                "FROM messages m LEFT JOIN message_flags f ON f.id=m.id WHERE m.username=? AND m.id=? AND m.folder=? AND (?=0 OR m.uid=?)");
+            query.text(1,username); query.text(2,id); query.text(3,source); query.integer(4,uid); query.integer(5,uid);
+            if(!query.row()) return {{"ok",false},{"error","source message has changed"}};
+            added_bytes+=query.integer(0);
+            records.push_back({{"id",id},{"uid",query.integer(1)},{"seen",query.integer(2)!=0},{"internal_date",query.integer(3)},
+                {"answered",query.integer(4)!=0},{"flagged",query.integer(5)!=0},{"draft",query.integer(6)!=0}});
+        }
+        if(!move && !fits_quota(username,added_bytes,static_cast<std::int64_t>(records.size()))) return {{"ok",false},{"error","mailbox quota exceeded"}};
+        Json mappings=Json::array();
+        for(const auto& record:records) {
+            const auto uid=allocate_uid(username); const auto id=move?record.at("id").get<std::string>():random_hex(16);
+            if(move) {
+                Statement update(db_,"UPDATE messages SET folder=?,uid=? WHERE id=? AND username=?");
+                update.text(1,target); update.integer(2,uid); update.text(3,id); update.text(4,username); update.done();
+            } else {
+                Statement source_message(db_,"SELECT raw FROM messages WHERE id=? AND username=?");
+                source_message.text(1,record.at("id").get<std::string>()); source_message.text(2,username); source_message.row();
+                insert_message(username,id,uid,source_message.string(0),target,record.at("seen").get<bool>()); save_flags(id,record);
+                Statement date(db_,"UPDATE messages SET created_at=? WHERE id=?"); date.integer(1,record.at("internal_date").get<std::int64_t>()); date.text(2,id); date.done();
+            }
+            mappings.push_back({{"source_uid",record.at("uid")},{"uid",uid}});
+        }
+        Statement mailbox(db_,"SELECT uidvalidity FROM mailboxes WHERE username=?"); mailbox.text(1,username); mailbox.row();
+        const auto validity=mailbox.integer(0); transaction.commit();
+        return {{"ok",true},{"uidvalidity",validity},{"mappings",std::move(mappings)}};
+    }
     Json deliver(const Json& request) {
         auto username = address(request, "username");
         auto raw = field(request, "raw", static_cast<std::size_t>(max_message_));
         auto delivery_id = identifier(request, "delivery_id");
+        const auto submission_id = request.contains("submission_id") ? identifier(request, "submission_id") : std::string{};
         Transaction transaction(db_);
         {
             Statement existing(db_, "SELECT message_id FROM deliveries WHERE username=? AND delivery_id=?");
             existing.text(1, username); existing.text(2, delivery_id);
             if (existing.row()) return {{"ok", true}, {"id", existing.string(0)}, {"duplicate", true}};
+        }
+        if (!submission_id.empty()) {
+            Statement previous(db_, "SELECT message_id FROM submission_deliveries WHERE username=? AND submission_id=?");
+            previous.text(1, username); previous.text(2, submission_id);
+            if (previous.row()) {
+                const auto id = previous.string(0);
+                Statement receipt(db_, "INSERT INTO deliveries(username,delivery_id,message_id) VALUES(?,?,?)");
+                receipt.text(1, username); receipt.text(2, delivery_id); receipt.text(3, id); receipt.done();
+                transaction.commit();
+                return {{"ok", true}, {"id", id}, {"duplicate", true}};
+            }
         }
         ensure_mailbox(username);
         if (!fits_quota(username, static_cast<std::int64_t>(raw.size()), 1))
@@ -438,8 +675,36 @@ private:
             Statement insert(db_, "INSERT INTO deliveries(username,delivery_id,message_id) VALUES(?,?,?)");
             insert.text(1, username); insert.text(2, delivery_id); insert.text(3, id); insert.done();
         }
+        if (!submission_id.empty()) {
+            Statement receipt(db_, "INSERT INTO submission_deliveries(username,submission_id,message_id) VALUES(?,?,?)");
+            receipt.text(1, username); receipt.text(2, submission_id); receipt.text(3, id); receipt.done();
+        }
         transaction.commit();
         return {{"ok", true}, {"id", id}};
+    }
+    Json verification_candidates(const Json& request) {
+        const auto username = address(request, "username");
+        const auto max_age = integer_field(request, "max_age_seconds", 900, 1, 86400);
+        const auto limit = integer_field(request, "limit", 30, 1, 50);
+        const auto current = now();
+        const auto budget = std::min<std::int64_t>(10 * 1024 * 1024, max_message_);
+        // Query only recent own-account INBOX mail; never mutate flags. Filter
+        // the size before reading raw so oversized MIME cannot exhaust memory.
+        Statement query(db_, "SELECT m.id,m.raw,m.created_at,m.size FROM messages m "
+            "LEFT JOIN message_flags f ON f.id=m.id WHERE m.username=? AND m.folder='INBOX' "
+            "AND COALESCE(f.draft,0)=0 AND m.created_at>=? AND m.created_at<=? AND m.size<=? "
+            "ORDER BY m.created_at DESC,m.uid DESC LIMIT 50");
+        query.text(1, username); query.integer(2, current - max_age); query.integer(3, current); query.integer(4, budget);
+        Json messages = Json::array(); std::int64_t bytes = 0;
+        while (query.row() && static_cast<std::int64_t>(messages.size()) < limit) {
+            const auto size = query.integer(3);
+            if (size > budget - bytes) continue;
+            auto raw = query.string(1);
+            if (static_cast<std::int64_t>(raw.size()) > budget - bytes) continue;
+            bytes += static_cast<std::int64_t>(raw.size());
+            messages.push_back({{"id", query.string(0)}, {"raw", std::move(raw)}, {"internal_date", query.integer(2)}});
+        }
+        return {{"ok", true}, {"messages", std::move(messages)}};
     }
     Json list(const Json& request) {
         auto username = address(request, "username");
@@ -455,10 +720,12 @@ private:
             result["uidvalidity"] = query.integer(0); result["uidnext"] = query.integer(1);
         }
         {
-            Statement query(db_, "SELECT id,uid,size,seen,created_at FROM messages WHERE username=? AND folder=? ORDER BY uid");
+            Statement query(db_, "SELECT m.id,m.uid,m.size,m.seen,m.created_at,COALESCE(f.answered,0),COALESCE(f.flagged,0),COALESCE(f.draft,0) "
+                "FROM messages m LEFT JOIN message_flags f ON f.id=m.id WHERE m.username=? AND m.folder=? ORDER BY m.uid");
             query.text(1, username); query.text(2, selected);
             while (query.row()) result["messages"].push_back({{"id", query.string(0)}, {"uid", query.integer(1)},
-                {"size", query.integer(2)}, {"seen", query.integer(3) != 0}, {"internal_date", query.integer(4)}, {"folder", selected}});
+                {"size", query.integer(2)}, {"seen", query.integer(3) != 0}, {"internal_date", query.integer(4)}, {"folder", selected},
+                {"answered",query.integer(5)!=0},{"flagged",query.integer(6)!=0},{"draft",query.integer(7)!=0}});
         }
         if (include_envelope) {
             Statement query(db_, "SELECT id,substr(raw,1,16384) FROM messages WHERE username=? AND folder=? ORDER BY uid DESC LIMIT 100");
@@ -540,6 +807,7 @@ private:
             update.blob(1, raw); update.integer(2, static_cast<std::int64_t>(raw.size())); update.integer(3, uid);
             update.integer(4, now()); update.text(5, username); update.text(6, id); update.done();
         }
+        save_flags(id,{{"draft",true}});
         transaction.commit(); return {{"ok", true}, {"id", id}, {"uid", uid}, {"folder", "Drafts"}};
     }
     void move_messages(const std::string& username, const std::set<std::string>& ids, const std::string& target) {
@@ -594,7 +862,7 @@ private:
     }
     Json queue_list(const Json& request) {
         const auto limit = integer_field(request, "limit", 1, 1, 100);
-        Statement query(db_, "SELECT id,sender,recipient,raw,attempts,size,created_at FROM queue WHERE state='pending' AND next_attempt<=? ORDER BY next_attempt,created_at,id LIMIT ?");
+        Statement query(db_, "SELECT id,sender,recipient,raw,attempts,size,created_at,submission_id,EXISTS(SELECT 1 FROM queue_routes r WHERE r.queue_id=queue.id) FROM queue WHERE state='pending' AND next_attempt<=? ORDER BY next_attempt,created_at,id LIMIT ?");
         query.integer(1, now()); query.integer(2, limit);
         Json jobs = Json::array();
         std::int64_t response_bytes = 0;
@@ -604,7 +872,7 @@ private:
             const auto size = query.integer(5);
             if (!jobs.empty() && response_bytes + size > max_message_) break;
             jobs.push_back({{"id", query.string(0)}, {"sender", query.string(1)}, {"recipient", query.string(2)},
-                {"raw", query.string(3)}, {"attempts", query.integer(4)}, {"created_at",query.integer(6)}});
+                {"raw", query.string(3)}, {"attempts", query.integer(4)}, {"created_at",query.integer(6)}, {"submission_id",query.string(7)}, {"local_route",query.integer(8)!=0}});
             response_bytes += size;
         }
         return {{"ok", true}, {"jobs", std::move(jobs)}};
@@ -622,6 +890,7 @@ private:
     }
     sqlite3* db_ = nullptr;
     std::unique_ptr<DataDirectoryLock> data_lock_;
+    Config config_;
     std::int64_t max_message_, max_queue_bytes_, max_queue_messages_, max_mailbox_bytes_, max_mailbox_messages_;
     std::mutex mutex_;
 };

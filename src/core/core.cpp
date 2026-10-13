@@ -143,6 +143,9 @@ Config Config::from_file(const std::filesystem::path& path) {
     if (config.text("data_dir").empty()) config.values["data_dir"] = (config.source.parent_path() / "../data").lexically_normal().string();
     if (config.text("log_dir").empty()) config.values["log_dir"] = (std::filesystem::path(config.text("data_dir")) / "logs").string();
     if (config.text("tls_certificate").empty() != config.text("tls_private_key").empty()) throw std::invalid_argument("both TLS certificate and private key are required");
+    if (config.values.contains("ports") && !config.values.at("ports").is_object()) throw std::invalid_argument("ports must be a JSON object");
+    for (const auto* name : {"auth", "storage", "filter", "transfer", "smtp", "submission", "smtps", "pop3", "pop3s", "imap", "imaps", "web", "admin"})
+        (void)config.port(name);
     if (config.number("max_message_bytes", 10485760) < 1024 || config.number("max_message_bytes", 10485760) > 100 * 1024 * 1024) throw std::invalid_argument("max_message_bytes must be 1024..104857600");
     if (config.number("max_connections", 32) < 1 || config.number("max_connections", 32) > 1024) throw std::invalid_argument("max_connections must be 1..1024");
     if (config.number("timeout_seconds", 30) < 1 || config.number("timeout_seconds", 30) > 300) throw std::invalid_argument("timeout_seconds must be 1..300");
@@ -170,13 +173,32 @@ std::string Config::text(const std::string& key, const std::string& fallback) co
 int Config::number(const std::string& key, int fallback) const { return values.value(key, fallback); }
 bool Config::flag(const std::string& key, bool fallback) const { return values.value(key, fallback); }
 std::string Config::outbound_mode() const { return text("outbound_mode", text("smarthost_host").empty() ? "disabled" : "relay"); }
-std::string Config::mail_hostname() const { return text("mail_hostname",outbound_mode()=="direct"?"mail."+text("domain"):text("domain","localhost")); }
+std::string Config::mail_hostname() const {
+    const auto domain = text("domain", "localhost");
+    return text("mail_hostname", domain == "localhost" || lower(domain).starts_with("mail.") ? domain : "mail." + domain);
+}
 int Config::port(const std::string& service) const {
-    static const std::map<std::string, int> defaults{{"auth",18081},{"storage",18082},{"filter",18083},{"transfer",18084},{"smtp",25},{"pop3",1110},{"imap",1143},{"web",8080},{"admin",8081}};
-    int port_value = defaults.at(service);
-    if (values.contains("ports")) port_value = values.at("ports").value(service, port_value);
-    if (port_value < 1 || port_value > 65535) throw std::invalid_argument("invalid service port");
+    static const std::map<std::string, int> defaults{{"auth",18081},{"storage",18082},{"filter",18083},{"transfer",18084},{"smtp",25},{"submission",587},{"smtps",465},{"pop3",110},{"pop3s",995},{"imap",143},{"imaps",993},{"web",80},{"admin",8081}};
+    int port_value = service == "web" && !text("tls_certificate").empty() ? 443 : defaults.at(service);
+    const bool optional = service == "submission" || service == "smtps" || service == "pop3s" || service == "imaps";
+    if (values.contains("ports") && values.at("ports").contains(service)) {
+        const auto& value=values.at("ports").at(service);
+        if(!value.is_number_integer() || (value.is_number_unsigned() && value.get<std::uint64_t>()>65535)) throw std::invalid_argument("invalid service port");
+        const auto number=value.get<std::int64_t>();
+        if(number<(optional?0:1) || number>65535) throw std::invalid_argument("invalid service port");
+        port_value=static_cast<int>(number);
+    }
+    if (port_value < (optional ? 0 : 1) || port_value > 65535) throw std::invalid_argument("invalid service port");
     return port_value;
+}
+std::vector<TcpListener> Config::listeners(const std::string& service) const {
+    std::vector<TcpListener> result{{service, port(service), false}};
+    if (text("tls_certificate").empty() || text("tls_private_key").empty()) return result;
+    auto add = [&](const char* name, bool implicit) { if (const auto value = port(name); value) result.push_back({name, value, implicit}); };
+    if (service == "smtp") { add("submission", false); add("smtps", true); }
+    else if (service == "pop3") add("pop3s", true);
+    else if (service == "imap") add("imaps", true);
+    return result;
 }
 std::string Config::token() const {
     const auto name = text("service_token_env", "POSTPLUS_SERVICE_TOKEN");
@@ -337,10 +359,13 @@ void Connection::start_tls_client(const std::string& hostname) {
     if (SSL_set_tlsext_host_name(impl_->tls->native_handle(), hostname.c_str()) != 1) throw std::runtime_error("cannot set TLS hostname");
     impl_->wait([&](auto done) { impl_->tls->async_handshake(asio::ssl::stream_base::client, done); });
 }
-void serve_tcp(const Config& config, const std::string& service, Session handler, bool internal, std::function<bool()> stop_requested) {
+namespace {
+void serve_listeners(const Config& config, const std::string& service, const std::vector<TcpListener>& listeners,
+                     ListenerSession handler, bool internal, std::function<bool()> stop_requested) {
     asio::io_context io;
     const auto address = asio::ip::make_address(internal ? "127.0.0.1" : config.text(service == "admin" ? "admin_bind" : "bind", "127.0.0.1"));
-    tcp::acceptor acceptor(io, {address, static_cast<unsigned short>(config.port(service))});
+    std::vector<std::unique_ptr<tcp::acceptor>> acceptors;
+    for (const auto& listener : listeners) acceptors.push_back(std::make_unique<tcp::acceptor>(io, tcp::endpoint{address, static_cast<unsigned short>(listener.port)}));
     const auto max = config.number("max_connections", 32);
     asio::thread_pool workers(static_cast<std::size_t>(max));
     std::atomic<int> active = 0;
@@ -350,7 +375,7 @@ void serve_tcp(const Config& config, const std::string& service, Session handler
     asio::steady_timer stop_timer(io);
     (void)process_stop_requested();
     auto stop_listener = [&](bool cancel_sessions) {
-        std::error_code ec; acceptor.close(ec);
+        std::error_code ec; for (auto& acceptor : acceptors) acceptor->close(ec);
         signals.cancel(); stop_timer.cancel();
         if (cancel_sessions) for (auto& weak : connections) if (auto connection = weak.lock()) connection->request_stop();
     };
@@ -365,27 +390,40 @@ void serve_tcp(const Config& config, const std::string& service, Session handler
         stop_timer.async_wait([&](std::error_code ec) { if (!ec) check_stop(); });
     };
     check_stop();
-    std::function<void()> accept_next;
-    accept_next = [&] {
+    std::function<void(std::size_t)> accept_next;
+    accept_next = [&](std::size_t index) {
         auto connection = std::make_shared<Connection>(std::chrono::seconds(config.number("timeout_seconds", 30)));
-        acceptor.async_accept(connection->socket(), [&,connection](std::error_code ec) {
+        acceptors[index]->async_accept(connection->socket(), [&,connection,index](std::error_code ec) {
             if (!ec && active.load() < max) {
                 std::erase_if(connections, [](const auto& weak) { return weak.expired(); });
                 connections.push_back(connection);
                 ++active;
-                asio::post(workers, [&,connection] {
-                    try { handler(*connection); }
+                asio::post(workers, [&,connection,index] {
+                    try {
+                        if (listeners[index].implicit_tls) connection->start_tls_server(config);
+                        handler(*connection, listeners[index]);
+                    }
                     catch (const std::exception&) { log(service, "session closed after I/O or protocol error", "debug"); }
                     --active;
                 });
             }
-            if (acceptor.is_open()) accept_next();
+            if (acceptors[index]->is_open()) accept_next(index);
         });
     };
-    accept_next();
-    log(service, "listening on " + address.to_string() + ":" + std::to_string(config.port(service)));
+    for (std::size_t index = 0; index < listeners.size(); ++index) {
+        accept_next(index);
+        log(service, (listeners[index].name == service ? "" : listeners[index].name + " ") + "listening on " + address.to_string() + ":" + std::to_string(listeners[index].port));
+    }
     io.run();
     workers.join();
+}
+}
+void serve_tcp(const Config& config, const std::string& service, Session handler, bool internal, std::function<bool()> stop_requested) {
+    serve_listeners(config, service, {{service, config.port(service), false}},
+        [handler=std::move(handler)](Connection& connection, const TcpListener&) { handler(connection); }, internal, std::move(stop_requested));
+}
+void serve_tcp_listeners(const Config& config, const std::string& service, ListenerSession handler, std::function<bool()> stop_requested) {
+    serve_listeners(config, service, config.listeners(service), std::move(handler), false, std::move(stop_requested));
 }
 
 namespace {
@@ -521,6 +559,7 @@ void serve_http(const Config& config, const std::string& service, HttpHandler ha
                 limit = (request.path == "/api/send" || request.path == "/api/drafts") ? static_cast<std::size_t>(config.number("max_message_bytes",10485760)) * 2 + 16384 : 16384;
                 if (service == "admin" && request.path == "/api/admin/config") limit = 1024 * 1024;
                 if (service == "web" && request.path == "/api/setup") limit = 1024 * 1024;
+                if (service == "web" && lower(request.path.substr(0,request.path.find('?'))) == "/autodiscover/autodiscover.xml") limit = 4096;
                 if (request.method == "GET" || request.method == "DELETE") limit = 0;
             }
             const auto size = body_size(request.headers, limit);

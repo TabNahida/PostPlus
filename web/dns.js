@@ -168,7 +168,7 @@ window.PostPlusDns = (() => {
     }
     function invalidate(){if(disposed)return;version++;stale=Boolean(result)||busy||stale;result=null;errorKey="";render();}
     function invalidateKey(){keyRevision++;keyRecord=null;keyError="";keyProblem=null;invalidate();}
-    function syncHostname(){if(!hostnameEdited||!clean(inputs.hostname)){inputs.hostname.value=publicDomain(domain())?"mail."+domain():"";onHostnameChange?.(hostname());}}
+    function syncHostname(){if(!hostnameEdited||!clean(inputs.hostname)){inputs.hostname.value=publicDomain(domain())?(domain().startsWith("mail.")?domain():"mail."+domain()):"";onHostnameChange?.(hostname());}}
     inputs.domain.addEventListener("input",()=>{syncHostname();invalidateKey();});
     inputs.hostname.addEventListener("input",()=>{hostnameEdited=true;onHostnameChange?.(hostname());invalidate();});
     inputs.relayHost.addEventListener("input",invalidate);inputs.smtpPort.addEventListener("input",invalidate);

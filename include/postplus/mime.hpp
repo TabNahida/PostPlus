@@ -16,6 +16,7 @@ struct Part {
     std::vector<std::pair<std::string, std::string>> headers;
     std::string content_type;
     std::string body; // Decoded bytes; character sets are preserved, never guessed.
+    std::string embedded_message; // Transfer-decoded wire message for message/rfc822 sections.
     std::vector<Part> parts;
 };
 Part parse(std::string_view raw, Limits limits = {});

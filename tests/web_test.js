@@ -133,7 +133,7 @@ for (const file of ["index.html", "admin.html", "setup.html"]) {
   }
   for (const match of html.matchAll(/data-i18n-(?:aria-label|title|placeholder)="([^"]+)"/g)) translated(match[1], file);
 }
-for (const file of ["app.js", "admin.js", "setup.js", "settings.js", "size.js", "acme.js", "dns.js", "preferences.js", "address.js", "mail-reader.js"]) {
+for (const file of ["app.js", "admin.js", "setup.js", "settings.js", "size.js", "acme.js", "dns.js", "preferences.js", "address.js", "mail-reader.js", "mail-clients.js", "update.js"]) {
   const script = fs.readFileSync(path.join(root, "web", file), "utf8");
   new vm.Script(script, {filename:file});
   for (const match of script.matchAll(/\bt\("([^"]+)"/g)) translated(match[1], file);
@@ -380,6 +380,8 @@ async function checkSetupAddressFlow() {
     fetch:async(route,options)=>{requests.push({route,options});return {ok:true,json:async()=>options.method==="POST"?{ok:true,web_url:"http://localhost:8080/",admin_url:"http://localhost:8081/"}:{ok:true,defaults,schema:[]}};}};
   vm.runInNewContext(fs.readFileSync(path.join(root,"web/dns.js"),"utf8"),sandbox);
   sandbox.PostPlusDns=sandbox.window.PostPlusDns;
+  vm.runInNewContext(fs.readFileSync(path.join(root,"web/mail-clients.js"),"utf8"),sandbox);
+  sandbox.PostPlusMailClients=sandbox.window.PostPlusMailClients;
   vm.runInNewContext(fs.readFileSync(path.join(root,"web/setup.js"),"utf8"),sandbox);
   for(let index=0;index<12;index++)await Promise.resolve();
   assert.equal(id("setup-admin").value,"admin","The setup default is shown as a mailbox name");
@@ -430,6 +432,8 @@ async function checkSetupTlsLinks() {
       fetch:async(route,options)=>{requests.push({...options,route});return {ok:true,json:async()=>route==="/api/setup/dkim"?{ok:true,domain:"example.com",selector:"postplus",name:"postplus._domainkey.example.com",type:"TXT",value:"v=DKIM1; k=rsa; h=sha256; p="+"A".repeat(392),fingerprint:"public-key-fingerprint"}:options.method==="POST"?{ok:true,web_url:webUrl,admin_url:"https://localhost:8081/"}:{ok:true,defaults,schema:[]}};}};
     vm.runInNewContext(fs.readFileSync(path.join(root,"web/dns.js"),"utf8"),sandbox);
     sandbox.PostPlusDns=sandbox.window.PostPlusDns;
+    vm.runInNewContext(fs.readFileSync(path.join(root,"web/mail-clients.js"),"utf8"),sandbox);
+    sandbox.PostPlusMailClients=sandbox.window.PostPlusMailClients;
     vm.runInNewContext(fs.readFileSync(path.join(root,"web/setup.js"),"utf8"),sandbox);
     for(let index=0;index<12;index++)await Promise.resolve();
     assert.equal(id("setup-acme").hidden,true,"Existing PEM certificates do not present a public-port-80 requirement");

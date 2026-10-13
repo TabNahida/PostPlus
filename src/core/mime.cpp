@@ -469,7 +469,7 @@ struct Parser {
         else invalid("Unsupported MIME content transfer encoding");
         if (decoded.size() > limits.max_bytes - std::min(limits.max_bytes, decoded_bytes)) invalid("Decoded MIME size limit exceeded");
         decoded_bytes += decoded.size();
-        if (out.content_type == "message/rfc822") out.parts.push_back(parse_part(decoded, depth + 1));
+        if (out.content_type == "message/rfc822") { out.parts.push_back(parse_part(decoded, depth + 1)); out.embedded_message = std::move(decoded); }
         else out.body = std::move(decoded);
         return out;
     }

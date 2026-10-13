@@ -1,4 +1,5 @@
 #include "postplus/core.hpp"
+#include <postplus/forwarding.hpp>
 #include <algorithm>
 #include <cctype>
 #include <sstream>
@@ -24,7 +25,7 @@ bool path(const std::string& arg, const std::string& prefix, std::string& addres
     address = lower(rest.substr(1, end - 1)); suffix = trim(rest.substr(end + 1));
     return address.empty() || valid_address(address);
 }
-void smtp(Connection& c, const Config& cfg, std::chrono::seconds data_timeout) {
+void smtp(Connection& c, const Config& cfg, std::chrono::seconds data_timeout, bool submission) {
     const auto maximum = static_cast<std::size_t>(cfg.number("max_message_bytes", 10485760));
     bool greeted = false, extended = false, have_sender = false;
     unsigned auth_failures = 0;
@@ -32,13 +33,14 @@ void smtp(Connection& c, const Config& cfg, std::chrono::seconds data_timeout) {
     const auto recipient_limit = static_cast<std::size_t>(std::clamp(cfg.number("max_recipients", 100), 1, 100));
     std::string username, sender;
     std::vector<std::string> recipients;
-    auto reset = [&] { have_sender = false; sender.clear(); recipients.clear(); };
+    Json recipient_routes = Json::object();
+    auto reset = [&] { have_sender = false; sender.clear(); recipients.clear(); recipient_routes.clear(); };
     auto reply = [&](std::string_view s) { c.write(s); };
     auto auth_failure = [&](std::string_view response) {
         if (++auth_failures >= auth_limit) { reply("421 4.7.0 Too many failed authentication attempts\r\n"); return true; }
         reply(response); return false;
     };
-    reply("220 " + cfg.text("domain", "localhost") + " PostPlus ESMTP ready\r\n");
+    reply("220 " + cfg.mail_hostname() + " PostPlus ESMTP ready\r\n");
     for (;;) {
         // RFC 4954 permits larger AUTH command lines than ordinary SMTP commands.
         auto command_line = c.line(12286);
@@ -53,10 +55,10 @@ void smtp(Connection& c, const Config& cfg, std::chrono::seconds data_timeout) {
             if (verb == "ehlo" || verb == "helo") {
                 if (arg.empty()) { reply("501 5.5.2 Greeting requires a hostname\r\n"); continue; }
                 reset(); greeted = true; extended = verb == "ehlo";
-                if (!extended) { reply("250 " + cfg.text("domain", "localhost") + "\r\n"); continue; }
-                reply("250-" + cfg.text("domain", "localhost") + "\r\n250-SIZE " + std::to_string(maximum) + "\r\n");
+                if (!extended) { reply("250 " + cfg.mail_hostname() + "\r\n"); continue; }
+                reply("250-" + cfg.mail_hostname() + "\r\n250-SIZE " + std::to_string(maximum) + "\r\n250-8BITMIME\r\n");
                 if (!c.encrypted() && tls_available(cfg)) reply("250-STARTTLS\r\n");
-                if (may_auth(c, cfg)) reply("250-AUTH PLAIN LOGIN\r\n");
+                if (c.encrypted() || (!submission && may_auth(c, cfg))) reply("250-AUTH PLAIN LOGIN\r\n");
                 reply("250 HELP\r\n"); continue;
             }
             if (verb == "help") { reply("214 Supported: EHLO HELO STARTTLS AUTH MAIL RCPT DATA RSET NOOP QUIT HELP\r\n"); continue; }
@@ -71,7 +73,7 @@ void smtp(Connection& c, const Config& cfg, std::chrono::seconds data_timeout) {
             }
             if (verb == "auth") {
                 if (!extended || have_sender || !username.empty()) { reply("503 5.5.1 AUTH unavailable in this state\r\n"); continue; }
-                if (!may_auth(c, cfg)) { reply("538 5.7.11 Encryption required\r\n"); continue; }
+                if (!c.encrypted() && (submission || !may_auth(c, cfg))) { reply("538 5.7.11 Encryption required\r\n"); continue; }
                 auto [mechanism, initial] = command(arg);
                 std::string user, password;
                 try {
@@ -98,15 +100,25 @@ void smtp(Connection& c, const Config& cfg, std::chrono::seconds data_timeout) {
                 username = result.value("username", user); reply("235 2.7.0 Authentication successful\r\n"); continue;
             }
             if (verb == "mail") {
+                if (submission && !c.encrypted()) { reply("530 5.7.0 Must issue STARTTLS first\r\n"); continue; }
+                if (submission && username.empty()) { reply("530 5.7.0 Authentication required\r\n"); continue; }
                 std::string suffix, proposed;
                 if (!path(arg, "from:", proposed, suffix)) { reply("501 5.1.7 Invalid reverse path\r\n"); continue; }
                 if (!suffix.empty()) {
-                    if (!extended || lower(suffix.substr(0, 5)) != "size=" || suffix.size() <= 5 ||
-                        !std::all_of(suffix.begin() + 5, suffix.end(), [](unsigned char ch) { return std::isdigit(ch); })) {
-                        reply("555 5.5.4 Unsupported MAIL parameter\r\n"); continue;
+                    if (!extended) { reply("555 5.5.4 MAIL parameters require EHLO\r\n"); continue; }
+                    std::istringstream parameters(suffix); std::string parameter;
+                    bool size_seen = false, body_seen = false, invalid_parameter = false, oversize = false;
+                    while (parameters >> parameter) {
+                        parameter = lower(parameter);
+                        if (parameter.starts_with("size=") && !size_seen && parameter.size() > 5 &&
+                            std::all_of(parameter.begin() + 5, parameter.end(), [](unsigned char ch) { return std::isdigit(ch); })) {
+                            size_seen = true;
+                            try { oversize = std::stoull(parameter.substr(5)) > maximum; } catch (...) { oversize = true; }
+                        } else if ((parameter == "body=7bit" || parameter == "body=8bitmime") && !body_seen) body_seen = true;
+                        else invalid_parameter = true;
                     }
-                    try { if (std::stoull(suffix.substr(5)) > maximum) { reply("552 5.3.4 Message exceeds size limit\r\n"); continue; } }
-                    catch (...) { reply("552 5.3.4 Message exceeds size limit\r\n"); continue; }
+                    if (invalid_parameter) { reply("555 5.5.4 Unsupported or duplicate MAIL parameter\r\n"); continue; }
+                    if (oversize) { reply("552 5.3.4 Message exceeds size limit\r\n"); continue; }
                 }
                 reset(); sender = proposed; have_sender = true; reply("250 2.1.0 Sender accepted\r\n"); continue;
             }
@@ -118,9 +130,11 @@ void smtp(Connection& c, const Config& cfg, std::chrono::seconds data_timeout) {
                 if (recipients.size() >= recipient_limit) { reply("452 4.5.3 Too many recipients\r\n"); continue; }
                 bool local = recipient.substr(recipient.rfind('@') + 1) == lower(cfg.text("domain", "localhost"));
                 if (local) {
-                    auto result = rpc(cfg, "auth", {{"op", "exists"}, {"username", recipient}});
-                    if (!result.value("ok", false)) { reply("451 4.3.0 Recipient service unavailable\r\n"); continue; }
+                    Json result;
+                    try { result = recipient_routes.contains(recipient) ? recipient_routes.at(recipient) : resolve_local_recipient(cfg, recipient); }
+                    catch (const std::exception&) { reply("451 4.3.0 Recipient service unavailable\r\n"); continue; }
                     if (!result.value("exists", false)) { reply("550 5.1.1 Unknown recipient\r\n"); continue; }
+                    recipient_routes[recipient] = result;
                 } else if (username.empty() || cfg.outbound_mode()=="disabled" ||
                     (cfg.outbound_mode()=="direct" && !sender.empty() && sender.substr(sender.rfind('@')+1)!=lower(cfg.text("domain")))) { reply("550 5.7.1 Relay denied\r\n"); continue; }
                 if (std::find(recipients.begin(), recipients.end(), recipient) == recipients.end()) recipients.push_back(recipient);
@@ -150,9 +164,9 @@ void smtp(Connection& c, const Config& cfg, std::chrono::seconds data_timeout) {
                 }
                 c.set_deadline(std::nullopt);
                 if (too_large) { reset(); reply("552 5.3.4 Message exceeds size limit\r\n"); continue; }
-                Json submission = {{"op", "enqueue"}, {"sender", sender}, {"recipients", recipients}, {"raw", raw}};
-                if (!username.empty()) submission["sent_username"] = username;
-                auto result = rpc(cfg, "storage", submission);
+                Json queued = {{"op", "enqueue"}, {"sender", sender}, {"recipients", recipients}, {"recipient_routes", recipient_routes}, {"raw", raw}};
+                if (!username.empty()) queued["sent_username"] = username;
+                auto result = rpc(cfg, "storage", queued);
                 reset();
                 if (result.value("ok", false)) reply("250 2.0.0 Message durably queued\r\n");
                 else reply("451 4.3.0 Unable to queue message\r\n");
@@ -169,6 +183,6 @@ int main(int argc, char** argv) {
         if (!value.is_number_integer() || value.get<std::int64_t>() < 1 || value.get<std::int64_t>() > 3600)
             throw std::invalid_argument("smtp_data_timeout_seconds must be an integer from 1 to 3600");
         const auto timeout = std::chrono::seconds(value.get<std::int64_t>());
-        serve_tcp(cfg, "smtp", [&](Connection& c) { smtp(c, cfg, timeout); });
+        serve_tcp_listeners(cfg, "smtp", [&](Connection& c, const TcpListener& listener) { smtp(c, cfg, timeout, listener.name != "smtp"); });
     });
 }

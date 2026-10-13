@@ -74,7 +74,7 @@ if grep -Eq '"setup_required"[[:space:]]*:[[:space:]]*true([[:space:],}]|$)' -- 
     die "setup is required in $config_path; finish the browser setup first"
 fi
 
-for service in postplus postplus-admin postplus-auth postplus-storage postplus-filter \
+for service in postplus postplus-update postplus-admin postplus-auth postplus-storage postplus-filter \
                postplus-transfer postplus-delivery postplus-smtp postplus-pop3 postplus-imap postplus-web; do
     [[ -f $install_dir/$service && -x $install_dir/$service ]] ||
         die "missing executable $install_dir/$service; keep the complete release together"
@@ -98,7 +98,7 @@ for value in "$install_dir" "$working_dir" "$config_path"; do
 done
 
 if [[ $(id -u) == 0 ]] && command -v runuser >/dev/null; then
-    for service in postplus postplus-admin postplus-auth postplus-storage postplus-filter \
+    for service in postplus postplus-update postplus-admin postplus-auth postplus-storage postplus-filter \
                    postplus-transfer postplus-delivery postplus-smtp postplus-pop3 postplus-imap postplus-web; do
         runuser -u "$service_user" -- test -x "$install_dir/$service" ||
             die "$service_user cannot execute $install_dir/$service"
@@ -125,6 +125,13 @@ unit_quote() {
     printf '"%s"' "$escaped"
 }
 
+# Keep recovery executable outside the online updater's module inventory.
+# It must still work if an update replaces postplus-update with a bad binary.
+recovery_helper=$install_dir/.postplus-recovery
+if [[ -e $recovery_helper || -L $recovery_helper ]]; then
+    [[ ! -L $recovery_helper && -f $recovery_helper ]] || die "refusing to replace $recovery_helper"
+    [[ $(stat -c '%h' -- "$recovery_helper") == 1 ]] || die "refusing hard-linked recovery helper $recovery_helper"
+fi
 unit_file=/etc/systemd/system/postplus.service
 unit_content=$(cat <<EOF
 # Managed by PostPlus install-systemd.sh; do not edit directly.
@@ -137,6 +144,7 @@ After=network-online.target
 Type=exec
 User=$service_user
 WorkingDirectory=$(unit_directory "$working_dir")
+ExecStartPre=:$(unit_quote "$recovery_helper") --recover-launcher --config $(unit_quote "$config_path")
 ExecStart=:$(unit_quote "$install_dir/postplus") --config $(unit_quote "$config_path")
 Restart=on-failure
 RestartForceExitStatus=75
@@ -173,8 +181,17 @@ if [[ -n $loaded_unit && $loaded_unit != "$unit_file" ]]; then
     die "postplus.service is already provided by $loaded_unit; refusing to override it"
 fi
 
+temporary_helper=
+temporary_unit=
+trap 'rm -f -- "${temporary_unit:-}" "${temporary_helper:-}"' EXIT
+temporary_helper=$(mktemp "$install_dir/.postplus-recovery.XXXXXX")
 temporary_unit=$(mktemp /etc/systemd/system/.postplus.service.XXXXXX)
-trap 'rm -f -- "${temporary_unit:-}"' EXIT
+# The service user can execute this root-owned recovery copy; online updates
+# preserve it. Running this installer refreshes it for a new updater contract.
+cp -- "$install_dir/postplus-update" "$temporary_helper"
+chmod 0755 "$temporary_helper"
+mv -fT -- "$temporary_helper" "$recovery_helper"
+temporary_helper=
 printf '%s\n' "$unit_content" > "$temporary_unit"
 chmod 0644 "$temporary_unit"
 changed=false

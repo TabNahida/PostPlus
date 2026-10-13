@@ -23,12 +23,33 @@ int main() {
         check(secure_equal("secret","secret") && !secure_equal("secret","secreT") && !secure_equal("secret","secrets"),"secret comparison");
         check(random_hex().size() == 32 && random_hex() != random_hex(),"random ID");
         Config legacy;legacy.values={{"domain","example.com"}};
+        for (const auto& field : settings_schema(Config{}))
+            if (field.at("key")=="ports.web") check(field.at("default")==80,"empty configuration schema default");
         check(legacy.port("smtp")==25,"default SMTP must receive Internet mail on port 25");
+        check(legacy.port("pop3")==110 && legacy.port("imap")==143 && legacy.port("web")==80,"standard cleartext protocol ports");
+        check(legacy.port("submission")==587 && legacy.port("smtps")==465 && legacy.port("pop3s")==995 && legacy.port("imaps")==993,"standard encrypted client ports");
+        check(legacy.listeners("smtp").size()==1 && legacy.listeners("imap").size()==1,"TLS-only listeners disabled without credentials");
+        legacy.values["tls_certificate"]="certificate.pem"; legacy.values["tls_private_key"]="key.pem";
+        check(legacy.port("web")==443 && legacy.listeners("smtp").size()==3 && legacy.listeners("pop3").size()==2,"TLS protocol defaults");
+        check(legacy.listeners("smtp")[1].name=="submission" && !legacy.listeners("smtp")[1].implicit_tls && legacy.listeners("smtp")[2].implicit_tls,"submission encryption modes");
+        legacy.values["ports"]={{"submission",0},{"smtps",0},{"pop3s",0},{"imaps",0},{"web",8080}};
+        check(legacy.listeners("smtp").size()==1 && legacy.listeners("pop3").size()==1 && legacy.port("web")==8080,"explicit disable and custom Web port");
+        legacy.values.erase("tls_certificate"); legacy.values.erase("tls_private_key");
         legacy.values["ports"]={{"smtp",2525}};
         check(legacy.port("smtp")==2525,"explicit legacy SMTP port must be preserved");
+        for (const auto& value : {Json(-1), Json(65536), Json(4294967297ULL), Json(1.5), Json("587"), Json(true)}) {
+            Config malformed; malformed.values["ports"]={{"submission",value}};
+            rejects([&] { malformed.port("submission"); });
+        }
+        Config malformed; malformed.values["ports"]={{"smtp",0}};
+        rejects([&] { malformed.port("smtp"); });
+        Config hostname; hostname.values["domain"]="mail.example.com";
+        check(hostname.mail_hostname()=="mail.example.com","mail hostname duplicated prefix");
+        hostname.values["domain"]="localhost";
+        check(hostname.mail_hostname()=="localhost","localhost mail hostname");
         check(legacy.outbound_mode()=="disabled","legacy blank relay must remain disabled");
         legacy.values["smarthost_host"]="smtp.example.com";
-        check(legacy.outbound_mode()=="relay" && legacy.mail_hostname()=="example.com","legacy relay compatibility");
+        check(legacy.outbound_mode()=="relay" && legacy.mail_hostname()=="mail.example.com","relay mode and public hostname default");
         legacy.values["outbound_mode"]="direct";
         check(legacy.mail_hostname()=="mail.example.com","direct EHLO default hostname");
         legacy.values["outbound_mode"]="disabled";

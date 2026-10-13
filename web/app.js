@@ -5,7 +5,21 @@ const $ = (id) => document.getElementById(id);
 const state = { user: null, messages: [], selected: null, previews: new Map(), view: "INBOX", loading: false, readVersion: 0, listVersion: 0, folders: [], usage: null, draftId: null, composeDirty: false, composeSaving: false };
 const folderLabels = {INBOX:"Inbox",Sent:"Sent",Drafts:"Drafts",Trash:"Trash",Junk:"Junk",Archive:"Archive"};
 const messageReader=PostPlusMailReader.create($("message-body"));
+const verificationCodes=PostPlusVerificationCode.create($("verification-code"),{request:api});
 let noticeTimer;
+let mailboxKeys=null;
+let verificationRefresh=null;
+function scheduleVerificationRefresh(){
+  clearTimeout(verificationRefresh);verificationRefresh=null;
+  if(!state.user)return;
+  verificationRefresh=setTimeout(async()=>{
+    verificationRefresh=null;
+    if(!state.user)return;
+    if(!document.hidden)await verificationCodes.load();
+    scheduleVerificationRefresh();
+  },15000);
+}
+document.addEventListener("visibilitychange",()=>{if(state.user&&!document.hidden)verificationCodes.load();});
 const loginAddress=PostPlusAddress.create($("login-email"),$("login-domain"));
 const mailDomainReady=api("/api/public/config",{quiet:true}).then(data=>{loginAddress.setDomain(data.domain);return true;}).catch(()=>false);
 
@@ -25,7 +39,7 @@ function formError(id, message = "") {
 async function api(path, { method = "GET", body, quiet = false } = {}) {
   const headers = {};
   if (body !== undefined) headers["Content-Type"] = "application/json";
-  if (method !== "GET" && state.user) headers["X-CSRF-Token"] = state.user.csrf;
+  if ((method !== "GET" || path.startsWith("/api/api-keys")) && state.user) headers["X-CSRF-Token"] = state.user.csrf;
   let response;
   try {
     response = await fetch(path, { method, headers, body: body === undefined ? undefined : JSON.stringify(body), credentials: "same-origin", cache: "no-store" });
@@ -56,6 +70,9 @@ function element(tag, className, text) {
 
 function signedOut() {
   PostPlusPreferences.closeNavigation();
+  verificationCodes.reset();
+  clearTimeout(verificationRefresh);verificationRefresh=null;
+  mailboxKeys?.dispose();mailboxKeys=null;
   state.user = null;
   state.messages = [];
   state.previews.clear();
@@ -80,6 +97,7 @@ function signedOut() {
 
 async function signedIn(user) {
   state.user = user;
+  scheduleVerificationRefresh();
   $("login-screen").hidden = true;
   $("app-screen").hidden = false;
   $("user-address").textContent = user.username;
@@ -88,6 +106,14 @@ async function signedIn(user) {
   $("login-password").value = "";
   await switchView("INBOX");
 }
+
+$("mailbox-keys-open").addEventListener("click",()=>{
+  if(!state.user)return;
+  mailboxKeys?.dispose();
+  mailboxKeys=PostPlusKeyPermissions.mount($("mailbox-keys-content"),{api,onError:message=>showNotice(message,true)});
+  $("mailbox-keys-dialog").showModal();
+});
+$("mailbox-keys-dialog").addEventListener("close",()=>{mailboxKeys?.dispose();mailboxKeys=null;});
 
 async function busy(form, action) {
   const submit = form.querySelector('[type="submit"]');
@@ -114,6 +140,11 @@ $("logout").addEventListener("click", async () => {
   catch (error) { showNotice(error.message, true); }
 });
 
+function folderBadgeCount(name, folder) {
+  const value = name === "Drafts" ? folder?.total : ["INBOX","Junk","Archive"].includes(name) ? folder?.unread : 0;
+  return Number.isSafeInteger(value) && value > 0 ? value : 0;
+}
+
 function renderFolderState() {
   $("folder-title").textContent = t(folderLabels[state.view]);
   for (const [name,label] of Object.entries(folderLabels)) {
@@ -122,7 +153,7 @@ function renderFolderState() {
     if (name === state.view) nav.setAttribute("aria-current","page"); else nav.removeAttribute("aria-current");
     const count = state.folders.find(folder => folder.name === name);
     const badge = $(`count-${name.toLowerCase()}`);
-    badge.textContent = String(name === "INBOX" ? count?.unread ?? count?.unseen ?? 0 : count?.total ?? count?.messages ?? 0);
+    badge.textContent = String(folderBadgeCount(name,count));
     badge.hidden = !Number(badge.textContent);
   }
   $("message-delete").textContent = t(state.view === "Trash" ? "Delete permanently" : "Move to Trash");
@@ -191,6 +222,7 @@ function clearReader() {
 
 async function loadInbox() {
   if (!state.user) return;
+  void verificationCodes.load();
   const version = ++state.listVersion;
   const folder = state.view;
   state.loading = true;
@@ -350,6 +382,8 @@ document.querySelectorAll("[data-close]").forEach((button) => {
 
 
 document.addEventListener("postplus:language", () => {
+  if($("mailbox-keys-dialog").open && state.user){mailboxKeys?.dispose();mailboxKeys=PostPlusKeyPermissions.mount($("mailbox-keys-content"),{api,onError:message=>showNotice(message,true)});}
+  verificationCodes.translate();
   document.title = state.user ? `${t(folderLabels[state.view])} · ${state.user.username} · PostPlus` : t("PostPlus · Your mail, in order");
   $("notice").hidden = true;
   for (const id of ["login-error", "compose-error", "delete-error"]) formError(id);

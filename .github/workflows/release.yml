@@ -60,11 +60,13 @@ jobs:
         run: xmake pack -f ${{ matrix.format }} --autobuild=n -o build/packages postplus
       - name: Verify and run the extracted package
         run: python tests/release_package_test.py --packages build/packages --platform ${{ matrix.platform }} --arch ${{ matrix.arch }}
+      - name: Generate native updater module assets
+        run: python scripts/release_manifest.py modules --packages build/packages --platform ${{ matrix.platform }} --arch ${{ matrix.arch }}
       - name: Upload verified release archive
         uses: actions/upload-artifact@v4
         with:
           name: package-${{ matrix.platform }}-${{ matrix.arch }}
-          path: build/packages/postplus-*.*
+          path: build/packages/*
           if-no-files-found: error
           retention-days: 14
       - name: Upload diagnostic logs

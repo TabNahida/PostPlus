@@ -13,6 +13,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <fstream>
+#include <future>
 #include <iostream>
 #include <set>
 #include <stdexcept>
@@ -146,8 +147,10 @@ bool internal_service(const std::string& service) {
 }
 
 void port_available(const Config& config, const std::string& service) {
-    const int port = service_port(config, service);
-    if (port < 1 || port > 65535) throw std::invalid_argument("invalid " + service + " port");
+    const auto listeners = service == "delivery" ? std::vector<TcpListener>{{service, service_port(config, service), false}} : config.listeners(service);
+    for (const auto& listener : listeners) {
+    const int port = listener.port;
+    if (port < 1 || port > 65535) throw std::invalid_argument("invalid " + listener.name + " port");
     const auto address = asio::ip::make_address(internal_service(service) ? "127.0.0.1" : config.text(service == "admin" ? "admin_bind" : "bind", "127.0.0.1"));
     asio::io_context context;
     tcp::acceptor test(context);
@@ -160,7 +163,18 @@ void port_available(const Config& config, const std::string& service) {
 #endif
     if (!error) test.bind({address, static_cast<unsigned short>(port)}, error);
     if (!error) test.listen(asio::socket_base::max_listen_connections, error);
-    if (error) throw std::runtime_error(service + " cannot bind " + address.to_string() + ":" + std::to_string(port));
+    if (error) throw std::runtime_error(listener.name + " cannot bind " + address.to_string() + ":" + std::to_string(port));
+    }
+}
+
+void require_distinct_ports(const Config& config, const std::vector<std::string>& services) {
+    std::set<int> ports;
+    for (const auto& service : services) {
+        const auto listeners = service == "delivery" ? std::vector<TcpListener>{{service, service_port(config, service), false}} : config.listeners(service);
+        for (const auto& listener : listeners)
+            if (!ports.insert(listener.port).second)
+                throw std::invalid_argument("service ports must be distinct: " + listener.name);
+    }
 }
 
 Json readiness_rpc(const Config& config, const std::string& service, const Json& request,
@@ -419,6 +433,10 @@ int run(int argc, char** argv) {
         return 0;
     }
     auto config = Config::from_file(options.config);
+    auto update_options = supervisor_update_options(config);
+    const auto pending_relaunch = pending_update_relaunch(update_options);
+    if (pending_relaunch && pending_relaunch->at("config") != config.source.string())
+        throw MaintenanceError("Pending launcher update belongs to another configuration.");
     const std::filesystem::path data_directory(config.text("data_dir"));
     require_plain_path(data_directory);
     std::filesystem::create_directories(data_directory);
@@ -428,16 +446,30 @@ int run(int argc, char** argv) {
     // a failed manager relaunch records failure. Declare control before the
     // process group: children must be reaped before their snapshots are removed.
     SupervisorControl control(config);
+    for (auto& recovered : recover_interrupted_updates(update_options)) {
+        const auto id=recovered.at("job_id").get<std::string>();
+        const auto version=recovered.at("version").get<std::string>();
+        control.update_finished({"apply",id,version},std::move(recovered));
+        log("postplus","restored an interrupted module update before starting services","warn");
+    }
+#ifndef _WIN32
+    if (pending_relaunch) {
+        const auto id=pending_relaunch->at("job_id").get<std::string>();
+        const auto state=update_job_status(update_options,id).value("state","");
+        if (state!="installed" && state!="complete" && state!="rolled_back") {
+            auto restored=rollback_staged_update(update_options,id);
+            finish_update_relaunch(update_options,id);
+            restored["state"]="failed"; restored["rolled_back"]=true;
+            restored["error"]="An interrupted launcher update was restored before service startup.";
+            const auto version=restored.at("version").get<std::string>();
+            control.update_finished({"apply",id,version},std::move(restored));
+            const auto* manager=std::getenv("POSTPLUS_SERVICE_MANAGER");
+            return manager && std::string_view(manager)=="systemd" ? 75 : 76;
+        }
+    }
+#endif
     const auto& services = supervisor_services();
     // Validate the complete installation before creating any child process.
-    std::set<int> ports;
-    for (const auto& service : services) {
-        if (!std::filesystem::is_regular_file(service_executable(binaries, service)))
-            throw std::runtime_error("missing executable for " + service + "; install all PostPlus services together");
-        if (!ports.insert(service_port(config, service)).second)
-            throw std::invalid_argument("service ports must be distinct");
-        port_available(config, service);
-    }
     ProcessGroup children;
     const auto initial_snapshot = control.snapshot_config(config);
     std::map<std::string, Config> running_config;
@@ -450,6 +482,14 @@ int run(int argc, char** argv) {
         running_snapshot[service] = snapshot;
         log("postplus", service + " is ready");
     };
+    bool relaunch_committed = false;
+    try {
+    require_distinct_ports(config, services);
+    for (const auto& service : services) {
+        if (!std::filesystem::is_regular_file(service_executable(binaries, service)))
+            throw std::runtime_error("missing executable for " + service + "; install all PostPlus services together");
+        port_available(config, service);
+    }
     log("postplus", "starting service group");
     for (const auto& service : services) {
         if (stop_requested()) break;
@@ -457,6 +497,59 @@ int run(int argc, char** argv) {
         catch (const std::exception&) { if (stop_requested()) break; throw; }
     }
     if (!stop_requested()) { control.ready(config); log("postplus", "all services are ready"); }
+    if (pending_relaunch && !stop_requested()) {
+        const auto id=pending_relaunch->at("job_id").get<std::string>();
+        auto result=update_job_status(update_options,id);
+        if (result.value("state","")=="rolled_back") {
+            result["state"]="failed";
+            result["rolled_back"]=true;
+            if (!result.contains("error")) result["error"]="Updated launcher failed; previous modules and services were restored.";
+        } else { result=commit_staged_update(update_options,id); relaunch_committed=true; }
+        finish_update_relaunch(update_options,id);
+        const auto version=result.at("version").get<std::string>();
+        control.update_finished({"apply",id,version},std::move(result));
+        log("postplus","launcher update committed after all services became ready");
+    }
+    } catch (const std::exception& error) {
+        if (!pending_relaunch) throw;
+        const auto id=pending_relaunch->at("job_id").get<std::string>();
+        if (relaunch_committed) {
+            // Once readiness and the transaction are committed, failures in
+            // status/marker cleanup must not kill the healthy new generation.
+            log("postplus",std::string("launcher upgrade committed; completion reporting needs recovery: ")+error.what(),"warn");
+            try {
+                auto result=update_job_status(update_options,id);
+                finish_update_relaunch(update_options,id);
+                const auto version=result.at("version").get<std::string>();
+                control.update_finished({"apply",id,version},std::move(result));
+            } catch (const std::exception& reporting_error) {
+                log("postplus",std::string("cannot publish committed launcher update status: ")+reporting_error.what(),"warn");
+            }
+        } else {
+        children.stop();
+        if (update_job_status(update_options,id).value("state","")=="complete") {
+            // A leftover marker can also be read on a later ordinary start.
+            // A failure before readiness then follows normal startup failure
+            // handling; committed files cannot be restored by replaying a job.
+            log("postplus",std::string("committed launcher failed service startup: ")+error.what(),"error");
+            return 1;
+        }
+#ifdef _WIN32
+        // The detached helper owns the running launcher's replacement and rollback.
+        log("postplus",std::string("updated launcher startup failed: ")+error.what(),"error");
+        return 1;
+#else
+        auto restored=rollback_staged_update(update_options,id);
+        finish_update_relaunch(update_options,id);
+        restored["state"]="failed"; restored["error"]=error.what(); restored["rolled_back"]=true;
+        const auto version=restored.at("version").get<std::string>();
+        control.update_finished({"apply",id,version},std::move(restored));
+        log("postplus","updated launcher startup failed; restored previous modules","error");
+        const auto* manager=std::getenv("POSTPLUS_SERVICE_MANAGER");
+        return manager && std::string_view(manager)=="systemd" ? 75 : 76;
+#endif
+        }
+    }
     std::cout << "Administration: " << settings_url(config,"admin") << '\n'
               << "Webmail:        " << settings_url(config,"web") << '\n' << std::flush;
     bool admin_shutdown = false;
@@ -472,9 +565,115 @@ int run(int argc, char** argv) {
         graceful = phase({"filter", "transfer", "storage", "auth"}) && graceful;
         return graceful;
     };
+    std::atomic<bool> cancel_update = false;
+    std::future<Json> download;
+    std::optional<SupervisorUpdateRequest> downloading;
+    struct CancelDownload {
+        std::atomic<bool>& cancel;
+        std::future<Json>& future;
+        ~CancelDownload() { cancel.store(true); if (future.valid()) future.wait(); }
+    } cancel_download{cancel_update, download};
     while (!stop_requested()) {
         ensure_alive(children);
         if (control.shutdown_requested()) { admin_shutdown = true; break; }
+        if (download.valid() && download.wait_for(std::chrono::milliseconds(0)) == std::future_status::ready) {
+            try {
+                auto result = download.get(); result["state"] = "staged";
+                control.update_finished(*downloading, std::move(result));
+                log("postplus", "update downloaded and verified; existing services remain running");
+            } catch (const std::exception& error) {
+                control.update_finished(*downloading, {{"state", "failed"}, {"error", error.what()}});
+                log("postplus", std::string("update download failed: ") + error.what(), "error");
+            }
+            downloading.reset();
+        }
+        if (auto update = control.update_requested()) {
+            if (update->action == "stage") {
+                downloading = *update;
+                control.update_progress(*update, {{"state", "downloading"}});
+                const auto request = *update;
+                download = std::async(std::launch::async, [&, request] {
+                    return stage_update(update_options, request.version, request.job_id, cancel_update,
+                        [&](const Json& progress) { control.update_progress(request, progress); });
+                });
+            } else {
+                std::vector<std::string> selected;
+                bool stopped = false;
+                try {
+                    auto plan = update_job_status(update_options, update->job_id);
+                    const auto requested_services = plan.at("services").get<std::vector<std::string>>();
+                    for (const auto& service : services)
+                        if (std::find(requested_services.begin(), requested_services.end(), service) != requested_services.end()) selected.push_back(service);
+                    if (selected.size() != requested_services.size()) throw MaintenanceError("Invalid update service plan.", 409);
+                    plan["state"] = "applying"; control.update_progress(*update, plan);
+                    const bool launcher_changed=plan.value("requires_launcher_restart",false);
+                    if (launcher_changed) selected=services;
+#ifdef _WIN32
+                    if (launcher_changed) {
+                        stopped=true;
+                        if (!stop_selected(selected)) throw std::runtime_error("Affected services did not stop cleanly.");
+                        (void)launch_update_takeover(update_options,update->job_id,config.source,GetCurrentProcessId());
+                        log("postplus","handing launcher replacement to the verified private update helper");
+                        return 0;
+                    }
+#endif
+                    stopped = true;
+                    if (!stop_selected(selected)) throw std::runtime_error("Affected services did not stop cleanly.");
+                    if (launcher_changed) (void)prepare_update_relaunch(update_options,update->job_id,config.source);
+                    (void)apply_staged_update(update_options, update->job_id);
+                    if (launcher_changed) {
+                        const auto* manager=std::getenv("POSTPLUS_SERVICE_MANAGER");
+                        log("postplus","modules installed; relaunching to verify the new launcher");
+                        return manager && std::string_view(manager)=="systemd" ? 75 : 76;
+                    }
+                    for (const auto& service : selected) {
+                        if (stop_requested()) throw std::runtime_error("Update interrupted by shutdown.");
+                        port_available(running_config.at(service), service);
+                        start_service(service, running_config.at(service), running_snapshot.at(service));
+                    }
+                    ensure_alive(children);
+                    auto result = commit_staged_update(update_options, update->job_id);
+                    result["state"] = "complete";
+                    control.update_finished(*update, std::move(result));
+                    log("postplus", "changed modules upgraded; affected services are ready");
+                } catch (const std::exception& error) {
+                    const std::string failure = error.what();
+                    if (stopped && update_job_status(update_options, update->job_id).value("state", "") == "complete") {
+                        // A committed transaction must not be described as a
+                        // rollback failure if later status reporting throws.
+                        log("postplus","update committed; completion reporting failed: " + failure,"warn");
+                        try { control.update_finished(*update,update_job_status(update_options,update->job_id)); }
+                        catch (const std::exception& reporting_error) {
+                            log("postplus",std::string("cannot publish committed update status: ")+reporting_error.what(),"warn");
+                        }
+                        continue;
+                    }
+                    bool rolled_back = !stopped;
+                    if (stopped) {
+                        (void)stop_selected(selected);
+                        try {
+                            // A failed apply can already have replaced some files,
+                            // and its own rollback can fail. Consult the durable
+                            // journal even when apply never returned successfully.
+                            (void)rollback_staged_update(update_options, update->job_id);
+                            finish_update_relaunch(update_options, update->job_id);
+                            if (!stop_requested()) {
+                                for (const auto& service : selected) {
+                                    port_available(running_config.at(service), service);
+                                    start_service(service, running_config.at(service), running_snapshot.at(service));
+                                }
+                                ensure_alive(children); rolled_back = true;
+                            }
+                        } catch (const std::exception& rollback_error) {
+                            control.update_finished(*update, {{"state", "failed"}, {"error", failure + " Rollback failed: " + rollback_error.what()}, {"rolled_back", false}});
+                            throw std::runtime_error("Update and rollback failed; stopping the service group.");
+                        }
+                    } else finish_update_relaunch(update_options, update->job_id);
+                    control.update_finished(*update, {{"state", "failed"}, {"error", failure}, {"rolled_back", rolled_back}});
+                    log("postplus", "update failed: " + failure, "error");
+                }
+            }
+        }
         if (auto requested = control.restart_requested()) {
             auto request = std::move(*requested);
             const auto previous_active = config;
@@ -487,11 +686,7 @@ int run(int argc, char** argv) {
                 if (Config::from_file(config.source).values != request.config.values)
                     throw MaintenanceError("Configuration changed after scheduling; reload and retry.", 409);
                 request.services = restart_plan(config, request.config, request.mode);
-                std::set<int> new_ports;
-                for (const auto& service : services) {
-                    if (!new_ports.insert(service_port(request.config, service)).second)
-                        throw std::invalid_argument("service ports must be distinct");
-                }
+                require_distinct_ports(request.config, services);
                 const auto target_snapshot = control.snapshot_config(request.config);
                 const auto* manager = std::getenv("POSTPLUS_SERVICE_MANAGER");
                 const bool managed_all = request.mode == "all" && manager && std::string_view(manager) == "systemd";
@@ -515,6 +710,7 @@ int run(int argc, char** argv) {
                 }
                 ensure_alive(children);
                 config = request.config;
+                update_options = supervisor_update_options(config);
                 configure_logging(config, "postplus");
                 control.restart_complete(request, config);
             } catch (const std::exception& error) {
@@ -568,7 +764,35 @@ int run(int argc, char** argv) {
 }
 
 int main(int argc, char** argv) {
-    try { return postplus::run(argc, argv); }
+    try {
+#ifndef _WIN32
+        const auto initial_executable=postplus::executable_path(argv[0]);
+#endif
+        const auto result=postplus::run(argc, argv);
+#ifndef _WIN32
+        if (result==76) {
+            execv(initial_executable.c_str(),argv);
+            // exec can fail before the new launcher's startup recovery runs.
+            // The old executable is still executing from its original inode.
+            // Restore the journaled generation before attempting it again.
+            {
+                const auto config=postplus::Config::from_file(postplus::parse_options(argc,argv).config);
+                auto update=postplus::supervisor_update_options(config);
+                update.install_directory=initial_executable.parent_path();
+                postplus::DataDirectoryLock lease(config.text("data_dir"));
+                const auto pending=postplus::pending_update_relaunch(update);
+                if (!pending) throw std::runtime_error("cannot relaunch PostPlus after module upgrade");
+                (void)postplus::rollback_staged_update(update,pending->at("job_id").get<std::string>());
+                // Keep the handoff so the restored launcher reports failure
+                // only after all of its original services become ready.
+                postplus::log("postplus","new launcher could not execute; restored previous modules","error");
+            }
+            execv(initial_executable.c_str(),argv);
+            throw std::runtime_error("previous modules were restored but the launcher cannot execute");
+        }
+#endif
+        return result;
+    }
     catch (const std::exception& error) {
         if (postplus::stop_requested()) return 0;
         postplus::log("postplus", error.what(), "error");

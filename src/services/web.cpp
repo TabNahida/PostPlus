@@ -4,6 +4,10 @@
 #include "postplus/acme.hpp"
 #include "postplus/maintenance.hpp"
 #include "postplus/restart.hpp"
+#include "postplus/mail_clients.hpp"
+#include "postplus/access.hpp"
+#include "postplus/forwarding.hpp"
+#include "postplus/verification_code.hpp"
 
 #include <algorithm>
 #include <charconv>
@@ -119,11 +123,12 @@ std::string folder_name(const std::string& name) {
 bool forbidden_portal_route(const HttpRequest& request) {
     const auto path=request.path.substr(0,request.path.find('?'));
     return (!admin_only && path.starts_with("/api/admin/")) ||
-        (admin_only && (path.starts_with("/api/messages") || path=="/api/folders" || path=="/api/drafts" || path=="/api/send"));
+        (admin_only && (path.starts_with("/api/messages") || path=="/api/folders" || path=="/api/drafts" || path=="/api/send" || path=="/api/verification-code" || path.starts_with("/api/api-keys") || path.starts_with("/api/public/invitations/")));
 }
 
 bool api_key_management_route(const std::string& path) {
-    return path == "/api/admin/api-keys" || path.starts_with("/api/admin/api-keys/");
+    return path == "/api/admin/api-keys" || path.starts_with("/api/admin/api-keys/") ||
+           path == "/api/api-keys" || path.starts_with("/api/api-keys/");
 }
 
 Json log_query(const Config& config, const std::string& path) {
@@ -275,7 +280,17 @@ public:
             load_static(root, "/admin.js", "admin.js", "application/javascript; charset=utf-8");
             load_static(root, "/settings.js", "settings.js", "application/javascript; charset=utf-8");
             load_static(root, "/acme.js", "acme.js", "application/javascript; charset=utf-8");
-        } else load_static(root, "/app.js", "app.js", "application/javascript; charset=utf-8");
+            load_static(root, "/mail-clients.js", "mail-clients.js", "application/javascript; charset=utf-8");
+            load_static(root, "/update.js", "update.js", "application/javascript; charset=utf-8");
+            load_static(root, "/admin-access.js", "admin-access.js", "application/javascript; charset=utf-8");
+        } else {
+            load_static(root, "/app.js", "app.js", "application/javascript; charset=utf-8");
+            load_static(root, "/verification-code.js", "verification-code.js", "application/javascript; charset=utf-8");
+            load_static(root, "/verification-code.css", "verification-code.css", "text/css; charset=utf-8");
+            load_static(root, "/register", "register.html", "text/html; charset=utf-8");
+            load_static(root, "/register.js", "register.js", "application/javascript; charset=utf-8");
+        }
+        load_static(root, "/key-permissions.js", "key-permissions.js", "application/javascript; charset=utf-8");
         load_static(root, "/size.js", "size.js", "application/javascript; charset=utf-8");
         load_static(root, "/address.js", "address.js", "application/javascript; charset=utf-8");
         load_static(root, "/preferences.js", "preferences.js", "application/javascript; charset=utf-8");
@@ -300,6 +315,7 @@ public:
                                       {"field", error.field}, {"error", error.what()}}, error.status);
         }
         catch (const AcmeError& error) { response = json_response({{"ok",false},{"code",error.code},{"error",error.what()}},error.status); }
+        catch (const UpdateError& error) { response = json_response({{"ok",false},{"code",error.code},{"error",error.what()}},error.status); }
         catch (const MaintenanceError& error) { response = json_response({{"ok",false},{"error",error.what()}},error.status); }
         catch (const Json::exception&) { response = json_response({{"ok", false}, {"error", "Invalid request data."}}, 400); }
         catch (const std::exception&) { response = json_response({{"ok", false}, {"error", "A required service is unavailable. Please retry."}}, 503); }
@@ -316,7 +332,7 @@ public:
         if (forbidden_portal_route(request))
             return json_response({{"ok",false},{"error","API route not found."}},404);
         // Verify session and CSRF before core allocates a potentially large compose body.
-        if (!request.path.starts_with("/api/") || request.path == "/api/login" ||
+        if (!request.path.starts_with("/api/") || request.path == "/api/login" || public_invitation_route(request) ||
             (request.method == "GET" && request.path == "/api/public/config")) return std::nullopt;
         try {
             const auto session = authenticate(request);
@@ -330,6 +346,10 @@ public:
     }
 
 private:
+    static bool public_invitation_route(const HttpRequest& request) {
+        return !admin_only && request.method == "POST" &&
+            (request.path == "/api/public/invitations/inspect" || request.path == "/api/public/invitations/redeem");
+    }
     Config config_;
     std::unique_ptr<AcmeManager> acme_;
     std::unique_ptr<BackupManager> backups_;
@@ -390,19 +410,23 @@ private:
             if (!request.encrypted && !request.peer_loopback)
                 throw ApiError(403, "HTTPS is required to use an API key remotely.");
             const auto path = request.path.substr(0, request.path.find('?'));
-            if (!admin_only || !path.starts_with("/api/admin/"))
-                throw ApiError(401, "API keys are accepted only by the administrator API.");
             if (api_key_management_route(path))
-                throw ApiError(403, "Use an administrator browser session to manage API keys.");
+                throw ApiError(403, "Use a browser session to manage API keys.");
             const auto authorization = header(request, "authorization");
             if (authorization.size() != 74 || lower(authorization.substr(0, 7)) != "bearer ")
                 throw ApiError(401, "Invalid or expired API key.");
             const auto account = rpc(config_, "auth", {{"op", "api_key_verify"}, {"key", authorization.substr(7)}});
             require_ok(account, "A required service is unavailable. Please retry.");
             if (!account.value("valid", false)) throw ApiError(401, "Invalid or expired API key.");
+            if (account.value("audience", std::string{}) != (admin_only ? "admin" : "mailbox"))
+                throw ApiError(403, "This API key belongs to a different API.");
+            const auto permission = required_api_permission(request.method, path);
+            if (!permission || !account.contains("permissions") ||
+                std::find(account["permissions"].begin(), account["permissions"].end(), *permission) == account["permissions"].end())
+                throw ApiError(403, "This API key does not have permission for this operation.");
             WebSession session;
             session.username = account.at("username").get<std::string>();
-            session.admin = true;
+            session.admin = account.value("admin", false);
             session.api_key_id = account.at("id").get<std::string>();
             return session;
         }
@@ -465,6 +489,46 @@ private:
     HttpResponse send_mail(const HttpRequest& request, const WebSession& session);
     HttpResponse save_draft(const HttpRequest& request, const WebSession& session);
 
+    HttpResponse manage_api_keys(const HttpRequest& request, const WebSession& session, const std::string& path) {
+        if (!session.api_key_id.empty()) throw ApiError(403, "Use a browser session to manage API keys.");
+        require_csrf(request, session);
+        const std::string base = admin_only ? "/api/admin/api-keys" : "/api/api-keys";
+        Json command{{"username",session.username},{"audience",admin_only ? "admin" : "mailbox"}};
+        if (path == base) {
+            if (request.method == "GET") command["op"] = "api_key_list";
+            else if (request.method == "POST") {
+                const auto input = request_json(request);
+                for (const auto& item : input.items()) {
+                    if (item.key() != "name" && item.key() != "expires_in_days" && item.key() != "permissions")
+                        throw ApiError(400, "Unexpected API key field: " + item.key());
+                    command[item.key()] = item.value();
+                }
+                command["op"] = "api_key_create";
+            } else throw ApiError(405, "Use GET or POST.");
+        } else {
+            const auto id = path.substr(base.size()+1);
+            if (id.size()!=32 || !std::all_of(id.begin(),id.end(),[](unsigned char ch){return (ch>='0'&&ch<='9')||(ch>='a'&&ch<='f');}))
+                throw ApiError(400,"Invalid API key ID.");
+            command["id"]=id;
+            if (request.method == "DELETE") command["op"]="api_key_revoke";
+            else if (request.method == "PATCH") {
+                const auto input=request_json(request);
+                if (input.size()!=1 || !input.contains("permissions")) throw ApiError(400,"Provide only API key permissions.");
+                command["op"]="api_key_update";command["permissions"]=input.at("permissions");
+            } else throw ApiError(405,"Use PATCH or DELETE.");
+        }
+        auto result=rpc(config_,"auth",command);
+        if (!result.value("ok",false)) {
+            const auto code=result.value("code",std::string{});
+            if (code=="invalid_api_key") return json_response(result,400);
+            if (code=="api_key_not_found") return json_response(result,404);
+            if (code=="api_key_limit") return json_response(result,409);
+            if (code=="administrator_required") return json_response(result,403);
+            require_ok(result,"Unable to manage API keys.");
+        }
+        return json_response(result,request.method=="POST"?201:200);
+    }
+
     HttpResponse route(const HttpRequest& request) {
         if (forbidden_portal_route(request))
             throw ApiError(404, "API route not found.");
@@ -472,6 +536,8 @@ private:
             return json_response({{"ok", true}, {"service", service_name}});
         if (request.method == "GET" && request.path == "/api/public/config")
             return json_response({{"ok", true}, {"domain", config_.text("domain", "localhost")}});
+        if (!admin_only)
+            if (auto discovered = mail_client_discovery(config_, request)) return *discovered;
         if (request.method == "GET") {
             auto path = request.path == (admin_only ? "/admin.html" : "/index.html") ||
                         (admin_only && request.path == "/admin") ? "/" : request.path;
@@ -480,11 +546,53 @@ private:
         }
         if (!request.path.starts_with("/api/")) throw ApiError(404, "Page not found.");
         if (request.method == "POST" && request.path == "/api/login") return login(request);
+        if (public_invitation_route(request)) {
+            require_transport(request);
+            allow_login(request);
+            auto input = request_json(request);
+            const bool redeem = request.path.ends_with("/redeem");
+            for (const auto& item : input.items())
+                if (item.key() != "token" && !(redeem && (item.key() == "localpart" || item.key() == "password")))
+                    throw ApiError(400, "Unexpected registration field.");
+            input["token"] = field(input, "token", 71);
+            input["op"] = redeem ? "invite_redeem" : "invite_inspect";
+            auto result = rpc(config_, "auth", input);
+            if (!result.value("ok", false)) {
+                const auto code = result.value("code", std::string{});
+                if (code == "user_exists") return json_response(result, 409);
+                if (code == "invitation_unavailable") return json_response(result, 410);
+                if (code == "rate_limit") return json_response(result, 429);
+                if (code == "invalid_invitation" || code == "password_policy_violation") return json_response(result, 400);
+                require_ok(result, "Unable to register this mailbox.");
+            }
+            if (redeem) log(service_name, "mailbox registered by invitation: " + result.value("username", std::string{}));
+            return json_response(result, redeem ? 201 : 200);
+        }
         const auto session = authenticate(request);
         if (request.method != "GET") require_csrf(request, session);
         const auto path = request.path.substr(0,request.path.find('?'));
         const auto query = query_fields(request.path);
         auto parameter = [&](const std::string& key, const std::string& fallback = "") { auto found=query.find(key); return found==query.end()?fallback:found->second; };
+        if (api_key_management_route(path)) return manage_api_keys(request, session, path);
+        if (request.method == "GET" && path == "/api/verification-code") {
+            if (!query.empty()) throw ApiError(400, "Verification code lookup does not accept account or message filters.");
+            const auto candidates = rpc(config_, "storage", {{"op","verification_candidates"},{"username",session.username},{"max_age_seconds",900},{"limit",30}});
+            require_ok(candidates, "Unable to load verification codes.");
+            const auto now = std::chrono::duration_cast<std::chrono::seconds>(std::chrono::system_clock::now().time_since_epoch()).count();
+            for (const auto& candidate : candidates.at("messages")) {
+                const auto received = candidate.at("internal_date").get<std::int64_t>();
+                if (received > now + 60 || received + 900 <= now) continue;
+                mime::Part part;
+                try { part=mime::parse(candidate.at("raw").get<std::string>()); }
+                catch(const std::exception&) { continue; }
+                const auto code = extract_verification_code(part);
+                if (!code) continue;
+                return json_response({{"ok",true},{"found",true},{"code",code->code},{"message_id",candidate.at("id")},
+                    {"from",mime::decode_header(mime::header(part,"from"))},{"subject",mime::decode_header(mime::header(part,"subject"))},
+                    {"received_at",received},{"expires_at",received+900}});
+            }
+            return json_response({{"ok",true},{"found",false}});
+        }
         if (request.method == "GET" && request.path == "/api/session")
             return json_response({{"ok", true}, {"username", session.username}, {"admin", session.admin}, {"csrf", session.csrf}});
         if (request.method == "POST" && request.path == "/api/logout") {
@@ -545,38 +653,60 @@ private:
             if (!session.api_key_id.empty() && request.method != "GET")
                 log(service_name, "API key " + session.api_key_id + " owned by administrator " + session.username +
                     " requested " + request.method + " " + path);
-            if (api_key_management_route(path)) {
-                Json command{{"username", session.username}};
-                if (path == "/api/admin/api-keys") {
-                    if (request.method == "GET") command["op"] = "api_key_list";
+            if (path == "/api/admin/invitations" || path.starts_with("/api/admin/invitations/")) {
+                Json command{{"username",session.username}};
+                if (path == "/api/admin/invitations") {
+                    if (request.method == "GET") command["op"]="invite_list";
                     else if (request.method == "POST") {
-                        const auto input = request_json(request);
-                        for (const auto& item : input.items())
-                            if (item.key() != "name" && item.key() != "expires_in_days")
-                                throw ApiError(400, "Unexpected API key field: " + item.key());
-                        if (input.contains("name")) command["name"] = input.at("name");
-                        if (input.contains("expires_in_days")) command["expires_in_days"] = input.at("expires_in_days");
-                        command["op"] = "api_key_create";
-                    } else throw ApiError(405, "Use GET or POST.");
+                        const auto input=request_json(request);
+                        for (const auto& item:input.items()) {
+                            if (item.key()!="name" && item.key()!="localpart" && item.key()!="expires_in_days" && item.key()!="max_uses")
+                                throw ApiError(400,"Unexpected invitation field.");
+                            command[item.key()]=item.value();
+                        }
+                        command["op"]="invite_create";
+                    } else throw ApiError(405,"Use GET or POST.");
                 } else {
-                    if (request.method != "DELETE") throw ApiError(405, "Use DELETE to revoke an API key.");
-                    const auto id = path.substr(std::string("/api/admin/api-keys/").size());
-                    if (id.size() != 32 || !std::all_of(id.begin(), id.end(), [](unsigned char ch) {
-                        return (ch >= '0' && ch <= '9') || (ch >= 'a' && ch <= 'f');
-                    })) throw ApiError(400, "Invalid API key ID.");
-                    command["op"] = "api_key_revoke";
-                    command["id"] = id;
+                    if (request.method!="DELETE") throw ApiError(405,"Use DELETE to revoke an invitation.");
+                    command["op"]="invite_revoke";
+                    command["id"]=path.substr(std::string("/api/admin/invitations/").size());
                 }
-                auto result = rpc(config_, "auth", command);
-                if (!result.value("ok", false)) {
-                    const auto code = result.value("code", std::string{});
-                    if (code == "invalid_api_key") return json_response(result, 400);
-                    if (code == "api_key_not_found") return json_response(result, 404);
-                    if (code == "api_key_limit") return json_response(result, 409);
-                    if (code == "administrator_required") return json_response(result, 403);
-                    require_ok(result, "Unable to manage API keys.");
+                auto result=rpc(config_,"auth",command);
+                if (!result.value("ok",false)) {
+                    const auto code=result.value("code",std::string{});
+                    if (code=="invalid_invitation") return json_response(result,400);
+                    if (code=="invitation_not_found") return json_response(result,404);
+                    if (code=="user_exists" || code=="invitation_limit") return json_response(result,409);
+                    require_ok(result,"Unable to manage invitations.");
                 }
-                return json_response(result, request.method == "POST" ? 201 : 200);
+                if (result.contains("token")) {
+                    const auto settings=settings_view(config_);
+                    result["registration_url"]=settings.at("web_url").get<std::string>()+"register#"+result.at("token").get<std::string>();
+                    result.erase("token");
+                }
+                return json_response(result,request.method=="POST"?201:200);
+            }
+            if (path == "/api/admin/forwarding" || path.starts_with("/api/admin/forwarding/")) {
+                Json command;
+                if (path == "/api/admin/forwarding") {
+                    if (request.method=="GET") command={{"op","forwarding_list"}};
+                    else if (request.method=="POST") {
+                        const auto input=request_json(request);
+                        if (input.size()!=2 || !input.contains("pattern") || !input.contains("destination"))
+                            throw ApiError(400,"Provide a pattern and destination mailbox.");
+                        command={{"op","forwarding_create"},{"pattern",field(input,"pattern",254)},{"destination",field(input,"destination",254)}};
+                    } else throw ApiError(405,"Use GET or POST.");
+                } else {
+                    if (request.method!="DELETE") throw ApiError(405,"Use DELETE to remove a forwarding rule.");
+                    const auto text=path.substr(std::string("/api/admin/forwarding/").size());
+                    std::int64_t id=0;const auto [end,error]=std::from_chars(text.data(),text.data()+text.size(),id);
+                    if(error!=std::errc{} || end!=text.data()+text.size() || id<=0) throw ApiError(400,"Invalid forwarding rule ID.");
+                    command={{"op","forwarding_delete"},{"id",id}};
+                }
+                auto result=rpc(config_,"storage",command);
+                if (!result.value("ok",false)) return json_response(result, result.value("code",std::string{})=="forwarding_not_found"?404:400);
+                if (request.method!="GET") log(service_name,"administrator "+session.username+" changed a forwarding rule");
+                return json_response(result,request.method=="POST"?201:200);
             }
             if (request.method == "POST" && path == "/api/admin/backup") {
                 (void)request_json(request);
@@ -712,6 +842,30 @@ private:
                 }
                 throw ApiError(405,"Use GET or POST.");
             }
+            if(path=="/api/admin/update" && request.method=="GET")
+                return json_response(supervisor_update_status(config_,parameter("job_id")));
+            if(path.starts_with("/api/admin/update/")) {
+                if(request.method!="POST") throw ApiError(405,"Use POST for update actions.");
+                const auto input=request_json(request);
+                if(path=="/api/admin/update/check") {
+                    if(!input.empty()) throw ApiError(400,"Update check accepts an empty object.");
+                    auto result=check_update(supervisor_update_options(config_));
+                    result["update_available"]=result.value("available",false);
+                    result["available"]=supervisor_restart_available(config_);
+                    result["state"]="idle";
+                    return json_response(result);
+                }
+                std::lock_guard lock(maintenance_mutex_);
+                if(shutting_down_ || backups_->busy()) throw ApiError(409,"Wait for the backup or shutdown operation to finish before updating.");
+                const auto action=path.substr(std::string("/api/admin/update/").size());
+                if(action!="stage" && action!="apply") throw ApiError(404,"API route not found.");
+                const std::string key=action=="stage"?"version":"job_id";
+                if(input.size()!=1 || !input.contains(key) || !input.at(key).is_string())
+                    throw ApiError(400,"Provide the reviewed update version or downloaded job ID.");
+                auto result=request_supervisor_update(config_,action,input.at(key).get<std::string>());
+                log(service_name,"administrator "+session.username+" requested update "+action);
+                return json_response(result,202);
+            }
             if(request.path=="/api/admin/dkim" && request.method=="POST") {
                 std::lock_guard lock(maintenance_mutex_);
                 if(shutting_down_ || backups_->busy()) throw ApiError(409,"Wait for the backup or shutdown operation to finish before saving configuration.");
@@ -773,6 +927,7 @@ HttpResponse Web::send_mail(const HttpRequest& request, const WebSession& sessio
         throw ApiError(400, "Provide between 1 and 100 recipient addresses.");
     std::set<std::string> unique;
     std::vector<std::string> recipients;
+    Json routes=Json::object();
     const auto domain = lower(config_.text("domain", "localhost"));
     for (const auto& address : input["to"]) {
         if (!address.is_string()) throw ApiError(400, "Recipient addresses must be strings.");
@@ -780,9 +935,10 @@ HttpResponse Web::send_mail(const HttpRequest& request, const WebSession& sessio
         if (!valid_address(recipient)) throw ApiError(400, "Invalid recipient address.");
         if (!unique.insert(recipient).second) continue;
         if (recipient.substr(recipient.find('@') + 1) == domain) {
-            const auto exists = rpc(config_, "auth", {{"op", "exists"}, {"username", recipient}});
-            require_ok(exists, "Unable to validate recipients.");
-            if (!exists.value("exists", false)) throw ApiError(400, "A local recipient account does not exist: " + recipient);
+            const auto route=resolve_local_recipient(config_,recipient);
+            require_ok(route,"Unable to validate recipients.");
+            if (!route.value("exists",false)) throw ApiError(400,"A local recipient account does not exist: "+recipient);
+            routes[recipient]={{"destination",route.at("destination")},{"rule",route.at("rule")}};
         } else if (config_.outbound_mode()=="disabled") {
             throw ApiError(400, "External delivery is disabled. Ask an administrator to enable direct delivery or an SMTP relay.");
         }
@@ -795,7 +951,7 @@ HttpResponse Web::send_mail(const HttpRequest& request, const WebSession& sessio
     const auto scanned = rpc(config_, "filter", {{"op", "scan"}, {"raw", raw}});
     require_ok(scanned, "The message scanning service is unavailable.");
     if (scanned.value("action", "reject") != "accept") throw ApiError(422, "The message was rejected by the server mail filter.");
-    Json submission={{"op", "enqueue"}, {"sender", session.username}, {"recipients", recipients}, {"raw", raw},{"sent_username",session.username}};
+    Json submission={{"op", "enqueue"}, {"sender", session.username}, {"recipients", recipients}, {"raw", raw},{"sent_username",session.username},{"recipient_routes",routes}};
     if(input.contains("draft_id")) submission["draft_id"]=message_id(field(input,"draft_id",128));
     const auto result = rpc(config_, "storage", submission);
     require_ok(result, "Unable to queue your message.");

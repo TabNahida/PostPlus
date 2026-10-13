@@ -10,8 +10,10 @@ let settingsLoading = false;
 let settingsSaving = false;
 let backupVersion=0,backupTimer=null,shutdownPending=false;
 let acmeControl=null;
+let updateControl=null,updateBusy=false;
 let passwordPolicyData=null, passwordPolicyVersion=0, userDialogVersion=0, policySaving=false;
 let apiKeysData=null,apiKeysVersion=0,apiKeyDialogVersion=0,apiKeyCreating=false,apiKeyRevoking=false,apiKeyRevokeTarget=null;
+let keyPermissionEditor=null,accessControl=null;
 let restartJob=null,restartVersion=0,restartTimer=null,restartStarted=0,restartBusy=false,restartText="",restartSubmitting=false;
 let noticeTimer;
 const accountAddress=PostPlusAddress.create($("new-email"),$("new-email-domain"));
@@ -74,7 +76,9 @@ function element(tag, className, text) {
 
 function signedOut() {
   state.user = null;
+  accessControl?.dispose();accessControl=null;keyPermissionEditor?.clear();keyPermissionEditor=null;
   clearRestart();
+  updateControl?.dispose();updateControl=null;updateBusy=false;
   backupVersion++;clearTimeout(backupTimer);backupTimer=null;shutdownPending=false;
   $("backup-create").disabled=false;$("backup-download").hidden=true;
   maintenanceStatus("backup-status","");maintenanceStatus("shutdown-status","");
@@ -105,6 +109,8 @@ function signedOut() {
 async function signedIn(user) {
   if (!user.admin) throw new Error(t("Administrator access is required."));
   state.user = user;
+  accessControl?.dispose();
+  if(window.PostPlusAdminAccess)accessControl=PostPlusAdminAccess.mount($("view-accounts"),{api,notice:showNotice});
   $("login-screen").hidden = true;
   $("app-screen").hidden = false;
   $("settings-success").hidden = true;
@@ -160,10 +166,10 @@ async function switchView(view) {
   if (view === "logs") await loadLogs();
   else if (view === "api-keys") await loadApiKeys();
   else if (view === "settings") { if (!settingsData) await loadSettings(); }
-  else await loadAdmin();
+  else {await loadAdmin();if(view==="accounts")await accessControl?.refresh();}
 }
 document.querySelectorAll("[data-view]").forEach(button => button.addEventListener("click", () => switchView(button.dataset.view)));
-$("admin-refresh").addEventListener("click", () => state.view === "logs" ? loadLogs() : state.view === "api-keys" ? loadApiKeys() : loadAdmin());
+$("admin-refresh").addEventListener("click", () => state.view === "logs" ? loadLogs() : state.view === "api-keys" ? loadApiKeys() : Promise.allSettled([loadAdmin(),state.view==="accounts" ? accessControl?.refresh() : null]));
 async function loadAdmin() {
   if (!state.user?.admin || restartBusy) return;
   const user = state.user;
@@ -240,12 +246,14 @@ function renderApiKeys() {
   for(const key of apiKeysData.api_keys) {
     const row=element("tr"),identity=element("td","api-key-identity"),status=apiKeyStatus(key);
     identity.append(element("strong","",key.name),element("span","api-key-owner",key.owner || ""));
+    identity.append(element("span","api-key-owner",window.PostPlusKeyPermissions?PostPlusKeyPermissions.describe(key.permissions):""));
     const prefix=element("td","api-key-prefix",`${key.prefix}…`);
     const badge=element("td");badge.append(element("span",`role-badge api-key-status ${status.toLowerCase()}`,t(status)));
     const action=element("td"),button=element("button","table-action",t("Revoke"));button.type="button";
     button.disabled=key.revoked_at!==null && key.revoked_at!==undefined;
     button.setAttribute("aria-label",t("Revoke API key {name}",{name:key.name}));
     button.addEventListener("click",()=>openApiKeyRevoke(key));action.append(button);
+    if(window.PostPlusKeyPermissions){const edit=element("button","table-action",t("Permissions"));edit.type="button";edit.disabled=!key.active;edit.addEventListener("click",()=>PostPlusKeyPermissions.editDialog(key,apiKeysData.permissions,async permissions=>{await api(`/api/admin/api-keys/${key.id}`,{method:"PATCH",body:{permissions}});await loadApiKeys();}));action.append(edit);}
     row.append(identity,prefix,badge,element("td","",apiKeyDate(key.created_at)),element("td","",apiKeyDate(key.expires_at,t("Never expires"))),element("td","",apiKeyDate(key.last_used_at,t("Never used"))),action);
     rows.append(row);
   }
@@ -275,6 +283,7 @@ function clearApiKeySecret() {
 function openApiKeyCreate() {
   if(!state.user?.admin || apiKeyCreating)return;
   clearApiKeySecret();$("api-key-form").reset();formError("api-key-error");
+  if(window.PostPlusKeyPermissions)keyPermissionEditor=PostPlusKeyPermissions.editor($("api-key-permissions"),apiKeysData?.permissions||[],["stats:read"]);
   $("api-key-name").removeAttribute("aria-invalid");$("api-key-expiry").removeAttribute("aria-invalid");
   $("api-key-create-fields").hidden=false;$("api-key-create-submit").hidden=false;$("api-key-create-submit").disabled=false;
   $("api-key-create-cancel").hidden=false;$("api-key-created-done").hidden=true;
@@ -300,6 +309,7 @@ $("api-key-form").addEventListener("submit",async event=>{
   const nameLimit=80,expiryLimit=3650;
   if(!name || new TextEncoder().encode(name).length>nameLimit){formError("api-key-error",t("Enter a key name using at most {count} UTF-8 bytes.",{count:nameLimit}));$("api-key-name").setAttribute("aria-invalid","true");$("api-key-name").focus();return;}
   const body={name};
+  if(keyPermissionEditor)body.permissions=keyPermissionEditor.value();
   if(expiry!=="" || $("api-key-expiry").validity?.badInput){const days=Number(expiry);if($("api-key-expiry").validity?.badInput || !Number.isInteger(days) || days<1 || days>expiryLimit){formError("api-key-error",t("Choose an expiry from 1 to {count} whole days, or leave it blank.",{count:expiryLimit}));$("api-key-expiry").setAttribute("aria-invalid","true");$("api-key-expiry").focus();return;}body.expires_in_days=days;}
   apiKeyCreating=true;const user=state.user,version=apiKeyDialogVersion;$("api-key-create-submit").disabled=true;$("api-key-form").setAttribute("aria-busy","true");
   try {
@@ -463,12 +473,13 @@ async function loadSettings() {
     const data = await api("/api/admin/config");
     if (state.user !== user) return;
     settingsData = data;
-    if (!acmeControl) acmeControl=PostPlusAcme.create($("admin-acme"),{request:(path,options)=>api("/api/admin/acme"+path,options),domain:data.values.domain,prefix:"admin-acme",onCertificate:async paths=>{if($("settings-form").hidden)await loadSettings();if(!settingsEditor || $("settings-form").hidden)throw new Error(t("Load server settings before applying certificate paths."));for(const [key,value] of Object.entries(paths)){const input=$("config-"+key);if(input){input.value=value;input.closest("details").open=true;}}}});
+    if(!updateControl){updateControl=PostPlusUpdate.create($("admin-update"),{prefix:"admin-update",request:(path,options)=>api(path,{...options,quiet:true}),canChange:()=>Boolean(state.user?.admin&&!settingsSaving&&!restartBusy&&!shutdownPending),adminUrl:()=>settingsData?.admin_url||location.href,onBusy:updateControls});updateControl.load();}
+    if (!acmeControl) acmeControl=PostPlusAcme.create($("admin-acme"),{request:(path,options)=>api("/api/admin/acme"+path,options),domain:data.values.domain,prefix:"admin-acme",onCertificate:async paths=>{if($("settings-form").hidden)await loadSettings();if(!settingsEditor || $("settings-form").hidden)throw new Error(t("Load server settings before applying certificate paths."));for(const [key,value] of Object.entries(paths)){const input=$("config-"+key);if(input){input.value=value;input.closest("details").open=true;}}settingsEditor.translate();}});
     $("settings-pending").hidden = !data.restart_required;
     $("restart-open").disabled=data.restart_available===false;
     maintenanceStatus("settings-apply-hint",data.restart_available===false ? "This standalone service saves settings without restarting. Restart the affected services manually after saving." : "Saving validates the configuration and restarts only affected services. Other services continue running.");
     settingsEditor?.dispose();
-    settingsEditor = PostPlusSettings.create($("settings-fields"),data.schema,data.values,{prefix:"config",secretStatus:data.secret_status,generateDkim:body=>api("/api/admin/dkim",{method:"POST",body})});
+    settingsEditor = PostPlusSettings.create($("settings-fields"),data.schema,data.values,{prefix:"config",secretStatus:data.secret_status,mailClients:true,generateDkim:body=>api("/api/admin/dkim",{method:"POST",body})});
     $("settings-success").hidden = true;
     $("settings-form").hidden = false;
     setLink("open-webmail",data.web_url);
@@ -479,7 +490,7 @@ async function loadSettings() {
 }
 $("settings-edit").addEventListener("click",loadSettings);
 async function saveSettings({apply=true}={}) {
-  if(settingsSaving || restartBusy || !settingsEditor)return false;
+  if(settingsSaving || restartBusy || updateBusy || !settingsEditor)return false;
   if($("settings-form").hidden)return true;
   formError("settings-error");
   let values;
@@ -509,6 +520,7 @@ $("settings-form").addEventListener("submit",async event=>{
   }
 });
 function maintenanceStatus(id,key) {$(id).dataset.i18n=key;$(id).textContent=t(key);}
+function updateControls(busy){updateBusy=busy;$("settings-save").disabled=busy||settingsSaving||restartBusy;$("backup-create").disabled=busy||restartBusy;$("restart-open").disabled=busy||restartBusy||settingsData?.restart_available===false;$("shutdown-open").disabled=busy||restartBusy;}
 function restartIncludesAdmin() {return Boolean(restartJob?.services?.some(name=>/^(postplus-)?admin$/.test(name)));}
 function restartControls(disabled) {
   restartBusy=disabled;$("settings-edit").disabled=disabled;$("restart-open").disabled=disabled || settingsData?.restart_available===false;
@@ -627,12 +639,13 @@ document.addEventListener("postplus:language", () => {
   for (const id of ["login-error","user-error","logs-error","settings-error","api-keys-error","api-key-error","api-key-revoke-error"]) formError(id);
   $("user-dialog-title").textContent = t(state.userMode === "password" ? "Reset password" : "Create user");
   settingsEditor?.translate();
+  updateControl?.translate();
   renderPasswordHint();
   acmeControl?.translate();
   renderInspection();
   renderApiKeys();
   renderRestart();
-  if (state.user) { loadAdmin(); renderLogs(); }
+  if (state.user) { accessControl?.dispose();if(window.PostPlusAdminAccess)accessControl=PostPlusAdminAccess.mount($("view-accounts"),{api,notice:showNotice}); loadAdmin(); renderLogs(); }
 });
 
 const mailFolderLabels={INBOX:"Inbox",Sent:"Sent",Drafts:"Drafts",Trash:"Trash",Junk:"Junk",Archive:"Archive"};

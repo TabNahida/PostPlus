@@ -9,7 +9,7 @@ flowchart LR
     Launcher[Native supervisor] -. manages .-> Services[Ten service processes]
     Clients[Mail clients] --> SMTP[SMTP]
     Clients --> Access[POP3 / IMAP]
-    Browser[Browser] --> Web[Webmail / mailbox API :8080]
+    Browser[Browser] --> Web[Webmail / mailbox API :80]
     Browser --> Admin[Administration / settings API :8081]
     SMTP --> Auth[Authentication]
     Access --> Auth
@@ -63,7 +63,7 @@ The plaintext administrator password is not written to configuration or log file
 
 ## Administration and settings
 
-`postplus-admin` uses `admin_bind` (loopback by default) and `ports.admin` (8081). `postplus-web` uses the mail-facing `bind` address and `ports.web` (8080). Both provide login/session/logout, but the admin process accepts administrator accounts only, rejects mailbox routes, and exposes management APIs. Webmail rejects administration routes. Separate cookie names and in-memory session stores prevent one service from treating the other's session as its own. Ports do not establish separate cookie host scopes in browsers; use trusted applications on the shared hostname.
+`postplus-admin` uses `admin_bind` (loopback by default) and `ports.admin` (8081). `postplus-web` uses the mail-facing `bind` address and `ports.web` (80). Both provide login/session/logout, but the admin process accepts administrator accounts only, rejects mailbox routes, and exposes management APIs. Webmail rejects administration routes. Separate cookie names and in-memory session stores prevent one service from treating the other's session as its own. Ports do not establish separate cookie host scopes in browsers; use trusted applications on the shared hostname.
 
 The admin settings API returns a typed schema, sanitized values, a file revision, secret-presence metadata, and resulting interface URLs. It validates submitted fields against the schema and checks listener/TLS/resource relationships. A stale revision fails with a conflict. A successful write creates a private `<config filename>.backup-<random suffix>` file and atomically replaces the selected configuration. The current group keeps running; the response tells the operator to restart manually. Web sessions are cleared when the operator stops and starts the group.
 

@@ -20,9 +20,13 @@ from maintenance_integration import backup
 from password_policy_integration import login
 
 ROUTE = "/api/admin/api-keys"
+ADMIN_PERMISSIONS = ["users:read", "users:write", "mail:read", "quota:read", "quota:write", "policy:read", "policy:write",
+                     "stats:read", "queue:read", "logs:read", "config:read", "config:write", "backup:read", "backup:write",
+                     "services:write", "updates:read", "updates:write", "invites:read", "invites:write", "forwarding:read", "forwarding:write"]
 
 
 def create(s, browser, name="Deployment integration", **options):
+    options.setdefault("permissions", ADMIN_PERMISSIONS)
     status, _, result = s.http("admin", "POST", ROUTE, dict(name=name, **options), browser)
     assert status == 201 and result["ok"], (status, result)
     assert re.fullmatch(r"pp_[0-9a-f]{64}", result["key"])
@@ -55,7 +59,8 @@ def run(s):
     browser, user = login(s, "admin", admin), login(s, "web", ordinary)
     cookie = {"Cookie": browser["Cookie"]}
     assert s.http("admin", "GET", ROUTE)[0] == 401
-    assert current(s, cookie)["api_keys"] == []
+    assert s.http("admin", "GET", ROUTE, headers=cookie)[0] == 403
+    assert current(s, browser)["api_keys"] == []
     assert s.http("admin", "POST", ROUTE, {"name": "Denied"}, cookie)[0] == 403
     assert s.http("web", "GET", ROUTE, headers=user)[0] == 404
     assert s.http("web", "POST", ROUTE, {"name": "Denied"}, user)[0] == 404
@@ -87,19 +92,19 @@ def run(s):
     # Cookie mutations continue to require CSRF even while Bearer is supported.
     assert s.http("admin", "POST", "/api/admin/quota", dict(username=ordinary, quota_bytes=654321), cookie)[0] == 403
     for route in ("/api/session", "/api/folders", "/api/messages"):
-        assert s.http("web", "GET", route, headers={**user, **external})[0] == 401, route
+        assert s.http("web", "GET", route, headers={**user, **external})[0] == 403, route
     assert s.http("web", "GET", "/api/admin/users", headers=external)[0] == 404
-    assert s.http("admin", "GET", "/api/session", headers=external)[0] == 401
+    assert s.http("admin", "GET", "/api/session", headers=external)[0] == 403
     assert s.http("admin", "GET", "/api/messages", headers=external)[0] == 404
     assert s.http("admin", "GET", "/api/admin/users", headers=bearer(s.token))[0] == 401
     assert s.http("auth", "POST", "/rpc", {"op": "list"}, external)[0] == 401
-    listed = current(s, cookie)["api_keys"]
+    listed = current(s, browser)["api_keys"]
     used = next(item for item in listed if item["id"] == metadata["id"])
     assert used["last_used_at"] >= used["created_at"] and used["active"]
     assert key not in json.dumps(listed) and indefinite not in json.dumps(listed)
     database_path = s.directory / "data/auth.sqlite3"
     with sqlite3.connect(database_path) as database:
-        assert database.execute("PRAGMA user_version").fetchone() == (3,)
+        assert database.execute("PRAGMA user_version").fetchone() == (4,)
         record = database.execute("SELECT digest,prefix FROM api_keys WHERE id=?", (metadata["id"],)).fetchone()
         assert record == (hashlib.sha256(key.encode()).digest(), key[:11]), record
         assert not any(name in ("key", "token", "secret") for _, name, *_ in database.execute("PRAGMA table_info(api_keys)"))
@@ -160,10 +165,10 @@ def run(s):
     # retention with database fixtures representing a long-running deployment.
     ids = []
     for index in range(99):
-        result = s.rpc("auth", op="api_key_create", username=admin, name=f"Limit fixture {index}")
+        result = s.rpc("auth", op="api_key_create", username=admin, name=f"Limit fixture {index}", permissions=ADMIN_PERMISSIONS)
         assert result["ok"], result
         ids.append(result["api_key"]["id"])
-    assert s.http("admin", "POST", ROUTE, dict(name="Above active limit"), browser)[0] == 409
+    assert s.http("admin", "POST", ROUTE, dict(name="Above active limit", permissions=ADMIN_PERMISSIONS), browser)[0] == 409
     for identifier in ids:
         assert s.rpc("auth", op="api_key_revoke", username=admin, id=identifier)["ok"]
     with sqlite3.connect(database_path) as database:

@@ -47,7 +47,7 @@ class Suite:
         self.files = []
         self.token = secrets.token_hex(32)
         self.env = dict(os.environ, POSTPLUS_SERVICE_TOKEN=self.token)
-        names = ["auth", "storage", "filter", "transfer", "smtp", "pop3", "imap", "web", "admin", "delivery"]
+        names = ["auth", "storage", "filter", "transfer", "smtp", "submission", "smtps", "pop3", "pop3s", "imap", "imaps", "web", "admin", "delivery"]
         # Reserve all simultaneously so ports are unique within this test instance.
         reservations = [socket.socket() for _ in names]
         for item in reservations:
@@ -333,11 +333,19 @@ def main():
                         "--bin-dir", str(binaries)], check=True)
         subprocess.run([os.sys.executable, str(ROOT / "tests/api_keys_integration.py"),
                         "--bin-dir", str(binaries)], check=True)
+        subprocess.run([os.sys.executable, str(ROOT / "tests/access_invites_integration.py"),
+                        "--bin-dir", str(binaries)], check=True)
+        subprocess.run([os.sys.executable, str(ROOT / "tests/verification_code_integration.py"),
+                        "--bin-dir", str(binaries)], check=True)
+        subprocess.run([os.sys.executable, str(ROOT / "tests/forwarding_integration.py"),
+                        "--bin-dir", str(binaries)], check=True)
         subprocess.run([os.sys.executable, str(ROOT / "tests/maintenance_integration.py"),
                         "--bin-dir", str(binaries)], check=True)
         subprocess.run([os.sys.executable, str(ROOT / "tests/tls_transfer_integration.py"),
                         "--bin-dir", str(binaries)], check=True)
         subprocess.run([os.sys.executable, str(ROOT / "tests/protocol_security.py"),
+                        "--bin-dir", str(binaries)], check=True)
+        subprocess.run([os.sys.executable, str(ROOT / "tests/mail_clients_integration.py"),
                         "--bin-dir", str(binaries)], check=True)
         subprocess.run([os.sys.executable, str(ROOT / "tests/inbound_smtp_integration.py"),
                         "--bin-dir", str(binaries)], check=True)
@@ -348,6 +356,10 @@ def main():
         subprocess.run([os.sys.executable, str(ROOT / "tests/direct_setup_integration.py"),
                         "--bin-dir", str(binaries)], check=True)
         subprocess.run([os.sys.executable, str(ROOT / "tests/restart_integration.py"),
+                        "--bin-dir", str(binaries)], check=True)
+        subprocess.run([os.sys.executable, str(ROOT / "tests/update_helper_integration.py"),
+                        "--bin-dir", str(binaries)], check=True)
+        subprocess.run([os.sys.executable, str(ROOT / "tests/update_integration.py"),
                         "--bin-dir", str(binaries)], check=True)
         subprocess.run([os.sys.executable, str(ROOT / "tests/setup_options_integration.py"),
                         "--bin-dir", str(binaries)], check=True)

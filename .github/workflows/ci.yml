@@ -40,6 +40,8 @@ jobs:
         run: xmake build -y
       - name: Unit tests
         run: xmake test -v
+      - name: Release module manifest checks
+        run: python tests/release_manifest_test.py
       - name: Web language and asset checks
         run: node tests/web_test.js
       - name: HTML mail and forwarded-message reader checks
@@ -51,7 +53,11 @@ jobs:
       - name: Administration API key and restart controls
         run: |
           node tests/api_keys_ui_test.js
+          node tests/verification_code_ui_test.js
+          node tests/access_ui_test.js
           node tests/restart_ui_test.js
+          node tests/mail_clients_ui_test.js
+          node tests/update_ui_test.js
       - name: Mailbox, protocol, setup, maintenance and supervisor integration
         run: python tests/integration.py --build-dir build --mode ${{ matrix.mode }}
       - name: Upload diagnostic logs

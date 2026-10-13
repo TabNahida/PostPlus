@@ -1,4 +1,5 @@
 #include <postplus/settings.hpp>
+#include <postplus/mail_clients.hpp>
 #include <postplus/maintenance.hpp>
 #include <postplus/restart.hpp>
 #include <postplus/dkim.hpp>
@@ -38,11 +39,16 @@ Json fields() {
     add("domain","general","text","localhost","Mail domain","Domain used for local recipient addresses; changing it does not rename existing accounts.");
     add("bind","network","text","127.0.0.1","Mail and Webmail listening address","Use 127.0.0.1 for local use or 0.0.0.0 to accept IPv4 connections from other computers.");
     add("admin_bind","network","text","127.0.0.1","Administration listening address","Keep 127.0.0.1 unless remote administration is needed; public access requires TLS.");
-    const std::map<std::string,int> ports = {{"smtp",25},{"pop3",1110},{"imap",1143},{"web",8080},{"admin",8081},{"auth",18081},{"storage",18082},{"filter",18083},{"transfer",18084}};
-    const std::map<std::string,std::string> port_labels={{"smtp","SMTP"},{"pop3","POP3"},{"imap","IMAP"},{"web","Webmail"},{"admin","Administration"},{"auth","Authentication"},{"storage","Mail storage"},{"filter","Mail filter"},{"transfer","Mail transfer"}};
-    for (const auto& [name,port] : ports) add("ports."+name,"network","number",port,port_labels.at(name)+" port",
+    const std::map<std::string,int> ports = {{"smtp",25},{"submission",587},{"smtps",465},{"pop3",110},{"pop3s",995},{"imap",143},{"imaps",993},{"web",80},{"admin",8081},{"auth",18081},{"storage",18082},{"filter",18083},{"transfer",18084}};
+    const std::map<std::string,std::string> port_labels={{"smtp","SMTP receiving"},{"submission","SMTP submission (STARTTLS)"},{"smtps","SMTP submission (implicit TLS)"},{"pop3","POP3 (STLS)"},{"pop3s","POP3 (implicit TLS)"},{"imap","IMAP (STARTTLS)"},{"imaps","IMAP (implicit TLS)"},{"web","Webmail"},{"admin","Administration"},{"auth","Authentication"},{"storage","Mail storage"},{"filter","Mail filter"},{"transfer","Mail transfer"}};
+    for (const auto& [name,port] : ports) {
+        const bool optional = name=="submission" || name=="smtps" || name=="pop3s" || name=="imaps";
+        add("ports."+name,"network","number",port,port_labels.at(name)+" port",
         name=="smtp" ? "Internet mail arrives on TCP 25. Allow inbound traffic and grant permission to bind this privileged port on Unix. A different port requires forwarding from public TCP 25." :
-            "Every service needs a different port. Internal services listen on loopback.",1,65535);
+            optional ? "Set 0 to disable this client listener. It starts only with a TLS certificate and private key; SMTP submission always requires TLS and authentication." :
+            name=="web" ? "Use public TCP 80 for HTTP or TCP 443 for HTTPS. Existing custom ports remain configurable." :
+            "Every listener needs a different nonzero port. Internal services listen on loopback.",optional ? 0 : 1,65535);
+    }
     add("delivery_lock_port","network","number",18085,"Delivery lock port","Loopback port used to prevent duplicate delivery workers.",1,65535);
     add("allow_insecure_auth","security","boolean",false,"Allow local plaintext authentication","Only loopback clients may authenticate without TLS. Disable for deployment.");
     add("tls_certificate","security","text","","TLS certificate file","Readable PEM certificate chain; paths are relative to the configuration file.");
@@ -276,15 +282,21 @@ Json prepare_dkim(const Config& config,const Json& input) {
         {"type","TXT"},{"value",value},{"fingerprint",revision(value)}};
 }
 
-Json settings_schema(const Config&) { return fields(); }
+Json settings_schema(const Config& config) {
+    auto result=fields();
+    for(auto& field:result) if(field.at("key")=="ports.web") field["default"]=config.values.is_null() || config.text("tls_certificate").empty()?80:443;
+    return result;
+}
 
 std::string settings_url(const Config& config,const std::string& service) {
     const bool tls=!config.text("tls_certificate").empty();
     auto host=config.text(service=="admin" ? "admin_bind" : "bind","127.0.0.1");
-    if (host=="0.0.0.0" || host=="::") host=tls ? config.text("domain","localhost") : "127.0.0.1";
+    if (host=="0.0.0.0" || host=="::") host=config.mail_hostname();
     if(tls && (host=="127.0.0.1" || host=="::1")) host="localhost";
     if (host.find(':')!=std::string::npos) host="["+host+"]";
-    return std::string(tls ? "https://" : "http://")+host+":"+std::to_string(config.port(service))+"/";
+    const auto port=config.port(service);
+    const auto suffix=port==(tls ? 443 : 80) ? "" : ":"+std::to_string(port);
+    return std::string(tls ? "https://" : "http://")+host+suffix+"/";
 }
 
 Json settings_view(const Config& config) {
@@ -305,13 +317,16 @@ Json settings_view(const Config& config) {
     }
     values["outbound_mode"]=current.outbound_mode();
     values["mail_hostname"]=current.mail_hostname();
+    if (!current.values.contains("ports") || !current.values.at("ports").contains("web"))
+        values["ports"]["web"]=current.port("web");
     const bool available=supervisor_restart_available(config);
     const auto running=supervisor_running_config(config).value_or(config);
     auto result=Json{{"ok",true},{"values",values},{"revision",version},{"schema",settings_schema(current)},
         {"restart_available",available},
         {"restart_required",!config.source.empty() && current.values!=running.values},
         {"secret_status",{{"smarthost_password",!current.text("smarthost_password_file").empty()}}},
-        {"admin_url",settings_url(current,"admin")},{"web_url",settings_url(current,"web")}};
+        {"admin_url",settings_url(current,"admin")},{"web_url",settings_url(current,"web")},
+        {"mail_clients",mail_client_settings(current)}};
     if(available) result["restart"]=supervisor_restart_status(config);
     return result;
 }
@@ -361,7 +376,7 @@ Config validate_settings(const Config& existing,const Json& patch) {
     for (const auto& [key,entry]:schema) {
         if(entry.value("readonly",false) || entry.at("type")=="password") continue;
         const auto* value=get(result.values,key);
-        apply(key,value ? *value : entry.at("default"));
+        apply(key,value ? *value : key=="ports.web" ? Json(result.port("web")) : entry.at("default"));
     }
     const auto domain=lower(trim(result.text("domain","localhost")));
     if (!valid_address("postmaster@"+domain)) throw SettingsError("domain","Enter a valid ASCII mail domain, such as example.com.");
@@ -390,8 +405,8 @@ Config validate_settings(const Config& existing,const Json& patch) {
         } catch(const std::exception&) {throw SettingsError("tls_certificate","TLS files must be readable PEM files with a matching, unencrypted private key.");}
     }
     std::set<int> ports;
-    for(const auto* service:{"auth","storage","filter","transfer","smtp","pop3","imap","web","admin"})
-        if(!ports.insert(result.port(service)).second) throw SettingsError("ports."+std::string(service),"Every PostPlus service must use a different port.");
+    for(const auto* service:{"auth","storage","filter","transfer","smtp","submission","smtps","pop3","pop3s","imap","imaps","web","admin"})
+        if(const auto port=result.port(service); port && !ports.insert(port).second) throw SettingsError("ports."+std::string(service),"Every PostPlus listener must use a different nonzero port.");
     if(!ports.insert(result.number("delivery_lock_port",18085)).second) throw SettingsError("delivery_lock_port","Every PostPlus service must use a different port.");
     for(const auto* key:{"smarthost_host","smarthost_username","clamav_host"}) if(result.text(key).size()>253) throw SettingsError(key,"Hostnames and usernames must not exceed 253 bytes.");
     const auto env=result.text("smarthost_password_env");
@@ -462,11 +477,14 @@ Json save_settings(const Config& config,const Json& request) {
     // by the supervisor, allowing deliberate port swaps within PostPlus.
     const auto active=supervisor_running_config(config).value_or(config);
     std::set<int> active_ports{active.number("delivery_lock_port",18085)};
-    for(const auto* service:{"auth","storage","filter","transfer","smtp","pop3","imap","web","admin"}) active_ports.insert(active.port(service));
+    for(const auto* service:{"auth","storage","filter","transfer","smtp","pop3","imap","web","admin"})
+        for(const auto& listener:active.listeners(service)) active_ports.insert(listener.port);
     asio::io_context context;
-    for(const auto* service:{"auth","storage","filter","transfer","smtp","pop3","imap","web","admin","delivery"}) {
+    for(const auto* service:{"auth","storage","filter","transfer","smtp","submission","smtps","pop3","pop3s","imap","imaps","web","admin","delivery"}) {
         const std::string name(service);
         const int port=name=="delivery" ? updated.number("delivery_lock_port",18085) : updated.port(name);
+        const bool optional=name=="submission" || name=="smtps" || name=="pop3s" || name=="imaps";
+        if(!port || (optional && updated.text("tls_certificate").empty())) continue;
         if(active_ports.contains(port)) continue;
         const bool internal=name=="auth" || name=="storage" || name=="filter" || name=="transfer" || name=="delivery";
         const auto address=asio::ip::make_address(internal ? "127.0.0.1" : updated.text(name=="admin" ? "admin_bind" : "bind","127.0.0.1"));

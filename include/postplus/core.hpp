@@ -15,6 +15,11 @@
 namespace postplus {
 using Json = nlohmann::json;
 using tcp = asio::ip::tcp;
+struct TcpListener {
+    std::string name;
+    int port;
+    bool implicit_tls = false;
+};
 struct Config {
     Json values;
     std::filesystem::path source;
@@ -24,6 +29,8 @@ struct Config {
     int number(const std::string& key, int fallback) const;
     bool flag(const std::string& key, bool fallback = false) const;
     int port(const std::string& service) const;
+    // TLS-only client listeners are omitted without credentials or at port 0.
+    std::vector<TcpListener> listeners(const std::string& service) const;
     std::string token() const;
     std::string relay_password() const;
     // Preserve relay-only legacy installations until a mode is explicitly selected.
@@ -64,6 +71,9 @@ private:
 using Session = std::function<void(Connection&)>;
 void serve_tcp(const Config& config, const std::string& service, Session handler, bool internal = false,
                std::function<bool()> stop_requested = {});
+using ListenerSession = std::function<void(Connection&, const TcpListener&)>;
+void serve_tcp_listeners(const Config& config, const std::string& service, ListenerSession handler,
+                         std::function<bool()> stop_requested = {});
 
 struct HttpRequest {
     std::string method, path, body;

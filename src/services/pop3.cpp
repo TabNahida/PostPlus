@@ -131,5 +131,5 @@ void pop3(Connection& c, const Config& cfg) {
 }
 }
 int main(int argc, char** argv) {
-    return service_main("pop3", argc, argv, [](const Config& cfg) { serve_tcp(cfg, "pop3", [&](Connection& c) { pop3(c, cfg); }); });
+    return service_main("pop3", argc, argv, [](const Config& cfg) { serve_tcp_listeners(cfg, "pop3", [&](Connection& c, const TcpListener&) { pop3(c, cfg); }); });
 }

@@ -1,6 +1,7 @@
 #pragma once
 #include <postplus/core.hpp>
 #include <postplus/restart.hpp>
+#include <postplus/update.hpp>
 #include <memory>
 
 namespace postplus {
@@ -23,6 +24,14 @@ private:
     std::unique_ptr<Impl> impl_;
 };
 
+struct SupervisorUpdateRequest {
+    std::string action, job_id, version;
+};
+UpdateOptions supervisor_update_options(const Config& config);
+Json supervisor_update_status(const Config& config, const std::string& job_id = "");
+Json request_supervisor_update(const Config& config, const std::string& action,
+                               const std::string& value);
+
 // A private, per-launch request mailbox. Only children of the native supervisor
 // inherit its unpredictable capability. No listener or configurable port is used.
 class SupervisorControl {
@@ -31,6 +40,9 @@ public:
     ~SupervisorControl();
     bool shutdown_requested();
     std::optional<RestartRequest> restart_requested();
+    std::optional<SupervisorUpdateRequest> update_requested();
+    void update_progress(const SupervisorUpdateRequest& request, Json state);
+    void update_finished(const SupervisorUpdateRequest& request, Json state);
     std::filesystem::path snapshot_config(const Config& config);
     void ready(const Config& config);
     void restart_running(const RestartRequest& request, bool service_manager = false);

@@ -31,19 +31,27 @@ std::string quote(std::string_view value) {
     }
     return out + '"';
 }
-std::string read_command(Connection& c) {
+std::vector<std::string> tokenize(std::string_view line);
+struct CommandFrame { std::string text; std::optional<std::string> message; };
+CommandFrame read_command(Connection& c, std::size_t maximum) {
     auto command = c.line(8192);
     for (unsigned literals = 0; !command.empty() && command.back() == '}'; ++literals) {
         auto start = command.rfind('{');
         if (start == std::string::npos || literals == 8) throw Bad("Invalid literal framing");
         auto size = integer(std::string_view(command).substr(start + 1, command.size() - start - 2), true);
-        if (size > 16384 || command.size() + size > 65536) throw Bad("Literal too large");
+        const auto prefix=tokenize(std::string_view(command).substr(0,start));
+        const bool append=prefix.size()>=3 && upper(prefix[1])=="APPEND";
+        if(size>(append?maximum:16384) || (!append && command.size()+size>65536)) throw Bad("Literal too large");
         c.write("+ Ready for literal data\r\n");
         auto literal = c.read(static_cast<std::size_t>(size));
+        if(append) {
+            if(!c.line(8192).empty()) throw Bad("Unexpected data after APPEND literal");
+            command.resize(start); return {std::move(command),std::move(literal)};
+        }
         command.resize(start); command += quote(literal); command += c.line(8192);
         if (command.size() > 65536) throw Bad("Command too large");
     }
-    return command;
+    return {std::move(command),{}};
 }
 std::vector<std::string> tokenize(std::string_view line) {
     std::vector<std::string> result;
@@ -112,20 +120,142 @@ std::pair<std::string, std::string> split_body(const std::string& raw) {
     if (end == std::string::npos) return {raw + "\r\n\r\n", ""};
     return {raw.substr(0, end + count), raw.substr(end + count)};
 }
-std::string select_headers(const std::string& raw, const std::set<std::string>& fields, bool invert) {
-    auto headers = split_body(raw).first;
+std::string select_headers(std::string_view raw, const std::set<std::string>& fields, bool invert) {
+    auto end_headers=raw.find("\r\n\r\n");
+    if(end_headers==std::string_view::npos) end_headers=raw.find("\n\n");
+    const auto headers=raw.substr(0,end_headers);
     std::string selected; std::size_t at = 0; bool keep = false;
     while (at < headers.size()) {
         auto end = headers.find('\n', at); if (end == std::string::npos) end = headers.size();
-        auto line = headers.substr(at, end - at); if (!line.empty() && line.back() == '\r') line.pop_back();
+        auto line = headers.substr(at, end - at); if (!line.empty() && line.back() == '\r') line.remove_suffix(1);
         if (line.empty()) break;
         if (line.front() != ' ' && line.front() != '\t') {
-            auto colon = line.find(':'); keep = colon != std::string::npos && (fields.contains(upper(line.substr(0, colon))) != invert);
+            auto colon = line.find(':'); keep = colon != std::string::npos && (fields.contains(upper(std::string(line.substr(0, colon)))) != invert);
         }
-        if (keep) selected += line + "\r\n";
+        if (keep) { selected.append(line); selected+="\r\n"; }
         at = end == headers.size() ? end : end + 1;
     }
     return selected + "\r\n";
+}
+std::string nstring(std::string_view value) { return value.empty()?"NIL":quote(value); }
+std::string addresses(std::string_view header) {
+    std::string result="("; std::size_t start=0; bool quoted=false,escaped=false; unsigned angle=0,comment=0;
+    auto add=[&](std::string_view token) {
+        auto value=trim(std::string(token)); if(value.empty()) return;
+        std::string display,address;
+        const auto opening=value.find('<'), closing=value.rfind('>');
+        if(opening!=std::string::npos && closing>opening) { display=trim(value.substr(0,opening)); address=trim(value.substr(opening+1,closing-opening-1)); }
+        else address=value;
+        if(display.size()>=2 && display.front()=='"' && display.back()=='"') display=display.substr(1,display.size()-2);
+        const auto at=address.rfind('@'); if(at==std::string::npos || !at || at+1==address.size()) return;
+        if(result.size()>1) result+=' ';
+        result+="("+nstring(display)+" NIL "+quote(address.substr(0,at))+" "+quote(address.substr(at+1))+")";
+    };
+    for(std::size_t i=0;i<header.size();++i) {
+        const char ch=header[i];
+        if(escaped) { escaped=false; continue; }
+        if(ch=='\\' && (quoted||comment)) { escaped=true; continue; }
+        if(ch=='"' && !comment) quoted=!quoted;
+        if(quoted) continue;
+        if(ch=='(') ++comment; else if(ch==')' && comment) --comment;
+        if(comment) continue;
+        if(ch=='<') ++angle; else if(ch=='>' && angle) --angle;
+        if(!angle && ch==',' ) { add(header.substr(start,i-start)); start=i+1; }
+    }
+    add(header.substr(start)); return result.size()==1?"NIL":result+")";
+}
+std::string envelope(const mime::Part& part) {
+    const auto from=mime::header(part,"from"), sender=mime::header(part,"sender"), reply=mime::header(part,"reply-to");
+    return "("+nstring(mime::header(part,"date"))+" "+nstring(mime::header(part,"subject"))+" "+addresses(from)+" "+
+        addresses(sender.empty()?from:sender)+" "+addresses(reply.empty()?from:reply)+" "+addresses(mime::header(part,"to"))+" "+
+        addresses(mime::header(part,"cc"))+" "+addresses(mime::header(part,"bcc"))+" "+nstring(mime::header(part,"in-reply-to"))+" "+nstring(mime::header(part,"message-id"))+")";
+}
+std::string parameters(std::string_view header) {
+    std::string result="("; auto at=header.find(';');
+    while(at!=std::string::npos && ++at<header.size()) {
+        while(at<header.size() && std::isspace(static_cast<unsigned char>(header[at]))) ++at;
+        const auto start=at; while(at<header.size() && header[at]!='=' && header[at]!=';') ++at;
+        if(at==header.size() || header[at]!='=') break;
+        auto name=trim(std::string(header.substr(start,at-start))); ++at;
+        while(at<header.size() && std::isspace(static_cast<unsigned char>(header[at]))) ++at;
+        std::string value;
+        if(at<header.size() && header[at]=='"') {
+            ++at;
+            while(at<header.size() && header[at]!='"') {
+                if(header[at]=='\\') { if(++at==header.size()) throw Bad("Invalid MIME parameter"); }
+                value+=header[at++];
+            }
+            if(at==header.size()) throw Bad("Invalid MIME parameter"); ++at;
+        } else { const auto end=header.find(';',at); value=trim(std::string(header.substr(at,end-at))); at=end; }
+        if(!name.empty()) { if(result.size()>1) result+=' '; result+=quote(upper(name))+" "+quote(value); }
+        at=header.find(';',at);
+    }
+    return result.size()==1?"NIL":result+")";
+}
+struct RawPart {
+    const mime::Part* part;
+    std::string_view raw,header,body;
+    std::vector<RawPart> children;
+};
+RawPart raw_part(std::string_view raw,const mime::Part& part) {
+    auto boundary=raw.find("\r\n\r\n"); std::size_t delimiter=4;
+    if(raw.starts_with("\r\n")) { boundary=0; delimiter=2; }
+    else if(raw.starts_with("\n")) { boundary=0; delimiter=1; }
+    else if(boundary==std::string_view::npos) { boundary=raw.find("\n\n"); delimiter=2; }
+    const auto header_size=boundary==std::string_view::npos?raw.size():boundary+delimiter;
+    RawPart result{&part,raw,raw.substr(0,header_size),raw.substr(header_size),{}};
+    if(part.content_type=="message/rfc822" && !part.parts.empty()) result.children.push_back(raw_part(part.embedded_message,part.parts[0]));
+    else if(part.content_type.starts_with("multipart/")) {
+        const auto marker="--"+mime::parameter(mime::header(part,"content-type"),"boundary");
+        std::size_t pos=0,start=std::string_view::npos,index=0;
+        while(pos<=result.body.size()) {
+            auto end=result.body.find('\n',pos); if(end==std::string_view::npos) end=result.body.size();
+            auto line=result.body.substr(pos,end-pos); while(!line.empty() && (line.back()=='\r'||line.back()==' '||line.back()=='\t')) line.remove_suffix(1);
+            if(line==marker || line==marker+"--") {
+                if(start!=std::string_view::npos && index<part.parts.size()) {
+                    auto part_end=pos; if(part_end>start && result.body[part_end-1]=='\n') --part_end;
+                    if(part_end>start && result.body[part_end-1]=='\r') --part_end;
+                    result.children.push_back(raw_part(result.body.substr(start,part_end-start),part.parts[index++]));
+                }
+                if(line==marker+"--") break;
+                start=end==result.body.size()?end:end+1;
+            }
+            if(end==result.body.size()) break; pos=end+1;
+        }
+    }
+    return result;
+}
+std::string disposition(const mime::Part& part) {
+    const auto value=mime::header(part,"content-disposition");
+    return value.empty()?"NIL":"("+quote(upper(trim(value.substr(0,value.find(';')))))+" "+parameters(value)+")";
+}
+std::string body_structure(const RawPart& node,bool extended) {
+    const auto& part=*node.part; const auto slash=part.content_type.find('/');
+    const auto type=upper(part.content_type.substr(0,slash)), subtype=upper(slash==std::string::npos?"PLAIN":part.content_type.substr(slash+1));
+    std::string result="(";
+    if(type=="MULTIPART") {
+        for(const auto& child:node.children) result+=body_structure(child,extended)+" ";
+        result+=quote(subtype);
+        if(extended) result+=" "+parameters(mime::header(part,"content-type"))+" "+disposition(part)+" "+nstring(mime::header(part,"content-language"))+" "+nstring(mime::header(part,"content-location"));
+    } else {
+        auto encoding=upper(mime::header(part,"content-transfer-encoding")); if(encoding.empty()) encoding="7BIT";
+        result+=quote(type)+" "+quote(subtype)+" "+parameters(mime::header(part,"content-type"))+" "+nstring(mime::header(part,"content-id"))+" "+nstring(mime::header(part,"content-description"))+" "+quote(encoding)+" "+std::to_string(node.body.size());
+        if(type=="MESSAGE" && subtype=="RFC822" && !node.children.empty()) result+=" "+envelope(*node.children[0].part)+" "+body_structure(node.children[0],extended);
+        if(type=="TEXT" || (type=="MESSAGE" && subtype=="RFC822")) result+=" "+std::to_string(std::count(node.body.begin(),node.body.end(),'\n'));
+        if(extended) result+=" "+nstring(mime::header(part,"content-md5"))+" "+disposition(part)+" "+nstring(mime::header(part,"content-language"))+" "+nstring(mime::header(part,"content-location"));
+    }
+    return result+")";
+}
+std::int64_t internal_date(const std::string& value) {
+    std::tm parsed{}; std::istringstream input(value); input.imbue(std::locale::classic());
+    if(!(input>>std::get_time(&parsed,"%d-%b-%Y %H:%M:%S"))) throw Bad("Invalid APPEND date");
+    std::string zone,extra; if(!(input>>zone)) throw Bad("Invalid APPEND timezone"); input>>extra;
+    if(!extra.empty() || zone.size()!=5 || (zone[0]!='+' && zone[0]!='-') || !std::all_of(zone.begin()+1,zone.end(),[](unsigned char c){return std::isdigit(c);})) throw Bad("Invalid APPEND timezone");
+    const auto hours=std::stoi(zone.substr(1,2)), minutes=std::stoi(zone.substr(3,2));
+    const std::chrono::year_month_day date{std::chrono::year(parsed.tm_year+1900),std::chrono::month(static_cast<unsigned>(parsed.tm_mon+1)),std::chrono::day(static_cast<unsigned>(parsed.tm_mday))};
+    if(!date.ok() || hours>23 || minutes>59 || parsed.tm_hour>23 || parsed.tm_min>59 || parsed.tm_sec>59) throw Bad("Invalid APPEND date");
+    const auto utc=std::chrono::sys_days(date)+std::chrono::hours(parsed.tm_hour)+std::chrono::minutes(parsed.tm_min)+std::chrono::seconds(parsed.tm_sec)-std::chrono::minutes((hours*60+minutes)*(zone[0]=='-'?-1:1));
+    return std::chrono::duration_cast<std::chrono::seconds>(utc.time_since_epoch()).count();
 }
 struct FetchItem {
     std::string name, section;
@@ -135,7 +265,7 @@ struct FetchItem {
 };
 FetchItem fetch_item(std::string token) {
     token = upper(token); FetchItem item; item.name = token;
-    if (token == "FLAGS" || token == "UID" || token == "RFC822.SIZE" || token == "INTERNALDATE") return item;
+    if (token == "FLAGS" || token == "UID" || token == "RFC822.SIZE" || token == "INTERNALDATE" || token == "ENVELOPE" || token == "BODY" || token == "BODYSTRUCTURE") return item;
     item.literal = true;
     if (token == "RFC822" || token == "RFC822.HEADER" || token == "RFC822.TEXT") {
         item.section = token == "RFC822.HEADER" ? "HEADER" : token == "RFC822.TEXT" ? "TEXT" : "";
@@ -149,14 +279,22 @@ FetchItem fetch_item(std::string token) {
     if (!item.section.empty() && item.section != "HEADER" && item.section != "TEXT") {
         auto opening = item.section.find('('), closing = item.section.find(')');
         auto prefix = opening == std::string::npos ? item.section : trim(item.section.substr(0, opening));
-        if ((prefix != "HEADER.FIELDS" && prefix != "HEADER.FIELDS.NOT") || opening == std::string::npos || closing != item.section.size() - 1) throw Bad("Unsupported BODY section");
-        item.exclude_fields = prefix == "HEADER.FIELDS.NOT";
+        auto section_prefix=prefix;
+        while(!section_prefix.empty() && std::isdigit(static_cast<unsigned char>(section_prefix.front()))) {
+            const auto dot=section_prefix.find('.'); const auto component=section_prefix.substr(0,dot); (void)integer(component);
+            section_prefix=dot==std::string::npos?"":section_prefix.substr(dot+1);
+        }
+        if(opening==std::string::npos && (section_prefix.empty() || section_prefix=="HEADER" || section_prefix=="TEXT" || section_prefix=="MIME")) {}
+        else {
+        if ((section_prefix != "HEADER.FIELDS" && section_prefix != "HEADER.FIELDS.NOT") || opening == std::string::npos || closing != item.section.size() - 1) throw Bad("Unsupported BODY section");
+        item.exclude_fields = section_prefix == "HEADER.FIELDS.NOT";
         std::istringstream names(item.section.substr(opening + 1, closing - opening - 1)); std::string name;
         while (names >> name) {
             if (name.empty() || name.find_first_of("()[]:\\") != std::string::npos) throw Bad("Invalid header field name");
             item.fields.insert(name);
         }
         if (item.fields.empty()) throw Bad("Empty header fields");
+        }
     }
     if (end + 1 < token.size()) {
         auto tail = token.substr(end + 1); auto dot = tail.find('.');
@@ -166,6 +304,22 @@ FetchItem fetch_item(std::string token) {
         item.name += "<" + std::to_string(item.offset) + ">";
     }
     return item;
+}
+std::optional<std::string> section_body(const RawPart& root,const FetchItem& item) {
+    const RawPart* node=&root; auto section=item.section; bool first=true,numbered=false;
+    while(!section.empty() && std::isdigit(static_cast<unsigned char>(section.front()))) {
+        const auto dot=section.find('.'); const auto index=integer(std::string_view(section).substr(0,dot));
+        const bool embedded=!first && node->part->content_type=="message/rfc822" && !node->children.empty();
+        if(embedded) node=&node->children[0];
+        if(node->part->content_type.starts_with("multipart/")) { if(index>node->children.size()) return {}; node=&node->children[static_cast<std::size_t>(index-1)]; }
+        else if(!((first || embedded) && index==1)) return {};
+        section=dot==std::string::npos?"":section.substr(dot+1); first=false; numbered=true;
+    }
+    if(numbered && !section.empty() && section!="MIME" && node->part->content_type=="message/rfc822" && !node->children.empty()) node=&node->children[0];
+    if(!item.fields.empty()) return select_headers(node->raw,item.fields,item.exclude_fields);
+    if(section=="HEADER" || section=="MIME") return std::string(node->header);
+    if(section=="TEXT" || numbered) return std::string(node->body);
+    return std::string(node->raw);
 }
 struct Search {
     std::string operation, a, b;
@@ -188,7 +342,7 @@ Search search_key(const std::vector<std::string>& args, std::size_t& pos, unsign
     else if (op == "HEADER") { result.a = take(); result.b = lower(take()); }
     else if (op == "FROM" || op == "TO" || op == "CC" || op == "BCC" || op == "SUBJECT" || op == "BODY" || op == "TEXT") result.a = lower(take());
     else if (op == "LARGER" || op == "SMALLER") { result.a = take(); integer(result.a, true); }
-    else if (op == "ALL" || op == "SEEN" || op == "UNSEEN" || op == "DELETED" || op == "UNDELETED" || op == "RECENT" || op == "OLD" || op == "NEW") {}
+    else if (op == "ALL" || op == "SEEN" || op == "UNSEEN" || op == "DELETED" || op == "UNDELETED" || op == "RECENT" || op == "OLD" || op == "NEW" || op == "ANSWERED" || op == "UNANSWERED" || op == "FLAGGED" || op == "UNFLAGGED" || op == "DRAFT" || op == "UNDRAFT") {}
     else { Sequence validate(op); result.operation = "SEQUENCE"; result.a = op; }
     return result;
 }
@@ -210,8 +364,8 @@ void imap(Connection& c, const Config& cfg) {
     auto allowed = [&] { return c.encrypted() || (cfg.flag("allow_insecure_auth") && c.socket().remote_endpoint().address().is_loopback()); };
     auto tls = [&] { return !cfg.text("tls_certificate").empty() && !cfg.text("tls_private_key").empty(); };
     auto capability = [&] {
-        std::string value = "IMAP4rev1";
-        if (user.empty()) { if (allowed()) value += " AUTH=PLAIN"; else value += " LOGINDISABLED"; if (!c.encrypted() && tls()) value += " STARTTLS"; }
+        std::string value = "IMAP4rev1 UIDPLUS MOVE";
+        if (user.empty()) { if (allowed()) value += " AUTH=PLAIN SASL-IR"; else value += " LOGINDISABLED"; if (!c.encrypted() && tls()) value += " STARTTLS"; }
         return value;
     };
     auto list = [&](const std::string& target) {
@@ -221,6 +375,8 @@ void imap(Connection& c, const Config& cfg) {
     };
     auto flags = [&](const Json& message) {
         std::string out = "("; if (message.value("seen", false)) out += "\\Seen";
+        for(const auto& [key,name]:std::array<std::pair<const char*,const char*>,3>{{{"answered","\\Answered"},{"flagged","\\Flagged"},{"draft","\\Draft"}}})
+            if(message.value(key,false)) { if(out.size()>1) out+=' '; out+=name; }
         if (deleted.contains(key(message))) { if (out.size() > 1) out += ' '; out += "\\Deleted"; }
         return out + ')';
     };
@@ -243,29 +399,31 @@ void imap(Connection& c, const Config& cfg) {
         if (!result.value("ok", false)) throw std::runtime_error("Message unavailable");
         return result.at("raw").get<std::string>();
     };
-    auto expunge = [&](bool announce) {
+    auto expunge = [&](bool announce, const Sequence* sequence = nullptr) {
         if (readonly || deleted.empty()) return;
         Json ids = Json::array(), expected_uids = Json::object();
-        for (const auto& message : messages) if (deleted.contains(key(message))) {
+        std::set<std::string> expunged;
+        for (const auto& message : messages) if (deleted.contains(key(message)) && (!sequence || sequence->includes(message.at("uid").get<std::uint64_t>(),messages.empty()?0:messages.back().at("uid").get<std::uint64_t>()))) {
             ids.push_back(message.at("id")); expected_uids[message.at("id").get<std::string>()] = message.at("uid");
+            expunged.insert(key(message));
         }
+        if(ids.empty()) return;
         auto result = rpc(cfg, "storage", {{"op", "delete"}, {"username", user}, {"ids", ids},
             {"permanent", true}, {"folder", selected_folder}, {"expected_uids", expected_uids}});
         if (!result.value("ok", false)) throw std::runtime_error("Deletion failed");
         for (std::size_t i = 0; i < messages.size();) {
-            if (deleted.contains(key(messages[i]))) { if (announce) c.write("* " + std::to_string(i + 1) + " EXPUNGE\r\n"); messages.erase(messages.begin() + static_cast<std::ptrdiff_t>(i)); }
+            if (expunged.contains(key(messages[i]))) { if (announce) c.write("* " + std::to_string(i + 1) + " EXPUNGE\r\n"); deleted.erase(key(messages[i])); messages.erase(messages.begin() + static_cast<std::ptrdiff_t>(i)); }
             else ++i;
         }
-        deleted.clear();
     };
     c.write("* OK [CAPABILITY " + capability() + "] PostPlus IMAP ready\r\n");
     for (;;) {
-        std::string line;
-        try { line = read_command(c); }
+        CommandFrame frame;
+        try { frame = read_command(c,static_cast<std::size_t>(cfg.number("max_message_bytes",10485760))); }
         catch (...) { c.write("* BYE Invalid or oversized command framing\r\n"); return; }
         std::string tag = "*", cmd;
         try {
-            auto args = tokenize(line);
+            auto args = tokenize(frame.text);
             if (args.size() < 2) throw Bad("Missing tag or command");
             tag = args[0];
             if (tag.empty() || tag == "*" || tag.find_first_of(" (){%*\"\\]+\r\n\t") != std::string::npos) { tag = "*"; throw Bad("Invalid tag"); }
@@ -288,10 +446,11 @@ void imap(Connection& c, const Config& cfg) {
                 std::string candidate, password;
                 if (cmd == "LOGIN") { require_count(2); candidate = lower(args[0]); password = args[1]; }
                 else {
-                    require_count(1); if (upper(args[0]) != "PLAIN") throw Bad("Unsupported authentication mechanism");
-                    c.write("+ \r\n"); auto encoded = c.line(8192);
+                    if (args.empty() || args.size() > 2 || upper(args[0]) != "PLAIN") throw Bad("Unsupported authentication mechanism");
+                    std::string encoded;
+                    if (args.size() == 2) encoded = args[1]; else { c.write("+ \r\n"); encoded = c.line(8192); }
                     if (encoded == "*") { c.write(tag + " BAD Authentication canceled\r\n"); continue; }
-                    std::string decoded; try { decoded = base64_decode(encoded); } catch (...) { throw Bad("Invalid authentication encoding"); }
+                    std::string decoded; try { decoded = base64_decode(encoded == "=" ? "" : encoded); } catch (...) { throw Bad("Invalid authentication encoding"); }
                     auto a = decoded.find('\0'), b = a == std::string::npos ? a : decoded.find('\0', a + 1);
                     if (a == std::string::npos || b == std::string::npos || decoded.find('\0', b + 1) != std::string::npos) throw Bad("Invalid PLAIN authentication");
                     candidate = lower(decoded.substr(a + 1, b - a - 1)); password = decoded.substr(b + 1);
@@ -306,6 +465,31 @@ void imap(Connection& c, const Config& cfg) {
                 user = result.value("username", candidate); done(); continue;
             }
             if (user.empty()) { c.write(tag + " NO Authenticate first\r\n"); continue; }
+            if(cmd=="APPEND") {
+                if(args.empty() || !frame.message) throw Bad("Missing APPEND mailbox or message");
+                const auto target=mailbox_name(args[0]); if(target.empty()) { c.write(tag+" NO [TRYCREATE] No such mailbox\r\n"); continue; }
+                Json request={{"op","append"},{"username",user},{"folder",target},{"raw",*frame.message}};
+                std::size_t at=1;
+                if(at<args.size() && args[at]=="(") {
+                    ++at;
+                    while(at<args.size() && args[at]!=")") {
+                        const auto flag=upper(args[at++]);
+                        if(flag=="\\SEEN") request["seen"]=true;
+                        else if(flag=="\\ANSWERED") request["answered"]=true;
+                        else if(flag=="\\FLAGGED") request["flagged"]=true;
+                        else if(flag=="\\DRAFT") request["draft"]=true;
+                        else throw Bad("Unsupported APPEND flag");
+                    }
+                    if(at==args.size()) throw Bad("Unclosed APPEND flags"); ++at;
+                }
+                if(at<args.size()) request["internal_date"]=internal_date(args[at++]);
+                if(at!=args.size()) throw Bad("Invalid APPEND arguments");
+                const auto result=rpc(cfg,"storage",request);
+                if(!result.value("ok",false)) { c.write(tag+" NO [OVERQUOTA] Cannot append message\r\n"); continue; }
+                if(selected && target==selected_folder) refresh();
+                c.write(tag+" OK [APPENDUID "+std::to_string(result.at("uidvalidity").get<std::uint64_t>())+" "+std::to_string(result.at("uid").get<std::uint64_t>())+"] APPEND completed\r\n"); continue;
+            }
+            if(cmd=="SUBSCRIBE" || cmd=="UNSUBSCRIBE") { require_count(1); if(mailbox_name(args[0]).empty()) { c.write(tag+" NO No such mailbox\r\n"); continue; } done(); continue; }
             if (cmd == "LIST" || cmd == "LSUB") {
                 require_count(2);
                 if (args[1].empty()) c.write("* " + cmd + " (\\Noselect) \"/\" \"\"\r\n");
@@ -318,10 +502,10 @@ void imap(Connection& c, const Config& cfg) {
                 selected_folder = mailbox_name(args[0]);
                 if (selected_folder.empty()) { c.write(tag + " NO No such mailbox\r\n"); continue; }
                 auto mailbox = list(selected_folder); messages = mailbox.at("messages").get<std::vector<Json>>(); selected = true; readonly = cmd == "EXAMINE";
-                c.write("* FLAGS (\\Seen \\Deleted)\r\n* " + std::to_string(messages.size()) + " EXISTS\r\n* 0 RECENT\r\n");
+                c.write("* FLAGS (\\Seen \\Answered \\Flagged \\Draft \\Deleted)\r\n* " + std::to_string(messages.size()) + " EXISTS\r\n* 0 RECENT\r\n");
                 c.write("* OK [UIDVALIDITY " + std::to_string(mailbox.at("uidvalidity").get<std::uint64_t>()) + "] Stable mailbox identifier\r\n");
                 c.write("* OK [UIDNEXT " + std::to_string(mailbox.at("uidnext").get<std::uint64_t>()) + "] Next UID\r\n");
-                c.write(std::string("* OK [PERMANENTFLAGS ") + (readonly ? "()" : "(\\Seen)") + "] Supported persistent flags\r\n");
+                c.write(std::string("* OK [PERMANENTFLAGS ") + (readonly ? "()" : "(\\Seen \\Answered \\Flagged \\Draft)") + "] Supported persistent flags\r\n");
                 for (std::size_t i = 0; i < messages.size(); ++i) if (!messages[i].value("seen", false)) { c.write("* OK [UNSEEN " + std::to_string(i + 1) + "] First unseen\r\n"); break; }
                 c.write(tag + " OK [" + (readonly ? "READ-ONLY" : "READ-WRITE") + "] " + cmd + " completed\r\n"); continue;
             }
@@ -344,18 +528,37 @@ void imap(Connection& c, const Config& cfg) {
             }
             if (!selected) { c.write(tag + " NO Select a mailbox first\r\n"); continue; }
             if (cmd == "CHECK") { require_count(0); done(); continue; }
+            if(cmd=="UNSELECT") { require_count(0); selected=false; messages.clear(); deleted.clear(); done(); continue; }
             if (cmd == "CLOSE") { require_count(0); expunge(false); selected = false; messages.clear(); deleted.clear(); done(); continue; }
             if (cmd == "EXPUNGE") { require_count(0); if (readonly) { c.write(tag + " NO Mailbox is read-only\r\n"); continue; } expunge(true); done(); continue; }
             bool uid_mode = cmd == "UID";
             if (uid_mode) { if (args.empty()) throw Bad("Missing UID command"); cmd = upper(args.front()); args.erase(args.begin()); }
             // Sequence numbers remain fixed during FETCH/STORE/SEARCH as required by IMAP.
             auto max_uid = messages.empty() ? 0 : messages.back().at("uid").get<std::uint64_t>();
+            if(uid_mode && cmd=="EXPUNGE") { require_count(1); if(readonly) { c.write(tag+" NO Mailbox is read-only\r\n"); continue; } const Sequence sequence(args[0]); expunge(true,&sequence); done(); continue; }
+            if(cmd=="COPY" || cmd=="MOVE") {
+                require_count(2); if(cmd=="MOVE" && readonly) { c.write(tag+" NO Mailbox is read-only\r\n"); continue; }
+                const auto target=mailbox_name(args[1]); if(target.empty()) { c.write(tag+" NO [TRYCREATE] No such mailbox\r\n"); continue; }
+                Sequence sequence(args[0]); Json ids=Json::array(), expected=Json::object();
+                for(std::size_t i=0;i<messages.size();++i) { const auto& m=messages[i]; const auto uid=m.at("uid").get<std::uint64_t>();
+                    if(sequence.includes(uid_mode?uid:i+1,uid_mode?max_uid:messages.size())) { ids.push_back(m.at("id")); expected[m.at("id").get<std::string>()]=uid; }
+                }
+                const auto result=rpc(cfg,"storage",{{"op","copy"},{"username",user},{"ids",ids},{"expected_uids",expected},{"source_folder",selected_folder},{"folder",target},{"move",cmd=="MOVE"}});
+                if(!result.value("ok",false)) { c.write(tag+" NO Copy or move failed\r\n"); continue; }
+                std::string source_uids,destination_uids;
+                for(const auto& mapping:result.at("mappings")) { if(!source_uids.empty()) { source_uids+=','; destination_uids+=','; }
+                    source_uids+=std::to_string(mapping.at("source_uid").get<std::uint64_t>()); destination_uids+=std::to_string(mapping.at("uid").get<std::uint64_t>()); }
+                if(cmd=="MOVE" || target==selected_folder) refresh();
+                if(source_uids.empty()) done(); else c.write(tag+" OK [COPYUID "+std::to_string(result.at("uidvalidity").get<std::uint64_t>())+" "+source_uids+" "+destination_uids+"] "+cmd+" completed\r\n"); continue;
+            }
             if (cmd == "FETCH") {
                 if (args.size() < 2) throw Bad("Missing FETCH arguments");
                 Sequence sequence(args[0]); std::vector<std::string> attribute_names(args.begin() + 1, args.end());
                 if (attribute_names.front() == "(") { if (attribute_names.back() != ")") throw Bad("Unclosed FETCH attributes"); attribute_names.erase(attribute_names.begin()); attribute_names.pop_back(); }
                 else if (attribute_names.size() != 1) throw Bad("FETCH attributes require parentheses");
                 if (attribute_names.size() == 1 && upper(attribute_names[0]) == "FAST") attribute_names = {"FLAGS", "INTERNALDATE", "RFC822.SIZE"};
+                else if(attribute_names.size()==1 && upper(attribute_names[0])=="ALL") attribute_names={"FLAGS","INTERNALDATE","RFC822.SIZE","ENVELOPE"};
+                else if(attribute_names.size()==1 && upper(attribute_names[0])=="FULL") attribute_names={"FLAGS","INTERNALDATE","RFC822.SIZE","ENVELOPE","BODY"};
                 if (attribute_names.empty() || attribute_names.size() > 64) throw Bad("Invalid FETCH attributes");
                 std::vector<FetchItem> items; bool has_uid = false;
                 for (const auto& name : attribute_names) { auto item = fetch_item(name); has_uid = has_uid || item.name == "UID"; items.push_back(std::move(item)); }
@@ -363,8 +566,10 @@ void imap(Connection& c, const Config& cfg) {
                 for (std::size_t i = 0; i < messages.size(); ++i) {
                     auto& message = messages[i]; auto uid = message.at("uid").get<std::uint64_t>();
                     if (!sequence.includes(uid_mode ? uid : i + 1, uid_mode ? max_uid : messages.size())) continue;
-                    bool need_raw = std::any_of(items.begin(), items.end(), [](const FetchItem& item) { return item.literal; });
+                    bool need_raw = std::any_of(items.begin(), items.end(), [](const FetchItem& item) { return item.literal || item.name=="ENVELOPE" || item.name=="BODY" || item.name=="BODYSTRUCTURE"; });
                     auto raw = need_raw ? raw_message(message) : "";
+                    std::optional<mime::Part> parsed; std::optional<RawPart> tree;
+                    auto get_tree=[&]() -> const RawPart& { if(!tree) { parsed=mime::parse(raw,mime::Limits{static_cast<std::size_t>(cfg.number("max_message_bytes",10485760))}); tree=raw_part(raw,*parsed); } return *tree; };
                     bool seen_changed = false;
                     if (!readonly && !message.value("seen", false) && std::any_of(items.begin(), items.end(), [](const FetchItem& item) { return item.mark_seen; })) {
                         auto result = rpc(cfg, "storage", {{"op", "flags"}, {"username", user}, {"id", message.at("id")}, {"uid", message.at("uid")}, {"seen", true}});
@@ -378,6 +583,8 @@ void imap(Connection& c, const Config& cfg) {
                         if (item.name == "FLAGS") response += flags(message);
                         else if (item.name == "UID") response += std::to_string(uid);
                         else if (item.name == "RFC822.SIZE") response += std::to_string(message.at("size").get<std::uint64_t>());
+                        else if(item.name=="ENVELOPE") response+=envelope(*get_tree().part);
+                        else if(item.name=="BODY" || item.name=="BODYSTRUCTURE") response+=body_structure(get_tree(),item.name=="BODYSTRUCTURE");
                         else if (item.name == "INTERNALDATE") {
                             if (!message.contains("internal_date")) throw Bad("INTERNALDATE unavailable for this message");
                             auto epoch = static_cast<std::time_t>(message.at("internal_date").get<std::int64_t>()); std::tm utc{};
@@ -389,7 +596,10 @@ void imap(Connection& c, const Config& cfg) {
                             std::ostringstream date; date.imbue(std::locale::classic()); date << std::put_time(&utc, "%d-%b-%Y %H:%M:%S +0000"); response += quote(date.str());
                         } else {
                             std::string body;
-                            if (!item.fields.empty()) body = select_headers(raw, item.fields, item.exclude_fields);
+                            if(!item.section.empty() && std::isdigit(static_cast<unsigned char>(item.section.front()))) {
+                                const auto bytes=section_body(get_tree(),item); if(!bytes) { response+="NIL"; continue; } body=*bytes;
+                            }
+                            else if (!item.fields.empty()) body = select_headers(raw, item.fields, item.exclude_fields);
                             else if (item.section == "HEADER") body = split_body(raw).first;
                             else if (item.section == "TEXT") body = split_body(raw).second;
                             else body = raw;
@@ -413,18 +623,20 @@ void imap(Connection& c, const Config& cfg) {
                 std::vector<std::string> flag_names(args.begin() + 2, args.end());
                 if (flag_names.front() == "(") { if (flag_names.back() != ")") throw Bad("Unclosed STORE flags"); flag_names.erase(flag_names.begin()); flag_names.pop_back(); }
                 else if (flag_names.size() != 1) throw Bad("Invalid STORE flags");
-                bool seen = false, erased = false;
-                for (auto flag : flag_names) { flag = upper(flag); if (flag == "\\SEEN") seen = true; else if (flag == "\\DELETED") erased = true; else throw Bad("Only Seen and Deleted flags are supported"); }
+                std::set<std::string> requested;
+                for (auto flag : flag_names) { flag = upper(flag); if (flag != "\\SEEN" && flag != "\\DELETED" && flag != "\\ANSWERED" && flag != "\\FLAGGED" && flag != "\\DRAFT") throw Bad("Unsupported message flag"); requested.insert(flag); }
+                const bool erased=requested.contains("\\DELETED");
                 for (std::size_t i = 0; i < messages.size(); ++i) {
                     auto& message = messages[i]; auto uid = message.at("uid").get<std::uint64_t>();
                     if (!sequence.includes(uid_mode ? uid : i + 1, uid_mode ? max_uid : messages.size())) continue;
-                    auto id = key(message); bool old_seen = message.value("seen", false), old_deleted = deleted.contains(id);
-                    bool new_seen = operation == "FLAGS" ? seen : operation == "+FLAGS" ? old_seen || seen : old_seen && !seen;
+                    auto id = key(message); bool old_deleted = deleted.contains(id);
                     bool new_deleted = operation == "FLAGS" ? erased : operation == "+FLAGS" ? old_deleted || erased : old_deleted && !erased;
-                    if (old_seen != new_seen) {
-                        auto result = rpc(cfg, "storage", {{"op", "flags"}, {"username", user}, {"id", message.at("id")}, {"uid", message.at("uid")}, {"seen", new_seen}});
-                        if (!result.value("ok", false)) throw std::runtime_error("Flag update failed"); message["seen"] = new_seen;
+                    Json update={{"op","flags"},{"username",user},{"id",message.at("id")},{"uid",message.at("uid")}};
+                    for(const auto& [name,flag]:std::array<std::pair<const char*,const char*>,4>{{{"seen","\\SEEN"},{"answered","\\ANSWERED"},{"flagged","\\FLAGGED"},{"draft","\\DRAFT"}}}) {
+                        const bool old=message.value(name,false),set=requested.contains(flag); update[name]=operation=="FLAGS"?set:operation=="+FLAGS"?old||set:old&&!set;
                     }
+                    const auto result=rpc(cfg,"storage",update); if(!result.value("ok",false)) throw std::runtime_error("Flag update failed");
+                    for(const auto* name:{"seen","answered","flagged","draft"}) message[name]=update[name];
                     if (new_deleted) deleted.insert(id); else deleted.erase(id);
                     if (!silent) c.write("* " + std::to_string(i + 1) + " FETCH (" + (uid_mode ? "UID " + std::to_string(uid) + " " : "") + "FLAGS " + flags(message) + ")\r\n");
                 }
@@ -461,6 +673,9 @@ void imap(Connection& c, const Config& cfg) {
                         if (op == "ALL" || op == "OLD") return true;
                         if (op == "RECENT" || op == "NEW") return false;
                         if (op == "SEEN" || op == "UNSEEN") return message.value("seen", false) == (op == "SEEN");
+                        if(op=="ANSWERED" || op=="UNANSWERED") return message.value("answered",false)==(op=="ANSWERED");
+                        if(op=="FLAGGED" || op=="UNFLAGGED") return message.value("flagged",false)==(op=="FLAGGED");
+                        if(op=="DRAFT" || op=="UNDRAFT") return message.value("draft",false)==(op=="DRAFT");
                         if (op == "DELETED" || op == "UNDELETED") return deleted.contains(key(message)) == (op == "DELETED");
                         if (op == "UID") return Sequence(query.a).includes(uid, max_uid);
                         if (op == "SEQUENCE") return Sequence(query.a).includes(i + 1, messages.size());
@@ -487,5 +702,5 @@ void imap(Connection& c, const Config& cfg) {
 }
 }
 int main(int argc, char** argv) {
-    return service_main("imap", argc, argv, [](const Config& cfg) { serve_tcp(cfg, "imap", [&](Connection& c) { imap(c, cfg); }); });
+    return service_main("imap", argc, argv, [](const Config& cfg) { serve_tcp_listeners(cfg, "imap", [&](Connection& c, const TcpListener&) { imap(c, cfg); }); });
 }

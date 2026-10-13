@@ -10,12 +10,16 @@
   let unlocking = false;
   let acmeControl = null;
   let dnsControl = null;
+  let clientControl = null;
   let appliedCertificate = null;
   let accessHelp = null;
   let saving = false;
   let suggestDirect = false;
+  let completingExisting = false;
+  let webPortEdited = false;
   const adminAddress = PostPlusAddress.create($("setup-admin"),$("setup-admin-domain"));
-  const portLabels = {smtp:"SMTP",pop3:"POP3",imap:"IMAP",web:"Webmail",admin:"Administration",auth:"Authentication",storage:"Mail storage",filter:"Mail filter",transfer:"Mail transfer",delivery_lock:"Delivery lock"};
+  const portLabels = {smtp:"SMTP · Internet reception",pop3:"POP3 · STARTTLS",imap:"IMAP · STARTTLS",submission:"SMTP submission · STARTTLS",smtps:"SMTPS · SSL/TLS",pop3s:"POP3S · SSL/TLS",imaps:"IMAPS · SSL/TLS",web:"Webmail",admin:"Administration",auth:"Authentication",storage:"Mail storage",filter:"Mail filter",transfer:"Mail transfer",delivery_lock:"Delivery lock"};
+  const optionalPorts = new Set(["submission","smtps","pop3s","imaps"]);
   for (const [service, label] of Object.entries(portLabels)) {
     const group = document.createElement("div");
     const text = document.createElement("label");
@@ -25,7 +29,7 @@
     const input = document.createElement("input");
     input.id = text.htmlFor;
     input.type = "number";
-    input.min = "1";
+    input.min = optionalPorts.has(service) ? "0" : "1";
     input.max = "65535";
     input.step = "1";
     input.required = true;
@@ -40,7 +44,10 @@
     $("setup-access-help").hidden = !accessHelp;
     $("setup-access-help").textContent = accessHelp ? t(accessHelp.key,accessHelp.parameters) : "";
     $("setup-identity-help").textContent = t("Mailboxes use @{domain}; mail clients connect to {hostname}.",{domain:$("setup-domain").value.trim(),hostname:$("setup-hostname").value.trim() || t("the mail server hostname")});
+    clientControl?.render();
+    updateLegacyHint();
   }
+  function updateLegacyHint(){ $("setup-legacy-ports").hidden=!PostPlusMailClients.legacyPorts(Object.fromEntries(Object.keys(portLabels).map(service=>[service,Number($(`setup-port-${service}`).value)]))); }
   const publicDomain = value => PostPlusDns.publicDomain(value);
   function fail(data) {
     errorData = data;
@@ -57,7 +64,9 @@
     if (!secure) $("setup-bind").value = "127.0.0.1";
     else if (userChange && $("setup-bind").value === "127.0.0.1") $("setup-bind").value = "0.0.0.0";
     if(userChange && suggestDirect)dnsControl?.suggestMode(secure?"direct":"disabled");
+    if(userChange && !completingExisting && !webPortEdited && ["80","443"].includes($("setup-port-web").value))$("setup-port-web").value=secure?"443":"80";
     certificateMethodChanged();
+    clientControl?.render();
   }
   function certificateMethodChanged() {
     const builtIn = $("setup-certificate-method").value === "http01";
@@ -67,13 +76,21 @@
   }
   $("setup-certificate-method").addEventListener("change", certificateMethodChanged);
   $("setup-mode").addEventListener("change", () => modeChanged(true));
+  $("setup-port-web").addEventListener("input",()=>{webPortEdited=true;});
+  $("setup-standard-ports").addEventListener("click", () => {
+    for(const [service,value] of Object.entries(PostPlusMailClients.standardPorts($("setup-mode").value === "tls"))) $(`setup-port-${service}`).value=value;
+    webPortEdited=true;
+    $("setup-standard-status").dataset.i18n="Standard ports are filled in. Save the configuration to apply them.";
+    $("setup-standard-status").textContent=t("Standard ports are filled in. Save the configuration to apply them.");
+    dnsControl?.refresh();render();
+  });
   $("setup-brand").addEventListener("click", event => event.preventDefault());
   $("setup-domain").addEventListener("input", () => {
     adminAddress.setDraftDomain($("setup-domain").value);
     render();
   });
-  $("setup-form").addEventListener("input", event => event.target.removeAttribute("aria-invalid"));
-  document.addEventListener("postplus:language", () => {render(); advancedEditor?.translate(); acmeControl?.translate(); dnsControl?.translate();});
+  $("setup-form").addEventListener("input", event => {event.target.removeAttribute("aria-invalid");if(!event.target.closest(".mail-clients")){clientControl?.render();updateLegacyHint();}});
+  document.addEventListener("postplus:language", () => {render(); advancedEditor?.translate(); acmeControl?.translate(); dnsControl?.translate(); clientControl?.translate();});
   async function request(method, body, path = "/api/setup") {
     let response;
     try {
@@ -134,6 +151,7 @@
       token = "";
       acmeControl?.dispose();
       dnsControl?.dispose();
+      clientControl?.dispose();
       $("setup-token").value = "";
       advancedEditor?.clearSecrets();
       $("setup-password").value = "";
@@ -172,12 +190,13 @@
     render();
     try {
       const {defaults,schema = [],completing_existing = false} = await request("GET");
+      completingExisting=completing_existing;
       suggestDirect=!completing_existing&&!defaults.smarthost_host&&!defaults.smarthost;
       for (const control of $("setup-form").querySelectorAll("[name]")) {
         if (control.name !== "admin_password" && Object.hasOwn(defaults,control.name)) control.value = defaults[control.name];
       }
       adminAddress.setDraftDomain($("setup-domain").value);
-      for (const service of Object.keys(portLabels)) $(`setup-port-${service}`).value = defaults.ports[service];
+      for (const service of Object.keys(portLabels)) $(`setup-port-${service}`).value = defaults.ports[service] ?? (optionalPorts.has(service) ? 0 : "");
       $("setup-data-dir").readOnly = completing_existing;
       const exclude = new Set([...$("setup-form").querySelectorAll("[name]")].map(control => control.name));
       for (const field of schema) if (field.readonly) exclude.add(field.key);
@@ -185,10 +204,12 @@
       exclude.add("delivery_lock_port");
       exclude.add("allow_insecure_auth");
       exclude.add("outbound_mode");exclude.add("dkim_selector");exclude.add("dkim_private_key");
-      acmeControl=PostPlusAcme.create($("setup-acme"),{domain:publicDomain(defaults.domain)?"mail."+defaults.domain:"",prefix:"setup-acme",lockDomain:true,onRunningChange:running=>{$("setup-hostname").disabled=running;$("setup-domain").disabled=running;},request:async(path,options={})=>{try{return await request(options.method || "GET",options.body,"/api/setup/acme"+path);}catch(data){throw new Error(data.key ? t(data.key) : PostPlusI18n.error(data));}},onCertificate:(paths,certificate)=>{$("setup-certificate").value=paths.tls_certificate;$("setup-key").value=paths.tls_private_key;appliedCertificate={...paths,domain:typeof certificate?.domain === "string" ? certificate.domain.trim().toLowerCase() : ""};}});
+      acmeControl=PostPlusAcme.create($("setup-acme"),{domain:publicDomain(defaults.mail_hostname)?defaults.mail_hostname:publicDomain(defaults.domain)?(defaults.domain.startsWith("mail.")?defaults.domain:"mail."+defaults.domain):"",prefix:"setup-acme",lockDomain:true,onRunningChange:running=>{$("setup-hostname").disabled=running;$("setup-domain").disabled=running;},request:async(path,options={})=>{try{return await request(options.method || "GET",options.body,"/api/setup/acme"+path);}catch(data){throw new Error(data.key ? t(data.key) : PostPlusI18n.error(data));}},onCertificate:(paths,certificate)=>{$("setup-certificate").value=paths.tls_certificate;$("setup-key").value=paths.tls_private_key;appliedCertificate={...paths,domain:typeof certificate?.domain === "string" ? certificate.domain.trim().toLowerCase() : ""};clientControl?.render();}});
       dnsControl=PostPlusDns.create($("setup-dns-guide"),{inputs:{domain:$("setup-domain"),hostname:$("setup-hostname"),relayHost:$("setup-relay-host"),smtpPort:$("setup-port-smtp")},initialMode:defaults.outbound_mode || (defaults.smarthost_host||defaults.smarthost?"relay":!defaults.allow_insecure_auth?"direct":"disabled"),initialSelector:defaults.dkim_selector || "postplus",relaySettings:$("setup-relay-config"),request:body=>request("POST",body,"/api/setup/dns/check"),generateDkim:body=>request("POST",body,"/api/setup/dkim"),onHostnameChange:value=>{acmeControl?.setDomain(value,true);render();}});
       advancedEditor = PostPlusSettings.create($("setup-advanced"),schema,defaults,{prefix:"setup-extra",exclude});
       $("setup-mode").value = defaults.allow_insecure_auth ? "local" : "tls";
+      clientControl?.dispose();
+      clientControl=PostPlusMailClients.create($("setup-mail-clients"),{prefix:"setup-clients",readConfig:()=>({domain:$("setup-domain").value,mail_hostname:$("setup-hostname").value,bind:$("setup-bind").value,allow_insecure_auth:$("setup-mode").value==="local",outbound_mode:dnsControl?.settings().outbound_mode,tls_certificate:$("setup-mode").value==="tls"?$("setup-certificate").value:"",tls_private_key:$("setup-mode").value==="tls"?$("setup-key").value:"",ports:Object.fromEntries(Object.keys(portLabels).map(service=>[service,Number($(`setup-port-${service}`).value)]))})});
       modeChanged();
       $("setup-unlock").hidden = true;
       $("setup-token").value = "";

@@ -245,7 +245,7 @@ class NativeServer:
 
 
 def reserve_ports():
-    names = ("auth", "storage", "filter", "transfer", "delivery_lock", "smtp", "pop3", "imap", "web", "admin")
+    names = ("auth", "storage", "filter", "transfer", "delivery_lock", "smtp", "submission", "smtps", "pop3", "pop3s", "imap", "imaps", "web", "admin")
     reservations = [socket.socket() for _ in names]
     try:
         for item in reservations:
@@ -528,6 +528,9 @@ def run(binaries, directory):
                 time.sleep(0.05)
         assert status == 200 and defaults["ok"] is True
         assert defaults["defaults"]["ports"]["smtp"] == 25
+        schema = {item["key"]: item for item in defaults["schema"]}
+        assert schema["ports.web"]["default"] == 80
+        assert schema["ports.submission"]["default"] == 587 and schema["ports.imaps"]["min"] == 0
         assert any("setup is required" in line for line in server.lines)
         assert any(f"http://127.0.0.1:{ports['admin']}/setup" in line for line in server.lines)
         assert not any("/setup#token=" in line for line in server.lines)

@@ -1,5 +1,5 @@
 set_project("PostPlus")
-set_version("0.2.1")
+set_version("0.3.0")
 set_xmakever("2.9.8")
 set_languages("c++20")
 set_warnings("allextra")
@@ -20,6 +20,7 @@ target("postplus-core")
     add_headerfiles("include/(postplus/*.hpp)")
     add_includedirs("include", {public = true})
     add_defines("ASIO_STANDALONE", "ASIO_NO_DEPRECATED", {public = true})
+    add_defines('POSTPLUS_VERSION="0.3.0"', {public = true})
     add_packages("asio", "nlohmann_json", "openssl3", "sqlite3", {public = true})
     if is_plat("windows") then
         add_defines("_WIN32_WINNT=0x0A00", "WIN32_LEAN_AND_MEAN", "NOMINMAX", "_CRT_SECURE_NO_WARNINGS", {public = true})
@@ -78,6 +79,11 @@ target("postplus-clean-data")
     add_files("src/tools/clean_data.cpp")
     add_deps("postplus-core")
 
+target("postplus-update")
+    set_kind("binary")
+    add_files("src/tools/update.cpp")
+    add_deps("postplus-core")
+
 task("clean-data")
     set_menu {
         usage = "xmake clean-data [--config=PATH] [--dry-run]",
@@ -128,6 +134,18 @@ target("postplus-restart-tests")
     add_deps("postplus-core")
     add_tests("restart")
 
+target("postplus-update-tests")
+    set_kind("binary")
+    add_files("tests/update_test.cpp")
+    add_deps("postplus-core")
+    add_tests("update")
+
+target("postplus-mail-clients-tests")
+    set_kind("binary")
+    add_files("tests/mail_clients_test.cpp")
+    add_deps("postplus-core")
+    add_tests("mail-clients")
+
 target("postplus-acme-tests")
     set_kind("binary")
     add_files("tests/acme_test.cpp")
@@ -153,6 +171,12 @@ target("postplus-outbound-tests")
     add_tests("outbound")
 
 includes("@builtin/xpack")
+target("postplus-verification-code-tests")
+    set_kind("binary")
+    add_files("tests/verification_code_test.cpp")
+    add_deps("postplus-core")
+    add_tests("verification-code")
+
 xpack("postplus")
     set_formats("zip", "targz")
     set_title("PostPlus")
@@ -168,9 +192,17 @@ xpack("postplus")
     add_targets("postplus", "postplus-admin", "postplus-web", "postplus-auth",
                 "postplus-storage", "postplus-filter", "postplus-smtp",
                 "postplus-pop3", "postplus-imap", "postplus-delivery",
-                "postplus-transfer", "postplus-ctl", "postplus-clean-data")
+                "postplus-transfer", "postplus-ctl", "postplus-clean-data", "postplus-update")
     add_installfiles("README.md", "LICENSE", "THIRD_PARTY_NOTICES.md")
     -- Explicit allowlist: never include the local configuration or mail data.
     add_installfiles("(web/**)", "(docs/**)", "(licenses/**)", "(config/postplus.example.json)",
                      "(scripts/install-systemd.sh)")
+    after_package(function (package)
+        import("lib.detect.find_tool")
+        local python = find_tool("python3") or find_tool("python")
+        assert(python, "Python 3 is required to generate the installed component manifest")
+        os.execv(python.program, {path.join(os.projectdir(), "scripts", "release_manifest.py"),
+            "installed", "--archive", path.absolute(package:outputfile()),
+            "--platform", package:plat(), "--arch", package:arch()})
+    end)
 xpack_end()

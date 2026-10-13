@@ -132,7 +132,7 @@ void deliver_direct(const Config& config,const std::string& sender,const std::st
         throw OutboundError("sender_domain_mismatch","Direct delivery requires the envelope sender to belong to the configured mail domain.",true);
     const auto domain=lower(recipient.substr(recipient.rfind('@')+1));
     if(!valid_public_dns_name(domain))throw OutboundError("dns_invalid_name","The recipient needs a public mail domain.",true);
-    const auto hostname=lower(config.text("mail_hostname","mail."+config.text("domain")));
+    const auto hostname=lower(config.mail_hostname());
     if(!valid_public_dns_name(hostname))throw OutboundError("invalid_mail_hostname","Direct delivery requires a public mail_hostname.",true);
     const auto budget=config.number("direct_timeout_seconds",120),operation_timeout=config.number("timeout_seconds",30);
     const auto maximum=config.number("max_message_bytes",10485760);

@@ -38,6 +38,10 @@ std::vector<std::string> restart_plan(const Config& running, const Config& saved
         if (key == "ports") {
             for (const auto& service : supervisor_services())
                 if (service != "delivery" && running.port(service) != saved.port(service)) endpoint(service);
+            for (const auto* alias : {"submission", "smtps"})
+                if (running.port(alias) != saved.port(alias)) endpoint("smtp");
+            if (running.port("pop3s") != saved.port("pop3s")) endpoint("pop3");
+            if (running.port("imaps") != saved.port("imaps")) endpoint("imap");
         } else if (key == "bind") add({"smtp", "pop3", "imap", "web"});
         else if (key == "admin_bind") add({"admin"});
         else if (key == "tls_certificate" || key == "tls_private_key" || key == "allow_insecure_auth")
@@ -53,7 +57,8 @@ std::vector<std::string> restart_plan(const Config& running, const Config& saved
                  key == "spam_threshold" || key == "blocked_terms" || key == "spam_rules") add({"filter"});
         else if (key == "outbound_mode") add({"transfer", "delivery", "smtp", "web"});
         else if (key == "direct_timeout_seconds" || key == "smarthost_timeout_seconds") add({"transfer", "delivery"});
-        else if (key == "mail_hostname" || key == "dkim_selector" || key == "dkim_private_key" ||
+        else if (key == "mail_hostname") add({"transfer", "web", "admin"});
+        else if (key == "dkim_selector" || key == "dkim_private_key" ||
                  key == "direct_tls" || key.rfind("smarthost_", 0) == 0) add({"transfer"});
         else if (key == "setup_complete" || key == "setup_required") {}
         else all();

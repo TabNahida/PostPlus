@@ -2,6 +2,7 @@
 #include <postplus/dkim.hpp>
 #include <postplus/data_lock.hpp>
 #include <postplus/settings.hpp>
+#include <postplus/process.hpp>
 #include <sqlite3.h>
 #include <algorithm>
 #include <array>
@@ -550,6 +551,91 @@ bool supervisor_restart_busy(const Config& config) {
     const auto identity = control_identity(config);
     return fs::exists(identity.state_directory / "reservation");
 }
+
+UpdateOptions supervisor_update_options(const Config& config) {
+    return {executable_path("postplus").parent_path(), fs::path(config.text("web_root", "web")),
+        fs::path(config.text("data_dir")) / ".updates", update_build_version(), {}};
+}
+Json supervisor_update_status(const Config& config, const std::string& job_id) {
+    Json state{{"ok", true}, {"state", "idle"}};
+    if (supervisor_restart_available(config)) {
+        const auto identity = control_identity(config);
+        if (fs::exists(identity.state_directory / "update.json"))
+            state = Json::parse(read_small(identity.state_directory / "update.json"));
+    }
+    if (!job_id.empty() && state.value("job_id", "") != job_id)
+        throw MaintenanceError("Update job not found.", 404);
+    state["current_version"] = installed_update_version(supervisor_update_options(config));
+    state["available"] = supervisor_restart_available(config);
+    state.erase("token"); state.erase("not_before");
+    return state;
+}
+Json request_supervisor_update(const Config& config, const std::string& action, const std::string& value) {
+    if (action != "stage" && action != "apply") throw MaintenanceError("Invalid update action.", 400);
+    const auto identity = control_identity(config);
+    const auto running = supervisor_running_config(config);
+    if (!running || Config::from_file(config.source).values != running->values)
+        throw MaintenanceError("Apply saved configuration before updating PostPlus.", 409);
+    auto state = supervisor_update_status(config);
+    std::string id;
+    if (action == "apply") {
+        if (state.value("job_id", "") != value || state.value("state", "") != "staged")
+            throw MaintenanceError("Download and verify this update before applying it.", 409);
+        id = value;
+    } else {
+        if (value.empty() || value.size() > 64 || !std::all_of(value.begin(), value.end(), [](unsigned char ch) {
+            return (ch >= '0' && ch <= '9') || (ch >= 'a' && ch <= 'z') || ch == '.' || ch == '-' || ch == '+';
+        })) throw MaintenanceError("Invalid update version.", 400);
+        id = random_hex(16);
+        state = {{"ok", true}, {"job_id", id}, {"version", value}, {"services", Json::array()}, {"files", Json::array()}};
+    }
+    const auto reservation = identity.state_directory / "reservation";
+    try { private_directory(reservation); }
+    catch (...) {
+        if (fs::exists(reservation)) throw MaintenanceError("A maintenance operation is already pending or running.", 409);
+        throw;
+    }
+    try {
+        private_write(reservation / "owner.json", Json{{"job_id", id}, {"token", identity.value.at("token")}, {"kind", "update"}}.dump());
+        state["state"] = action == "stage" ? "pending_download" : "pending_apply";
+        private_replace(identity.state_directory / "update.json", state.dump());
+        const Json request{{"token", identity.value.at("token")}, {"action", action}, {"job_id", id},
+            {"version", state.at("version")}, {"not_before", control_milliseconds()+300}};
+        private_write(identity.directory / "update.tmp", request.dump());
+        fs::rename(identity.directory / "update.tmp", identity.directory / "update.request");
+        return state;
+    } catch (...) { release_restart_reservation(identity.state_directory); throw; }
+}
+std::optional<SupervisorUpdateRequest> SupervisorControl::update_requested() {
+    const auto path = directory_ / "update.request";
+    if (!fs::exists(path)) return {};
+    Json value;
+    try {
+        value = Json::parse(read_small(path, 8192));
+        if (!value.is_object() || !value.contains("token") || !value.at("token").is_string() ||
+            !secure_equal(value.at("token").get<std::string>(), token_)) throw MaintenanceError("Invalid update capability.");
+        if (control_milliseconds() < value.at("not_before").get<std::int64_t>()) return {};
+        SupervisorUpdateRequest request{value.at("action").get<std::string>(), value.at("job_id").get<std::string>(), value.at("version").get<std::string>()};
+        const auto current = Json::parse(read_small(state_directory_ / "update.json"));
+        if (current.value("job_id", "") != request.job_id ||
+            (request.action != "stage" && request.action != "apply")) throw MaintenanceError("Invalid update reservation.");
+        fs::remove(path);
+        return request;
+    } catch (const std::exception&) {
+        std::error_code ignored; fs::remove(path, ignored);
+        log("postplus", "rejected invalid supervisor update request", "warn");
+        return {};
+    }
+}
+void SupervisorControl::update_progress(const SupervisorUpdateRequest& request, Json state) {
+    if (state.value("state", "") == "staging") state["state"] = "downloading";
+    state["ok"] = true; state["job_id"] = request.job_id; state["version"] = request.version;
+    private_replace(state_directory_ / "update.json", state.dump());
+}
+void SupervisorControl::update_finished(const SupervisorUpdateRequest& request, Json state) {
+    update_progress(request, std::move(state));
+    release_restart_reservation(state_directory_);
+}
 std::optional<Config> supervisor_running_config(const Config& config) {
     if (!supervisor_restart_available(config)) return {};
     const auto identity = control_identity(config);
@@ -651,7 +737,19 @@ void SupervisorControl::ready(const Config& config) {
         if (!manager_complete) state["error"] = "The supervisor restarted before the requested operation completed.";
         private_replace(state_directory_ / "latest.json", state.dump());
     }
-    release_restart_reservation(state_directory_);
+    const bool launcher_update = fs::exists(state_directory_ / "update.json") &&
+        pending_update_relaunch(supervisor_update_options(config)).has_value();
+    if (!launcher_update) release_restart_reservation(state_directory_);
+    if (fs::exists(state_directory_ / "update.json")) {
+        auto update = Json::parse(read_small(state_directory_ / "update.json"));
+        const auto status = update.value("state", "idle");
+        if ((status == "pending_download" || status == "downloading" || status == "pending_apply" || status == "applying") &&
+            !launcher_update) {
+            update["state"] = "failed";
+            update["error"] = "The supervisor restarted before the update operation completed.";
+            private_replace(state_directory_ / "update.json", update.dump());
+        }
+    }
     private_replace(directory_ / "identity.json", Json{{"config", config.source.string()}, {"token", token_},
         {"state_dir", state_directory_.string()}, {"ready", true}}.dump());
     ready_ = true;

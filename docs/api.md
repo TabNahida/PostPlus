@@ -1,6 +1,8 @@
 # Web and administration API
 
-The mailbox JSON API shares an origin with Webmail, normally port 8080. The administration API shares a separate origin with the dedicated administration service, normally port 8081. Requests with JSON bodies use `Content-Type: application/json`. A configured certificate enables HTTPS on both listeners. There is no public registration endpoint.
+The mailbox JSON API shares an origin with Webmail, normally port 80. The administration API shares a separate origin with the dedicated administration service, normally port 8081. Requests with JSON bodies use `Content-Type: application/json`. A configured certificate enables HTTPS on both listeners. Registration requires an administrator-issued invitation. See [invitations, forwarding, verification codes and permissions](access.md).
+
+With TLS and no explicit Web port, Webmail uses 443. [Mail client discovery](mail-clients.md) provides public HTTPS XML configuration endpoints. [Upgrade API endpoints](updates.md#administration-api) download and install changed modules through the native supervisor.
 
 `postplus-web` exposes mailbox routes and rejects `/api/admin/*`. `postplus-admin` exposes administration routes and rejects mailbox/send routes. Both services provide their own login/session/logout routes. Only administrator accounts may log in to the administration service.
 
@@ -14,7 +16,7 @@ The mailbox JSON API shares an origin with Webmail, normally port 8080. The admi
 {"username":"user@localhost","password":"your-password"}
 ```
 
-It returns `ok`, `username`, `admin`, `csrf`, and `expires_in`, and sets the `pp_session` cookie for Webmail or `pp_admin_session` for administration. Send the appropriate cookie on subsequent browser requests. Sessions and CSRF tokens are held independently by each process. All state-changing cookie-authenticated requests except login also require `X-CSRF-Token: <csrf>`. The browser administration portal continues to use its cookie and CSRF token; API keys are for external administration clients.
+It returns `ok`, `username`, `admin`, `csrf`, and `expires_in`, and sets the `pp_session` cookie for Webmail or `pp_admin_session` for administration. Send the appropriate cookie on subsequent browser requests. Sessions and CSRF tokens are held independently by each process. All state-changing cookie-authenticated requests except login also require `X-CSRF-Token: <csrf>`. The browser administration portal continues to use its cookie and CSRF token; API keys support external administration and owner-bound mailbox clients.
 
 `GET /api/session` returns the current account and CSRF token. `POST /api/logout` revokes the session and clears its cookie. Cookies are HttpOnly and SameSite=Strict, with Secure added over HTTPS. Sessions are kept in web-process memory, last one hour by default, and expire on restart.
 
@@ -42,7 +44,7 @@ The browser reader sanitizes HTML and renders it in a sandboxed frame with a res
 
 ## Administration
 
-These routes require an administrator cookie session or, except for API-key management, an administrator API key in `Authorization: Bearer <key>`. Ordinary users receive 403. Bearer keys are accepted only over HTTPS or from loopback; remote plaintext HTTP is rejected. A Bearer request does not use a browser session or CSRF token. Keys are not accepted by login, session, logout, setup, or mailbox routes.
+These routes require an administrator cookie session or, except for API-key management, an administrator API key in `Authorization: Bearer <key>`. Ordinary users receive 403. Bearer keys are accepted only over HTTPS or from loopback; remote plaintext HTTP is rejected. A Bearer request does not use a browser session or CSRF token. Administrator keys are not accepted by login, session, logout, setup, or mailbox routes. Owner-bound mailbox keys are supported on Webmail.
 
 DKIM preparation returns `ok`, `domain`, `selector`, `name`, `type: "TXT"`, `value` and a SHA-256 `fingerprint` of the public record. It generates a private RSA-2048 key beside the configuration or reuses the selected existing key; no private material is returned. First-run setup uses `POST /api/setup/dkim` with the same body and `X-Setup-Token`, Host/Origin protection. Saving setup in direct mode requires `dkim_fingerprint` from the current record, `outbound_mode: "direct"`, `mail_hostname` and `dkim_selector`. Key generation survives a failed save or wizard restart. DNS is published separately; record availability is not a claim of Internet reachability.
 
@@ -50,7 +52,8 @@ DKIM preparation returns `ok`, `domain`, `selector`, `name`, `type: "TXT"`, `val
 | --- | --- |
 | GET `/api/admin/users` | Usernames and administrator flags; no password material. |
 | GET `/api/admin/api-keys` | Key metadata and limits; administrator cookie required. No full keys or hashes. |
-| POST `/api/admin/api-keys` | `{ "name": "Monitoring", "expires_in_days": 90 }`; creates a full administrator key and returns it once. Cookie and CSRF required. Returns 201. |
+| POST `/api/admin/api-keys` | `{ "name": "Monitoring", "expires_in_days": 90, "permissions": ["stats:read"] }`; creates a limited key and returns it once. Cookie and CSRF required. Returns 201. |
+| PATCH `/api/admin/api-keys/{id}` | `{ "permissions": ["stats:read"] }`; changes permissions immediately without rotating the key. Cookie and CSRF required. |
 | DELETE `/api/admin/api-keys/{id}` | Immediately revokes the key; idempotent. Cookie and CSRF required. |
 | GET `/api/admin/messages?username=user%40example.com&folder=Sent` | Read-only view of a selected user's folder. |
 | GET `/api/admin/messages/{id}?username=user%40example.com` | Original and decoded message. Does not mark Seen. Inspection is audited without logging message contents. |
@@ -79,12 +82,12 @@ Backup and shutdown mutations require administrator authentication, with CSRF fo
 
 ### External administration API keys
 
-Sign in to the browser administration portal and open **API keys** to create a key, review its usage, or revoke it. A key has full administrator scope, including access to private mail, configuration, backup, and shutdown operations. Its owner is the administrator who created it. Use a separate, clearly named key for each trusted integration. Keys cannot list, create, or revoke other keys; those three management endpoints always require the administrator cookie; POST and DELETE also require `X-CSRF-Token`.
+Sign in to the browser administration portal and open **API keys** to create a key, edit permissions, review usage, or revoke it. A key grants exactly its explicitly selected permissions; an empty array grants no API access. Legacy keys migrate with their previous administrator grants. Its owner is the administrator who created it. Key management always requires a browser cookie and `X-CSRF-Token`, including metadata GET and permission PATCH. Webmail provides separate owner-bound **Mailbox API keys**. See [permission IDs](access.md).
 
 Create with `POST /api/admin/api-keys`:
 
 ```json
-{"name":"Monitoring","expires_in_days":90}
+{"name":"Monitoring","expires_in_days":90,"permissions":["stats:read"]}
 ```
 
 `name` must be nonempty and at most 80 UTF-8 bytes. `expires_in_days` is optional; when provided, it must be an integer from 1 to 3650. Omit it for no expiry. The service permits at most 100 active keys and 1000 stored entries. A successful response contains:
@@ -99,6 +102,8 @@ Create with `POST /api/admin/api-keys`:
     "prefix": "pp_<public prefix>",
     "owner": "admin@example.com",
     "scope": "admin",
+    "audience": "admin",
+    "permissions": ["stats:read"],
     "created_at": 1791849600,
     "expires_at": 1799625600,
     "last_used_at": null,
@@ -215,14 +220,14 @@ Violation names are `min_length`, `max_password_bytes`, `require_uppercase`, `re
     "domain": "localhost",
     "bind": "127.0.0.1",
     "admin_bind": "127.0.0.1",
-    "ports": {"admin": 8081, "web": 8080},
+    "ports": {"admin": 8081, "web": 80},
     "smarthost_password": ""
   },
   "revision": "opaque-file-revision",
   "schema": [],
   "secret_status": {"smarthost_password": false},
   "admin_url": "http://127.0.0.1:8081/",
-  "web_url": "http://127.0.0.1:8080/"
+  "web_url": "http://127.0.0.1:80/"
 }
 ```
 

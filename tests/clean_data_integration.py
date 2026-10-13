@@ -16,7 +16,9 @@ from storage_integration import Services, free_port
 def check(binary_directory, directory, xmake_command):
     services = Services(binary_directory, directory)
     services.config.update(domain="cleanup.example.test", setup_complete=True,
-                           max_mailbox_bytes=1536 * 1024 * 1024)
+                           max_mailbox_bytes=1536 * 1024 * 1024,
+                           tls_certificate=str(ROOT / "tests/fixtures/localhost-test-only.crt"),
+                           tls_private_key=str(ROOT / "tests/fixtures/localhost-test-only.key"))
     config_path = directory / "postplus.json"
     executable = binary_directory / ("postplus-clean-data.exe" if os.name == "nt" else "postplus-clean-data")
     run = lambda *args: subprocess.run([str(executable), "--config", str(config_path), *args],
@@ -135,6 +137,14 @@ def check(binary_directory, directory, xmake_command):
                                        headers={"X-Setup-Token": launcher.token})
             assert status == 200 and response["ok"] and response["completing_existing"], response
             defaults = response["defaults"]
+            schema = {item["key"]: item for item in response["schema"]}
+            assert schema["ports.smtp"]["default"] == 25
+            assert schema["ports.web"]["default"] == 443, "retained TLS credentials must select HTTPS schema defaults"
+            assert defaults["ports"]["web"] == 443
+            assert defaults["tls_certificate"] == services.config["tls_certificate"]
+            for name, port in (("submission", 587), ("smtps", 465), ("imaps", 993), ("pop3s", 995)):
+                assert defaults["ports"][name] == port and schema["ports." + name]["default"] == port
+                assert schema["ports." + name]["min"] == 0
             assert defaults["domain"] == "cleanup.example.test"
             assert defaults["admin_username"] == "admin@cleanup.example.test"
             assert Path(defaults["data_dir"]).resolve() == data.resolve()
