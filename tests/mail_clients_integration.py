@@ -118,7 +118,7 @@ def run(s):
         message.add_alternative("<p>中文 HTML 正文</p>\n", subtype="html", charset="utf-8")
         messages.append(message.as_bytes())
 
-    with smtplib.SMTP("localhost", s.ports["submission"], timeout=10) as client:
+    with smtplib.SMTP("localhost", s.ports["submission"], local_hostname="localhost", timeout=10) as client:
         assert client.ehlo()[0] == 250
         assert client.has_extn("starttls") and not client.has_extn("auth")
         assert client.mail(alice)[0] == 530
@@ -131,7 +131,7 @@ def run(s):
         assert client.sendmail(alice, [bob], messages[0], mail_options=["BODY=8BITMIME"]) == {}
         assert client.mail(alice)[0] == 250 and client.rcpt("external@example.com")[0] == 550
         client.rset()
-    with smtplib.SMTP_SSL("localhost", s.ports["smtps"], context=context(), timeout=10) as client:
+    with smtplib.SMTP_SSL("localhost", s.ports["smtps"], local_hostname="localhost", context=context(), timeout=10) as client:
         client.ehlo()
         assert client.has_extn("auth") and not client.has_extn("starttls")
         assert client.mail(alice)[0] == 530

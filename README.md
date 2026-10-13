@@ -126,10 +126,11 @@ PostPlus uses **C++20**, **standalone Asio**, **OpenSSL 3**, **SQLite**, and **x
 | `postplus-auth` | Accounts, password verification, administrator roles | Loopback 18081 |
 | `postplus-storage` | Mailboxes, persistent UIDs, MIME, delivery queue | Loopback 18082 |
 | `postplus-filter` | MIME inspection, spam rules, EICAR detection, ClamAV client | Loopback 18083 |
-| `postplus-transfer` | Outbound SMTP through a configured relay | Loopback 18084 |
+| `postplus-transfer` | Outbound SMTP through direct MX delivery or a configured relay | Loopback 18084 |
 | `postplus-delivery` | Queue processing, retries, local delivery, quarantine | Loopback 18085, instance lock only |
 | `postplus-ctl` | Command-line administration | None |
 | `postplus-clean-data` | Offline reset of accounts, mail, and queues, with a dry-run option | None |
+| `postplus-update` | Verified module installation and launcher recovery | None |
 
 ### Build and test
 
@@ -160,7 +161,7 @@ tests/                 C++ tests, web checks, and integration suites
 
 ## Current scope
 
-- IMAP implements a [documented command subset](docs/protocols.md); full client compatibility, IDLE, ENVELOPE, and BODYSTRUCTURE remain outside the current scope. POP3 does not yet provide an exclusive maildrop lock.
+- IMAP implements a [documented command subset](docs/protocols.md), including ENVELOPE, BODYSTRUCTURE, MIME sections, APPEND, COPY and MOVE; full client compatibility and IDLE remain outside the current scope. POP3 does not yet provide an exclusive maildrop lock.
 - Webmail reads plain text, isolated HTML, and attached forwarded messages across six built-in folders, and composes plain text. Remote images stay blocked until requested. Attachment upload/download and custom folder creation are not implemented. A Sent copy records successful submission to the queue, not proof of final delivery.
 - Outbound delivery supports direct MX routing with DKIM signing or an SMTP relay. Incoming SPF/DKIM/DMARC verification, DSN generation, DANE, MTA-STS, multiple domains, and multi-host high availability are not implemented. Permanent delivery failures remain visible in the administration queue.
 - SMTP queues mail transactionally. Local delivery is idempotent; retrying outbound mail after an interrupted acknowledgement can produce a duplicate.

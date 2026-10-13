@@ -73,7 +73,7 @@ def run(s):
     print("PASS forwarding persistence, normalization, bounded globs, specificity and exact mailbox precedence", flush=True)
 
     # Several original addresses resolving to one mailbox consume one queue slot.
-    with smtplib.SMTP("127.0.0.1", s.ports["smtp"], timeout=10) as client:
+    with smtplib.SMTP("127.0.0.1", s.ports["smtp"], local_hostname="localhost", timeout=10) as client:
         client.ehlo()
         assert client.mail("alice@localhost")[0] == 250
         assert client.rcpt("unknown@localhost")[0] == 550
@@ -83,7 +83,7 @@ def run(s):
     assert len(queued) == 1 and queued[0]["recipient"] in {"sales-one@localhost", "sales-two@localhost", "charlie@localhost"}
 
     # Pin the accepted route even if rules change between RCPT, DATA and restart.
-    with smtplib.SMTP("127.0.0.1", s.ports["smtp"], timeout=10) as client:
+    with smtplib.SMTP("127.0.0.1", s.ports["smtp"], local_hostname="localhost", timeout=10) as client:
         client.ehlo()
         assert client.mail("alice@localhost")[0] == 250
         assert client.rcpt("sales-change@localhost")[0] == 250
@@ -133,7 +133,7 @@ def run(s):
         database.commit()
     s.start("auth")
     assert not resolve("missing-one@localhost")["exists"]
-    with smtplib.SMTP("127.0.0.1", s.ports["smtp"], timeout=10) as client:
+    with smtplib.SMTP("127.0.0.1", s.ports["smtp"], local_hostname="localhost", timeout=10) as client:
         client.ehlo()
         assert client.mail("alice@localhost")[0] == 250
         assert client.rcpt("missing-two@localhost")[0] == 550
