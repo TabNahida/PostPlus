@@ -12,6 +12,7 @@ from http.client import HTTPException
 import json
 import os
 from pathlib import Path
+import re
 import secrets
 import shutil
 import socket
@@ -25,7 +26,12 @@ from integration import PASSWORD, ROOT
 from setup_integration import (NativeServer, assert_ports_closed, child_processes,
                                http, kill_test_child, request_stop, windows_kernel)
 
-VERSION = "0.2.2"
+_version_match = re.search(r'^set_version\("(\d+)\.(\d+)\.(\d+)"\)',
+                           (ROOT / "xmake.lua").read_text(encoding="utf-8"), re.MULTILINE)
+assert _version_match, "cannot find the project version for the update fixture"
+BASE_VERSION = ".".join(_version_match.groups())
+_major, _minor, _patch = map(int, _version_match.groups())
+VERSION = f"{_major}.{_minor}.{_patch + 1}"
 SUFFIX = ".exe" if os.name == "nt" else ""
 SERVICES = restart.SERVICES
 
@@ -164,7 +170,7 @@ class Installation:
         self.environment = {"POSTPLUS_SERVICE_MANAGER": "systemd" if managed else ""}
         # A known installed baseline makes failed commit/launcher recovery
         # assertions independent of release packaging files in the build tree.
-        self.baseline = {"schema": 1, "repository": "TabNahida/PostPlus", "version": "0.2.1", "files": []}
+        self.baseline = {"schema": 1, "repository": "TabNahida/PostPlus", "version": BASE_VERSION, "files": []}
         write_json(self.install / "postplus-update.json", self.baseline)
         try:
             with patch.object(restart, "ROOT", self.install):
