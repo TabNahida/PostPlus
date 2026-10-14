@@ -16,6 +16,7 @@
 #else
 #include <fcntl.h>
 #include <sys/file.h>
+#include <sys/stat.h>
 #include <unistd.h>
 #endif
 
@@ -49,6 +50,23 @@ void regular_or_absent(const std::filesystem::path& path) {
     const auto status = std::filesystem::symlink_status(path);
     if (std::filesystem::exists(status) && (!std::filesystem::is_regular_file(status) || std::filesystem::is_symlink(status)))
         throw std::runtime_error("unsafe log file");
+}
+std::string log_file_identity(const std::filesystem::path& path) {
+#ifdef _WIN32
+    HANDLE file=CreateFileW(path.c_str(),FILE_READ_ATTRIBUTES,FILE_SHARE_READ|FILE_SHARE_WRITE|FILE_SHARE_DELETE,
+                            nullptr,OPEN_EXISTING,FILE_FLAG_OPEN_REPARSE_POINT,nullptr);
+    if(file==INVALID_HANDLE_VALUE) throw std::runtime_error("cannot identify log file");
+    BY_HANDLE_FILE_INFORMATION information{};
+    const bool valid=GetFileInformationByHandle(file,&information)!=0;
+    CloseHandle(file);
+    if(!valid || (information.dwFileAttributes&(FILE_ATTRIBUTE_DIRECTORY|FILE_ATTRIBUTE_REPARSE_POINT)))
+        throw std::runtime_error("unsafe log file identity");
+    return std::to_string(information.dwVolumeSerialNumber)+":"+std::to_string(information.nFileIndexHigh)+":"+std::to_string(information.nFileIndexLow);
+#else
+    struct stat information{};
+    if(::lstat(path.c_str(),&information)!=0 || !S_ISREG(information.st_mode)) throw std::runtime_error("cannot identify log file");
+    return std::to_string(information.st_dev)+":"+std::to_string(information.st_ino);
+#endif
 }
 
 void create_log_directory(const std::filesystem::path& directory) {
@@ -237,26 +255,34 @@ Json read_logs(const Config& config, const std::string& service, const std::stri
             throw std::invalid_argument("invalid log cursor");
         positions = saved["f"];
         for (const auto& item : positions)
-            if (!item.is_array() || item.size()!=3 || !item[0].is_number_unsigned() || item[0].get<std::size_t>()>=services.size() ||
+            if (!item.is_array() || (item.size()!=3 && item.size()!=4) || (item.size()==4 && !item[3].is_boolean()) ||
+                !item[0].is_number_unsigned() || item[0].get<std::size_t>()>=services.size() ||
                 !item[1].is_string() || item[1].get_ref<const std::string&>().size()!=16 ||
                 !item[2].is_number_unsigned() || item[2].get<std::uint64_t>() > 1024ULL*1024*1024)
                 throw std::invalid_argument("invalid log cursor");
     }
     // A cursor stores byte positions in a fixed snapshot of the rotated files.
-    // First-line identities survive rename/rotation; new writes cannot shift pages.
+    // OS file identities survive rename/rotation and distinguish identical events;
+    // new writes cannot shift pages.
     struct Reader {
         std::ifstream file;
         std::size_t service_index=0;
         std::string identity, buffer;
         std::streamoff offset=0, buffer_start=0, pending_end=0;
         Json pending;
+        bool skipping=false;
         std::optional<std::string> previous(std::size_t& budget) {
             const auto original=offset;
             std::string reversed;
-            bool oversized=false, started=false;
+            bool oversized=skipping, started=false;
             while (offset>0) {
                 if (buffer.empty() || offset<=buffer_start || offset>buffer_start+static_cast<std::streamoff>(buffer.size())) {
-                    if (!budget) {offset=original;return {};}
+                    if (!budget) {
+                        // Preserve progress through an overlong damaged line.
+                        // A later page must skip its remaining prefix too.
+                        if(oversized) skipping=true; else offset=original;
+                        return {};
+                    }
                     const auto count=static_cast<std::size_t>(std::min<std::streamoff>(offset,std::min<std::size_t>(65536,budget)));
                     buffer_start=offset-static_cast<std::streamoff>(count);
                     buffer.assign(count,'\0');file.clear();file.seekg(buffer_start);file.read(buffer.data(),static_cast<std::streamsize>(count));
@@ -269,6 +295,7 @@ Json read_logs(const Config& config, const std::string& service, const std::stri
                 if (ch=='\n') break;
                 if (reversed.size()<16384) reversed+=ch; else oversized=true;
             }
+            skipping=false;
             if (oversized) return std::string{};
             std::reverse(reversed.begin(),reversed.end());return reversed;
         }
@@ -290,7 +317,8 @@ Json read_logs(const Config& config, const std::string& service, const std::stri
                 std::string first;
                 for (int i=0;i<16384;++i) {char c;if(!reader.file.get(c) || c=='\n')break;first+=c;}
                 if (first.empty()) continue;
-                unsigned char digest[SHA256_DIGEST_LENGTH];SHA256(reinterpret_cast<const unsigned char*>(first.data()),first.size(),digest);
+                const auto identity=log_file_identity(path)+":"+first;
+                unsigned char digest[SHA256_DIGEST_LENGTH];SHA256(reinterpret_cast<const unsigned char*>(identity.data()),identity.size(),digest);
                 constexpr char hex[]="0123456789abcdef";
                 for (int i=0;i<8;++i) {reader.identity+=hex[digest[i]>>4];reader.identity+=hex[digest[i]&15];}
                 reader.service_index=index;reader.file.clear();reader.file.seekg(0,std::ios::end);
@@ -302,6 +330,7 @@ Json read_logs(const Config& config, const std::string& service, const std::stri
                     ++found_positions;
                     if ((*saved)[2].get<std::uint64_t>()>static_cast<std::uint64_t>(reader.offset)) {rotated=true;continue;}
                     reader.offset=(*saved)[2].get<std::streamoff>();
+                    reader.skipping=saved->size()==4 && (*saved)[3].get<bool>();
                 }
                 readers.push_back(std::move(reader));
             } catch (const std::exception&) {rotated=true;}
@@ -339,7 +368,11 @@ Json read_logs(const Config& config, const std::string& service, const std::stri
     auto next=Json::array();
     for (const auto& reader:readers) {
         const auto offset=reader.pending.is_null()?reader.offset:reader.pending_end;
-        if (offset>0) next.push_back(Json::array({reader.service_index,reader.identity,static_cast<std::uint64_t>(offset)}));
+        if (offset>0) {
+            auto position=Json::array({reader.service_index,reader.identity,static_cast<std::uint64_t>(offset)});
+            if(reader.skipping) position.push_back(true);
+            next.push_back(std::move(position));
+        }
     }
     std::string next_cursor;
     if (!next.empty()) next_cursor=base64_encode(Json{{"s",service},{"l",level},{"q",search},{"f",next}}.dump());

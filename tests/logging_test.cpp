@@ -104,6 +104,30 @@ int main() {
         auto search=read_logs(config,"auth","info",100,"验证码");
         check(search["entries"].size()==1 && search["entries"][0]["message"]=="Event 7 验证码","search did not inspect older log data");
         rejects([&] { read_logs(config,"auth","warn",100,"",first["next_cursor"]); });
+        // Rotated files can start with the exact same event, including its PID
+        // and timestamp. Their OS file identities must remain distinct.
+        for (int part=0;part<2;++part) {
+            std::ofstream file(logs/("smtp.jsonl"+std::string(part?".1":"")));
+            file << Json{{"timestamp","2026-10-14T10:00:00Z"},{"service","smtp"},{"level","info"},{"pid",1},{"message","same first"}}.dump()<<'\n';
+            file << Json{{"timestamp",part?"2026-10-14T10:01:00Z":"2026-10-14T10:02:00Z"},{"service","smtp"},{"level","info"},{"pid",1},{"message",part?"backup tail":"current tail"}}.dump()<<'\n';
+        }
+        page=read_logs(config,"smtp","",1);count=page["entries"].size();
+        std::vector<std::string> messages{page["entries"][0]["message"]};
+        for(int i=0;i<5 && !page["next_cursor"].get<std::string>().empty();++i) {
+            page=read_logs(config,"smtp","",1,"",page["next_cursor"]);
+            for(const auto& entry:page["entries"])messages.push_back(entry["message"]);
+        }
+        check(messages==std::vector<std::string>{"current tail","backup tail","same first","same first"} && page["next_cursor"]=="","identical rotated entries broke pagination");
+        {
+            std::ofstream file(logs/"imap.jsonl");
+            file << Json{{"timestamp","2026-10-14T10:00:00Z"},{"service","imap"},{"level","info"},{"pid",1},{"message","before corrupt line"}}.dump()<<'\n';
+            for(int i=0;i<17;++i) file << std::string(1024*1024,'x');
+        }
+        page=read_logs(config,"imap","",100);
+        check(page["entries"].empty() && page["scan_limited"]==true && page["next_cursor"]!="","corrupt line scan was not bounded");
+        const auto corrupt_cursor=page["next_cursor"].get<std::string>();
+        page=read_logs(config,"imap","",100,"",corrupt_cursor);
+        check(page["entries"].size()==1 && page["entries"][0]["message"]=="before corrupt line" && page["next_cursor"]=="","oversized corrupt line prevented cursor progress");
         std::filesystem::remove_all(directory);
         std::cout << "Logging tests passed\n";
         return 0;
