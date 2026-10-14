@@ -55,6 +55,7 @@ jobs:
           node tests/api_keys_ui_test.js
           node tests/verification_code_ui_test.js
           node tests/access_ui_test.js
+          node tests/logs_ui_test.js
           node tests/restart_ui_test.js
           node tests/mail_clients_ui_test.js
           node tests/update_ui_test.js

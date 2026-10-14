@@ -34,7 +34,7 @@ window.PostPlusSettings = (() => {
   }
   function create(root, schema, values, options = {}) {
     const controls = new Map();
-    let deliverySection=null,dkimPanel=null,clientPanel=null,disposed=false;
+    let deliverySection=null,dkimPanel=null,clientPanel=null,dnsPanel=null,disposed=false;
     const clientEvents=[];
     const prefix = options.prefix || "settings";
     root.replaceChildren();
@@ -101,6 +101,10 @@ window.PostPlusSettings = (() => {
       }
       section.append(grid);
       root.append(section);
+      if(group==="network"&&options.dnsRequest&&window.PostPlusAdminDns){
+        const dns=node("details","settings-group"),guide=node("div");dns.id=`${prefix}-dns`;dns.append(node("summary","","DNS"),guide);root.append(dns);
+        dnsPanel=PostPlusAdminDns.create(guide,{request:options.dnsRequest,prefix:`${prefix}-dns`});
+      }
     }
     if(options.mailClients && window.PostPlusMailClients){
       const networkSection=[...root.children].find(section=>section.querySelector?.('[data-config-key="ports.smtp"]'));
@@ -118,7 +122,7 @@ window.PostPlusSettings = (() => {
         legacy.hidden=!PostPlusMailClients.legacyPorts(clientConfig().ports);legacy.setAttribute("role","status");
         button.type="button";button.id=`${prefix}-standard-ports`;hint.setAttribute("role","status");hint.setAttribute("aria-live","polite");preset.append(legacy,node("p","field-hint","Public defaults are SMTP 25, POP3 110, IMAP 143, and Webmail 80 (443 with TLS). On Unix, grant PostPlus permission to bind privileged ports."),button,hint);networkSection.insertBefore(preset,networkSection.children[2]);
         const clients=node("section","mail-clients");clients.append(node("h3","","Connect mail apps"));const guide=node("div");clients.append(guide);networkSection.append(clients);
-        clientPanel=PostPlusMailClients.create(guide,{readConfig:clientConfig,prefix:`${prefix}-clients`});
+        clientPanel=PostPlusMailClients.create(guide,{readConfig:clientConfig,prefix:`${prefix}-clients`,showDns:!options.dnsRequest});
         button.addEventListener("click",()=>{
           const config=clientConfig(),secure=Boolean(config.tls_certificate?.trim()&&config.tls_private_key?.trim());
           for(const [name,value] of Object.entries(PostPlusMailClients.standardPorts(secure))){const control=controls.get("ports."+name);if(control&&!control.field.readonly){control.input.value=String(value);control.input.removeAttribute("aria-invalid");}}
@@ -176,7 +180,7 @@ window.PostPlusSettings = (() => {
       }
       return result;
     }
-    return {read,translate:() => {PostPlusI18n.apply(root);dkimPanel?.render();clientPanel?.translate();},dispose(){disposed=true;dkimPanel?.dispose();clientPanel?.dispose();for(const [event,handler] of clientEvents)root.removeEventListener(event,handler);},highlight:key => {const control = controls.get(key); if(control) reveal(control.input);},clearSecrets:() => controls.forEach(({field,input}) => {if(field.type === "password") input.value = "";})};
+    return {read,translate:() => {PostPlusI18n.apply(root);dkimPanel?.render();clientPanel?.translate();dnsPanel?.translate();},dispose(){disposed=true;dkimPanel?.dispose();clientPanel?.dispose();dnsPanel?.dispose();for(const [event,handler] of clientEvents)root.removeEventListener(event,handler);},highlight:key => {const control = controls.get(key); if(control) reveal(control.input);},clearSecrets:() => controls.forEach(({field,input}) => {if(field.type === "password") input.value = "";})};
   }
   return {create};
 })();

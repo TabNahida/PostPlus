@@ -1,7 +1,7 @@
 # Upgrading PostPlus / 升级 PostPlus
 
 Administration → Server settings → **Update PostPlus** checks the latest stable
-Release from `TabNahida/PostPlus`. Review the version and affected files, download
+Release from `TabNahida/PostPlus` by stable semantic version. Review the version and affected files, download
 the update, then choose **Apply prepared update**. Downloading leaves services
 running. The update verifies HTTPS, the official release URL, SHA-256 hashes,
 platform and service contract before installing anything.
@@ -9,6 +9,19 @@ platform and service contract before installing anything.
 管理后台 → 服务器设置 → **升级 PostPlus** 可检查官方最新正式 Release。
 先查看版本和变化文件，下载后再应用。下载期间服务继续运行；应用前检查
 HTTPS、官方发布来源、SHA-256、平台和服务接口兼容性。
+
+The server downloads one complete ZIP or tar.gz package and verifies its size
+and SHA-256 before decoding it natively. It stages and installs only changed
+allowlisted modules from that package. Release assets no longer contain one
+download per module. Decompression has per-file, total-size and member-count
+limits; traversal, duplicate paths, links and special files are rejected.
+Package documents, example configuration and unchanged executables are never
+copied over the running installation.
+
+服务器下载一个完整 ZIP 或 tar.gz 安装包，校验大小和 SHA-256 后由原生代码读取，
+只暂存和替换变化的白名单模块。新版 Release 不再为每个模块发布独立下载文件。
+解压有单文件、总大小和文件数限制，并拒绝路径穿越、重复路径、链接及特殊文件。
+包内文档、示例配置和未变化的程序不会覆盖现有安装。
 
 Source fingerprints identify changed components, so a build timestamp alone
 does not replace an unchanged binary. Complete packages include their installed
@@ -67,11 +80,36 @@ administrator or have its ownership corrected before automatic updates work.
 保存配置、停机互斥。运行服务的账户必须能写入程序、网页和数据目录；若文件
 由其他账户所有，需要管理员调整所有权或执行升级。
 
+## 0.3.1 migration bridge
+
+Version 0.3.0 can only read GitHub's `/releases/latest` and download legacy
+per-module assets. Version 0.3.1 supports that old format as well as the new
+archive format, and is the only release that publishes both. It remains the
+GitHub **Latest** bridge so an existing 0.3.0 installation can automatically
+upgrade to 0.3.1 even after 0.3.2 has been published. Check for updates again
+after installing 0.3.1 to reach 0.3.2 (or a newer stable version).
+
+Starting with 0.3.1, update checks select the highest stable `vMAJOR.MINOR.PATCH`
+from the latest 20 official release entries, ignoring drafts and prereleases.
+This is independent of GitHub's Latest badge. The 0.3.2 release and subsequent
+releases are normal stable releases published with `--latest=false` while the
+bridge is needed. They publish three complete platform packages, three small
+platform manifests, the combined manifest, and `SHA256SUMS`: eight assets.
+Version 0.3.2 removes legacy module downloads. Do not move GitHub's Latest badge
+off 0.3.1 until support for unupgraded 0.3.0 clients is deliberately retired.
+
+0.3.0 只支持 GitHub `/releases/latest` 和旧模块文件。0.3.1 同时支持旧模块
+及完整包更新，并且仅此版本同时发布两种格式。为保证尚未升级的 0.3.0 仍可
+自动升级，GitHub 的 **Latest** 标记保留给 0.3.1。安装 0.3.1 后再次检查更新，
+即可升级到 0.3.2 或更新正式版。0.3.1 起按最近 20 条官方 Release 中的最高
+正式语义版本检查更新，不依赖 Latest 标记。0.3.2 起仅发布 8 个资源文件，
+并移除旧模块下载支持。停止支持未升级的 0.3.0 前，请保留此桥接标记。
+
 The published 0.2.1 binary has no updater. Install a release containing this
 feature once while keeping the existing configuration and data. Subsequent
-releases must include `postplus-update.json`, module assets and `SHA256SUMS`.
-Older releases containing only complete archives remain manual upgrades. Do not
-overwrite a published release tag to add updater files.
+releases include verified `postplus-update.json` metadata and `SHA256SUMS`.
+Older releases without this metadata remain manual upgrades. Do not overwrite
+a published release tag to add updater files.
 
 已发布的 0.2.1 没有自动升级功能，需要先手动安装一次包含本功能的新版本，保留
 原配置和数据。之后的 Release 会提供模块清单、模块文件和摘要。只有完整压缩包
@@ -95,4 +133,7 @@ Job states are `pending_download`, `downloading`, `staged`, `pending_apply`,
 and services. Checking uses `update_available` for a newer release and `supported`
 for a compatible module manifest. `available` describes the supervisor feature.
 `files`, `services`, `download_bytes` and `requires_launcher_restart` describe
-the update plan. A changed latest Release requires checking it again.
+the update plan. `download_format: "archive"` means `download_bytes` is the
+complete package size, while `changed_bytes` is the total size of modules to
+replace. A metadata-only update has no package download. A changed highest
+stable release requires checking it again.

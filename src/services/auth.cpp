@@ -201,6 +201,7 @@ public:
                     "domain TEXT NOT NULL, localpart TEXT NOT NULL, created_at INTEGER NOT NULL,"
                     "expires_at INTEGER NOT NULL, max_uses INTEGER NOT NULL CHECK(max_uses BETWEEN 1 AND 100),"
                     "uses INTEGER NOT NULL DEFAULT 0 CHECK(uses>=0 AND uses<=max_uses), revoked_at INTEGER);"
+                    "CREATE TABLE IF NOT EXISTS account_deletions (username TEXT PRIMARY KEY, cleanup_id TEXT NOT NULL);"
                     "PRAGMA user_version=4;");
                 migration.commit();
             }
@@ -224,6 +225,7 @@ public:
         if (operation == "invite_create" || operation == "invite_list" || operation == "invite_revoke")
             return manage_invitations(request, operation);
         if (operation == "invite_inspect" || operation == "invite_redeem") return redeem_invitation(request, operation);
+        if (operation == "user_delete" || operation == "user_delete_finish") return delete_user(request, operation);
         if (operation == "password_policy_get") {
             std::lock_guard guard(mutex_);
             return policy_view();
@@ -251,6 +253,9 @@ public:
             // transaction protects the check even if another auth process writes.
             if (const auto failure = check_password(password)) return *failure;
             if (operation == "create") {
+                Statement pending(db_, "SELECT 1 FROM account_deletions WHERE username=?"); pending.text(1, username);
+                if (pending.step() == SQLITE_ROW)
+                    return {{"ok", false}, {"code", "account_cleanup_pending"}, {"error", "Finish deleting this account before reusing its address."}};
                 Statement insert(db_, "INSERT INTO users(username,salt,password_hash,iterations,admin) VALUES(?,?,?,?,?)");
                 insert.text(1, username); insert.bytes(2, salt_value); insert.bytes(3, hash);
                 insert.integer(4, rounds_); insert.integer(5, admin ? 1 : 0);
@@ -294,11 +299,54 @@ public:
                 if (code != SQLITE_ROW) throw std::runtime_error("cannot list users");
                 users.push_back({{"username", query.string(0)}, {"admin", query.integer(1) != 0}});
             }
+            Statement pending(db_, "SELECT username FROM account_deletions ORDER BY username");
+            for (int code; (code = pending.step()) != SQLITE_DONE;) {
+                if (code != SQLITE_ROW) throw std::runtime_error("cannot list pending account deletions");
+                users.push_back({{"username", pending.string(0)}, {"admin", false}, {"deletion_pending", true}});
+            }
             return {{"ok", true}, {"users", std::move(users)}};
         }
         return {{"ok", false}, {"error", "unknown authentication operation"}};
     }
 private:
+    Json delete_user(const Json& request, const std::string& operation) {
+        const auto username = username_from(request);
+        const auto actor = lower(trim(required_string(request, "actor", 254)));
+        if (!valid_address(actor)) throw std::invalid_argument("invalid actor");
+        std::lock_guard guard(mutex_); Transaction transaction(db_);
+        Statement administrator(db_, "SELECT admin FROM users WHERE username=?"); administrator.text(1, actor);
+        if (administrator.step() != SQLITE_ROW || administrator.integer(0) != 1)
+            return {{"ok", false}, {"code", "administrator_required"}, {"error", "Administrator access is required."}};
+        if (actor == username)
+            return {{"ok", false}, {"code", "account_delete_self"}, {"error", "You cannot delete your signed-in account."}};
+        Statement pending(db_, "SELECT cleanup_id FROM account_deletions WHERE username=?"); pending.text(1, username);
+        if (operation == "user_delete_finish") {
+            const auto cleanup_id = required_string(request, "cleanup_id", 64);
+            if (pending.step() != SQLITE_ROW || !secure_equal(cleanup_id, pending.string(0)))
+                return {{"ok", false}, {"code", "account_delete_conflict"}, {"error", "Account deletion changed. Refresh the account list."}};
+            Statement done(db_, "DELETE FROM account_deletions WHERE username=?"); done.text(1, username); done.done();
+            transaction.commit(); return {{"ok", true}, {"username", username}};
+        }
+        if (pending.step() == SQLITE_ROW)
+            return {{"ok", true}, {"username", username}, {"cleanup_id", pending.string(0)}};
+        Statement account(db_, "SELECT admin FROM users WHERE username=?"); account.text(1, username);
+        if (account.step() != SQLITE_ROW)
+            return {{"ok", false}, {"code", "account_not_found"}, {"error", "The account was not found. Refresh the account list."}};
+        if (account.integer(0) == 1) {
+            Statement count(db_, "SELECT COUNT(*) FROM users WHERE admin=1");
+            if (count.step() != SQLITE_ROW) throw std::runtime_error("cannot count administrators");
+            if (count.integer(0) <= 1)
+                return {{"ok", false}, {"code", "account_delete_last_admin"}, {"error", "The last administrator cannot be deleted."}};
+        }
+        const auto cleanup_id = random_hex(16);
+        Statement mark(db_, "INSERT INTO account_deletions(username,cleanup_id) VALUES(?,?)");
+        mark.text(1, username); mark.text(2, cleanup_id); mark.done();
+        for (const auto* sql : {"DELETE FROM api_keys WHERE owner=?", "DELETE FROM invitations WHERE owner=?", "DELETE FROM users WHERE username=?"}) {
+            Statement remove(db_, sql); remove.text(1, username); remove.done();
+        }
+        transaction.commit(); log("auth", "account disabled for deletion: " + username);
+        return {{"ok", true}, {"username", username}, {"cleanup_id", cleanup_id}};
+    }
     static constexpr int max_active_keys = 100, max_stored_keys = 1000;
 
     // Metadata deliberately excludes both the SHA256 digest and the usable key.
@@ -603,6 +651,9 @@ private:
         const auto invite = invitation_for_token(token); if (!invite) return unavailable;
         if (const auto failure = check_password(password)) return *failure;
         const auto username = localpart + "@" + domain_;
+        Statement pending(db_, "SELECT 1 FROM account_deletions WHERE username=?"); pending.text(1, username);
+        if (pending.step() == SQLITE_ROW)
+            return invitation_error("account_cleanup_pending", "Finish deleting this account before reusing its address.", "localpart");
         Statement insert(db_, "INSERT INTO users(username,salt,password_hash,iterations,admin) VALUES(?,?,?,?,0)");
         insert.text(1, username); insert.bytes(2, salt_value); insert.bytes(3, hash); insert.integer(4, rounds_);
         const auto inserted = insert.step();

@@ -24,7 +24,7 @@ std::string multiline(std::string_view raw) {
     out += ".\r\n"; return out;
 }
 void pop3(Connection& c, const Config& cfg) {
-    std::string candidate, user;
+    std::string candidate, user, credential_version;
     unsigned auth_failures = 0;
     const auto auth_limit = static_cast<unsigned>(std::clamp(cfg.number("max_auth_attempts", 5), 1, 20));
     std::vector<Json> messages;
@@ -37,6 +37,10 @@ void pop3(Connection& c, const Config& cfg) {
         auto cmd = lower(line.substr(0, space));
         auto arg = space == std::string::npos ? "" : line.substr(space + 1);
         try {
+            if (!user.empty()) {
+                const auto valid = rpc(cfg, "auth", {{"op", "session_check"}, {"username", user}, {"credential_version", credential_version}});
+                if (!valid.value("ok", false) || !valid.value("valid", false)) { c.write("-ERR [AUTH] Account credentials changed\r\n"); return; }
+            }
             if (cmd == "quit") {
                 if (!user.empty() && !deleted.empty()) {
                     Json ids = Json::array(), expected_uids = Json::object();
@@ -72,7 +76,7 @@ void pop3(Connection& c, const Config& cfg) {
                     continue;
                 }
                 if (candidate.empty()) { c.write("-ERR Send USER first\r\n"); continue; }
-                auto result = rpc(cfg, "auth", {{"op", "verify"}, {"username", candidate}, {"password", arg}});
+                auto result = rpc(cfg, "auth", {{"op", "verify"}, {"username", candidate}, {"password", arg}, {"session", true}});
                 if (!result.value("ok", false)) {
                     candidate.clear();
                     if (++auth_failures >= auth_limit) { c.write("-ERR [LOGIN-DELAY] Too many failed authentication attempts\r\n"); return; }
@@ -80,7 +84,7 @@ void pop3(Connection& c, const Config& cfg) {
                 }
                 auto mailbox = rpc(cfg, "storage", {{"op", "list"}, {"username", candidate}, {"folder", "INBOX"}});
                 if (!mailbox.value("ok", false)) { c.write("-ERR Mailbox unavailable\r\n"); continue; }
-                messages = mailbox.at("messages").get<std::vector<Json>>(); user = candidate;
+                messages = mailbox.at("messages").get<std::vector<Json>>(); user = candidate; credential_version = result.at("credential_version").get<std::string>();
                 c.write("+OK Mailbox ready\r\n"); continue;
             }
             if (cmd == "noop") { c.write("+OK\r\n"); continue; }

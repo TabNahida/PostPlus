@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Validate releases and publish hash-addressed native updater modules."""
+"""Validate distribution archives and publish selective native updater metadata."""
 import argparse
 import hashlib
 import io
@@ -38,6 +38,12 @@ def digest(value):
     return hashlib.sha256(value).hexdigest()
 
 
+def legacy_assets():
+    # Only this bridge serves the immutable 0.3.0 updater. Newer versions
+    # download one complete distribution and stage its changed components.
+    return version() == "0.3.1"
+
+
 def fingerprint(name):
     if name.startswith("web/"):
         return digest((ROOT / name).read_bytes())
@@ -45,7 +51,8 @@ def fingerprint(name):
     own = {"postplus": "src/tools/main.cpp", "postplus-admin": "src/services/web.cpp",
            "postplus-ctl": "src/tools/ctl.cpp", "postplus-clean-data": "src/tools/clean_data.cpp",
            "postplus-update": "src/tools/update.cpp"}.get(module, f"src/services/{module.removeprefix('postplus-')}.cpp")
-    sources = sorted([*(ROOT / "src/core").glob("*.cpp"), *(ROOT / "include/postplus").glob("*.hpp"), ROOT / own])
+    sources = sorted([*(ROOT / "src/core").glob("*.cpp"), *(ROOT / "src/core").glob("*.hpp"),
+                      *(ROOT / "include/postplus").glob("*.hpp"), ROOT / own])
     # Version and unrelated targets are metadata. Actual common dependency and
     # compiler policy changes remain component inputs, without build timestamps.
     settings = "\n".join(line.strip() for line in (ROOT / "xmake.lua").read_text().splitlines()
@@ -169,20 +176,21 @@ def modules(directory, platform, arch):
     inventory = module_inventory(files, platform)
     if json.loads(files.get("postplus-update.json", b"{}")) != installed_manifest(files, platform, arch):
         raise ValueError("Full release package is missing its correct installed component metadata")
-    for entry in inventory:
-        # Including the digest avoids collisions and makes repeated packaging
-        # deterministic. Assets are raw files; the server never extracts ZIPs.
-        sha256 = entry["sha256"]
-        asset = f"postplus-{release}-{platform}-{arch}-{sha256}.module"
-        (directory / asset).write_bytes(files[entry["path"]])
-        entry["asset"] = asset
+    if legacy_assets():
+        for entry in inventory:
+            sha256 = entry["sha256"]
+            asset = f"postplus-{release}-{platform}-{arch}-{sha256}.module"
+            (directory / asset).write_bytes(files[entry["path"]])
+            entry["asset"] = asset
     manifest = {"platform": platform, "arch": arch, "service_contract": 1,
-                "minimum_version": "0.2.1", "files": inventory,
+                "minimum_version": "0.2.1" if legacy_assets() else "0.3.1", "files": inventory,
+                "download": "archive",
                 "archive": {"asset": archive.name, "size": archive.stat().st_size,
                             "sha256": digest(archive.read_bytes())}}
     target = directory / f"postplus-update-{platform}-{arch}.json"
     target.write_text(json.dumps(manifest, sort_keys=True, indent=2) + "\n", encoding="utf-8", newline="\n")
-    print(f"PASS generated {len(inventory)} updater modules for {platform}/{arch}")
+    print(f"PASS verified {len(inventory)} archive components for {platform}/{arch}" +
+          (" with legacy bridge assets" if legacy_assets() else " (no per-module assets)"))
 
 
 def checksums(directory):
@@ -196,6 +204,8 @@ def checksums(directory):
         target = json.loads(sidecar.read_text(encoding="utf-8"))
         if (target["platform"], target["arch"]) != (platform, arch) or target["service_contract"] != 1:
             raise ValueError("Platform module manifest identity mismatch")
+        if target.get("download") != "archive":
+            raise ValueError("Release must support full-archive selective updates")
         archive = directory / f"postplus-{release}-{platform}-{arch}.{extension}"
         if (target["archive"]["asset"] != archive.name or target["archive"]["size"] != archive.stat().st_size or
                 target["archive"]["sha256"] != digest(archive.read_bytes())):
@@ -209,12 +219,17 @@ def checksums(directory):
             if not update_path(entry["path"], platform) or entry["path"] in seen:
                 raise ValueError("Invalid or duplicate update path")
             seen.add(entry["path"])
-            if entry["asset"] != f"postplus-{release}-{platform}-{arch}-{entry['sha256']}.module":
-                raise ValueError("Module asset is not its hash-addressed release file")
-            contents = (directory / entry["asset"]).read_bytes()
-            if contents != files[entry["path"]] or digest(contents) != entry["sha256"] or len(contents) != entry["size"]:
+            contents = files[entry["path"]]
+            if digest(contents) != entry["sha256"] or len(contents) != entry["size"]:
                 raise ValueError("Module differs from the verified distribution")
-            expected.add(entry["asset"])
+            if legacy_assets():
+                if entry.get("asset") != f"postplus-{release}-{platform}-{arch}-{entry['sha256']}.module":
+                    raise ValueError("Module asset is not its hash-addressed release file")
+                if (directory / entry["asset"]).read_bytes() != contents:
+                    raise ValueError("Legacy module differs from the verified distribution")
+                expected.add(entry["asset"])
+            elif "asset" in entry:
+                raise ValueError("New releases cannot include legacy module assets")
         if seen != {name for name in files if update_path(name, platform)}:
             raise ValueError("Module inventory omits release files")
         if [{key: entry[key] for key in ("path", "sha256", "fingerprint", "size")}
@@ -223,7 +238,7 @@ def checksums(directory):
         targets.append(target)
         expected.add(sidecar.name)
     manifest = {"schema": 1, "repository": REPOSITORY, "version": release,
-                "minimum_updater": 1, "targets": targets}
+                "minimum_updater": 1 if legacy_assets() else 2, "targets": targets}
     (directory / "postplus-update.json").write_text(json.dumps(manifest, sort_keys=True, indent=2) + "\n", encoding="utf-8", newline="\n")
     expected.add("postplus-update.json")
     actual = {path.name for path in directory.iterdir() if path.is_file() and path.name != "SHA256SUMS"}

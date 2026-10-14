@@ -560,7 +560,7 @@ void serve_http(const Config& config, const std::string& service, HttpHandler ha
                 if (service == "admin" && request.path == "/api/admin/config") limit = 1024 * 1024;
                 if (service == "web" && request.path == "/api/setup") limit = 1024 * 1024;
                 if (service == "web" && lower(request.path.substr(0,request.path.find('?'))) == "/autodiscover/autodiscover.xml") limit = 4096;
-                if (request.method == "GET" || request.method == "DELETE") limit = 0;
+                if (request.method == "GET" || (request.method == "DELETE" && !(service == "admin" && request.path == "/api/admin/users"))) limit = 0;
             }
             const auto size = body_size(request.headers, limit);
             if (request.headers.contains("expect")) throw std::invalid_argument("Expect unsupported");

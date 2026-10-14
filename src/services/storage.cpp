@@ -246,6 +246,7 @@ public:
                 "CREATE TABLE IF NOT EXISTS submission_deliveries("
                 "username TEXT NOT NULL,submission_id TEXT NOT NULL,message_id TEXT NOT NULL,"
                 "PRIMARY KEY(username,submission_id));"
+                "CREATE TABLE IF NOT EXISTS deleted_mailboxes(username TEXT PRIMARY KEY);"
                 "PRAGMA user_version=2;");
             transaction.commit();
 #ifndef _WIN32
@@ -262,6 +263,7 @@ public:
         std::lock_guard guard(mutex_);
         if (op == "enqueue") return enqueue(request);
         if (op == "deliver") return deliver(request);
+        if (op == "mailbox_delete") return delete_mailbox(request);
         if (op == "forwarding_list") return forwarding_list(request);
         if (op == "forwarding_create") return forwarding_create(request);
         if (op == "forwarding_delete") return forwarding_delete(request);
@@ -336,6 +338,28 @@ public:
         return {{"ok", false}, {"error", "unknown storage operation"}};
     }
 private:
+    Json delete_mailbox(const Json& request) {
+        const auto username = address(request, "username");
+        // Auth has already removed the identity and blocked reuse. Serialize the
+        // cleanup with all storage operations; retain only empty dedupe receipts
+        // so a worker holding an old queue snapshot cannot restore deleted mail.
+        if (mailbox_exists(username)) return {{"ok", false}, {"error", "Disable the account before deleting its mailbox."}};
+        Transaction transaction(db_);
+        Statement mark(db_, "INSERT OR IGNORE INTO deleted_mailboxes(username) VALUES(?)"); mark.text(1, username); mark.done();
+        Statement receipts(db_, "INSERT OR IGNORE INTO deliveries(username,delivery_id,message_id) "
+            "SELECT ?,q.id,'' FROM queue q LEFT JOIN queue_routes r ON r.queue_id=q.id WHERE q.recipient=? OR r.destination=?");
+        receipts.text(1, username); receipts.text(2, username); receipts.text(3, username); receipts.done();
+        Statement queue(db_, "DELETE FROM queue WHERE sender=? OR recipient=? OR id IN (SELECT queue_id FROM queue_routes WHERE destination=?)");
+        queue.text(1, username); queue.text(2, username); queue.text(3, username); queue.done();
+        execute(db_, "DELETE FROM queue_routes WHERE queue_id NOT IN (SELECT id FROM queue);");
+        for (const auto* sql : {"DELETE FROM messages WHERE username=?", "DELETE FROM mailboxes WHERE username=?",
+                "DELETE FROM submissions WHERE username=?", "DELETE FROM forwarding_rules WHERE destination=?",
+                "UPDATE deliveries SET message_id='' WHERE username=?", "UPDATE submission_deliveries SET message_id='' WHERE username=?"}) {
+            Statement remove(db_, sql); remove.text(1, username); remove.done();
+        }
+        transaction.commit();
+        return {{"ok", true}, {"username", username}};
+    }
     std::string local_domain() const { return lower(config_.text("domain", "localhost")); }
     bool local_address(const std::string& value) const { return value.substr(value.find('@') + 1) == local_domain(); }
     bool mailbox_exists(const std::string& username) const {
@@ -540,6 +564,11 @@ private:
         return result;
     }
     void ensure_mailbox(const std::string& username) {
+        Statement deleted(db_, "SELECT 1 FROM deleted_mailboxes WHERE username=?"); deleted.text(1, username);
+        if (deleted.row()) {
+            if (!mailbox_exists(username)) throw std::invalid_argument("account has been deleted");
+            Statement restore(db_, "DELETE FROM deleted_mailboxes WHERE username=?"); restore.text(1, username); restore.done();
+        }
         Statement query(db_, "SELECT 1 FROM mailboxes WHERE username=?"); query.text(1, username);
         if (query.row()) return;
         // UIDVALIDITY and UIDNEXT are persisted independently of the message rows.

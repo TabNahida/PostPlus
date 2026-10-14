@@ -1,4 +1,5 @@
 #include <postplus/dns.hpp>
+#include <postplus/dkim.hpp>
 #include <algorithm>
 #include <array>
 #include <charconv>
@@ -12,7 +13,7 @@ namespace {
 using Clock=std::chrono::steady_clock;
 using Bytes=std::vector<unsigned char>;
 constexpr std::size_t max_packet=8192;
-constexpr std::uint16_t type_a=1,type_cname=5,type_mx=15,type_txt=16,type_aaaa=28;
+constexpr std::uint16_t type_a=1,type_cname=5,type_ptr=12,type_mx=15,type_txt=16,type_aaaa=28,type_srv=33;
 
 [[noreturn]] void malformed() {throw DnsError("dns_invalid_response","The public DNS resolver returned an invalid response. Retry the check.");}
 std::uint16_t number(const Bytes& packet,std::size_t offset) {
@@ -178,9 +179,10 @@ DnsLookup parse(const Bytes& packet,const Bytes& request,const std::string& name
                 if(size!=4)malformed();asio::ip::address_v4::bytes_type bytes{};std::copy_n(packet.begin()+position,4,bytes.begin());value=asio::ip::address_v4(bytes).to_string();
             } else if(rr_type==type_aaaa) {
                 if(size!=16)malformed();asio::ip::address_v6::bytes_type bytes{};std::copy_n(packet.begin()+position,16,bytes.begin());value=asio::ip::address_v6(bytes).to_string();
-            } else if(rr_type==type_cname || rr_type==type_mx) {
+            } else if(rr_type==type_cname || rr_type==type_ptr || rr_type==type_mx || rr_type==type_srv) {
                 auto cursor=position;
                 if(rr_type==type_mx) {if(size<3)malformed();value=std::to_string(number(packet,cursor))+" ";cursor+=2;}
+                if(rr_type==type_srv) {if(size<7)malformed();for(int index=0;index<3;++index){value+=std::to_string(number(packet,cursor))+" ";cursor+=2;}}
                 value+=canonical(read_name(packet,cursor));if(cursor!=end)malformed();
             } else if(rr_type==type_txt) {
                 auto cursor=position;
@@ -189,7 +191,7 @@ DnsLookup parse(const Bytes& packet,const Bytes& request,const std::string& name
                     for(std::size_t item=0;item<length;++item)value+=static_cast<char>(packet[cursor++]);
                 }
             }
-            if(rr_type==type_a || rr_type==type_aaaa || rr_type==type_cname || rr_type==type_mx || rr_type==type_txt)
+            if(rr_type==type_a || rr_type==type_aaaa || rr_type==type_cname || rr_type==type_ptr || rr_type==type_mx || rr_type==type_txt || rr_type==type_srv)
                 records.push_back({std::move(owner),std::move(value),rr_type});
         }
         position=end;
@@ -269,10 +271,96 @@ std::string first_version(const std::string& record) {
     if(equal==std::string::npos || lower(trim(first.substr(0,equal)))!="v")return {};
     return lower(trim(first.substr(equal+1)));
 }
+std::string reverse_name(const asio::ip::address& address) {
+    if(address.is_v4()) {
+        const auto bytes=address.to_v4().to_bytes();std::string value;
+        for(int index=3;index>=0;--index)value+=std::to_string(bytes[index])+".";
+        return value+"in-addr.arpa";
+    }
+    constexpr char hex[]="0123456789abcdef";std::string value;
+    const auto bytes=address.to_v6().to_bytes();
+    for(int index=15;index>=0;--index){value+=hex[bytes[index]&15];value+='.';value+=hex[bytes[index]>>4];value+='.';}
+    return value+"ip6.arpa";
+}
+bool native_connect(const asio::ip::address& address,int port,Clock::time_point deadline) {
+    if(Clock::now()>=deadline)return false;
+    asio::io_context io;tcp::socket socket(io);asio::steady_timer timer(io);bool connected=false;
+    timer.expires_at(std::min(deadline,Clock::now()+std::chrono::milliseconds(1200)));
+    timer.async_wait([&](std::error_code error){if(!error){std::error_code ignored;socket.cancel(ignored);socket.close(ignored);}});
+    socket.async_connect({address,static_cast<unsigned short>(port)},[&](std::error_code error){connected=!error;timer.cancel();});
+    io.run();return connected;
+}
+Json expected_input(const Config& config,const Json& input) {
+    if(!input.is_object())throw DnsError("invalid_dns_input","DNS checks require a JSON object.");
+    const std::set<std::string> allowed{"ipv4","ipv6","spf","dkim_name","dkim_type","dkim_value","dmarc"};
+    for(const auto& entry:input.items())if(!allowed.contains(entry.key()))throw DnsError("invalid_dns_input","Only expected public DNS values may be supplied. Hosts and ports come from saved settings.");
+    const auto domain=canonical(config.text("domain")),hostname=canonical(config.mail_hostname());
+    if(!domain_name(domain) || !domain_name(hostname))throw DnsError("invalid_dns_input","Configure a public mail domain and mail server hostname first.");
+    Json request={{"domain",domain},{"hostname",hostname},{"ipv4",""},{"ipv6",""},{"spf",""},{"dkim_name",""},{"dkim_type","TXT"},{"dkim_value",""},{"dmarc","v=DMARC1; p=none"}};
+    for(const auto& key:allowed)if(input.contains(key))request[key]=field(input,key,(key=="dkim_name"?253:key=="ipv4" || key=="ipv6"?64:4096));
+    for(const auto* key:{"ipv4","ipv6"}) {
+        const auto text=request.at(key).get<std::string>();if(text.empty())continue;
+        std::error_code error;const auto address=asio::ip::make_address(text,error);
+        if(error || !public_address(address) || (std::string_view(key)=="ipv4"?!address.is_v4():!address.is_v6()))
+            throw DnsError("invalid_dns_input","Enter public IPv4 and IPv6 addresses in their matching fields.");
+        request[key]=address.to_string();
+    }
+    if(!input.contains("spf")) {
+        if(config.outbound_mode()=="direct") {
+            std::string policy="v=spf1";
+            for(const auto& pair:{std::pair{"ipv4","ip4:"},std::pair{"ipv6","ip6:"}}) {
+                const auto value=request.at(pair.first).get<std::string>();if(!value.empty())policy+=" "+std::string(pair.second)+value;
+            }
+            request["spf"]=policy=="v=spf1"?"v=spf1 mx -all":policy+" -all";
+        } else if(config.outbound_mode()=="disabled")request["spf"]="v=spf1 -all";
+    }
+    // Loading a DNS page must never generate or rotate signing keys.
+    if(!input.contains("dkim_name") && !input.contains("dkim_value") && !config.text("dkim_private_key").empty()) {
+        const auto selector=config.text("dkim_selector","postplus");
+        if(valid_dkim_record_name(domain,selector))try {
+            auto pem=load_dkim_private_key(config.text("dkim_private_key"));
+            request["dkim_value"]=dkim_public_record(pem);std::fill(pem.begin(),pem.end(),'\0');
+            request["dkim_name"]=selector+"._domainkey."+domain;
+        }catch(const std::exception&){} // No private paths or key errors enter the response.
+    }
+    return request;
+}
 }
 
 bool is_public_mail_address(const asio::ip::address& address){return public_address(address);}
 bool valid_public_dns_name(std::string_view name){return domain_name(name);}
+Json dns_recommendations(const Config& config,const Json& input) {
+    auto expected=expected_input(config,input);const auto domain=expected.at("domain").get<std::string>(),hostname=expected.at("hostname").get<std::string>();
+    Json result={{"ok",true},{"domain",domain},{"hostname",hostname},{"outbound_mode",config.outbound_mode()},{"expected",expected},{"records",Json::array()}};
+    auto record=[&](const std::string& id,const std::string& name,const std::string& type,const std::string& value,bool required) {
+        const auto host=name==domain?"@":name.ends_with("."+domain)?name.substr(0,name.size()-domain.size()-1):name;
+        result["records"].push_back({{"id",id},{"name",name},{"host",host},{"type",type},{"value",value},{"required",required},
+            {"expected",value.empty()?Json::array():Json::array({value})},{"observed",Json::array()},{"status",value.empty()?"not_configured":"unchecked"}});
+    };
+    record("a",hostname,"A",expected.at("ipv4"),true);record("aaaa",hostname,"AAAA",expected.at("ipv6"),false);
+    record("mx",domain,"MX","10 "+hostname+".",true);record("spf",domain,"TXT",expected.at("spf"),true);
+    const auto selector=config.text("dkim_selector","postplus");
+    record("dkim",expected.at("dkim_name").get<std::string>().empty()?selector+"._domainkey."+domain:expected.at("dkim_name").get<std::string>(),expected.at("dkim_type"),expected.at("dkim_value"),config.outbound_mode()=="direct");
+    record("dmarc","_dmarc."+domain,"TXT",expected.at("dmarc"),true);
+    bool reverse=false;
+    for(const auto& pair:{std::pair{"ipv4","ptr4"},std::pair{"ipv6","ptr6"}}) {
+        const auto value=expected.at(pair.first).get<std::string>();if(value.empty())continue;
+        record(pair.second,reverse_name(asio::ip::make_address(value)),"PTR",hostname+".",config.outbound_mode()=="direct");reverse=true;
+    }
+    if(!reverse)record("ptr","","PTR",hostname+".",config.outbound_mode()=="direct");
+    const bool tls=!config.text("tls_certificate").empty() && !config.text("tls_private_key").empty();
+    const auto bind=config.text("bind","127.0.0.1");const bool local=bind=="127.0.0.1" || bind=="::1" || bind=="localhost";
+    if(tls && !local) {
+        const std::map<std::string,std::string> names={{"submission","_submission._tcp"},{"smtps","_submissions._tcp"},{"imap","_imap._tcp"},{"imaps","_imaps._tcp"},{"pop3","_pop3._tcp"},{"pop3s","_pop3s._tcp"}};
+        bool incoming=false,outgoing=false;
+        for(const auto* service:{"smtp","imap","pop3"})for(const auto& listener:config.listeners(service))if(names.contains(listener.name)) {
+            record("srv_"+listener.name,names.at(listener.name)+"."+domain,"SRV","0 1 "+std::to_string(listener.port)+" "+hostname+".",false);
+            incoming=incoming || std::string_view(service)!="smtp";outgoing=outgoing || std::string_view(service)=="smtp";
+        }
+        if(config.port("web")==443 && incoming && outgoing)record("srv_autodiscover","_autodiscover._tcp."+domain,"SRV","0 1 443 "+hostname+".",false);
+    }
+    return result;
+}
 DnsResolver::DnsResolver(DnsOptions options):options_(std::move(options)){}
 DnsLookup DnsResolver::lookup(std::string name,DnsType type,Clock::time_point deadline) const {
     name=canonical(std::move(name));
@@ -374,6 +462,74 @@ Json DnsChecker::check(const Json& request) const {
     record("mx",domain,type_mx,"MX",hostname);record("spf",domain,type_txt,"TXT",spf);
     record("dkim",dkim_name,dkim_type=="cname"?type_cname:type_txt,dkim_type=="cname"?"CNAME":"TXT",dkim_type=="cname"?canonical(dkim_value):dkim_value);
     record("dmarc","_dmarc."+domain,type_txt,"TXT",dmarc);
+    return result;
+}
+Json DnsChecker::check_server(const Config& config,const Json& input) const {
+    const auto deadline=Clock::now()+options_.timeout;
+    auto result=dns_recommendations(config,input),expected=result.at("expected");
+    auto checked=check(expected);result["checked_at"]=checked.at("checked_at");result["resolver"]=checked.at("resolver");
+    result["limitations"]="TCP probes run from this server to its published public addresses. They do not prove external inbound reachability, NAT forwarding, TLS validity, outbound port 25 access, IP reputation or mail delivery.";
+    std::vector<asio::ip::address> addresses;
+    for(auto& record:result["records"]) {
+        const auto id=record.at("id").get<std::string>();
+        for(const auto& observation:checked.at("records"))if(observation.at("id")==id) {
+            for(const auto* key:{"status","code","message","observed"})record[key]=observation.at(key);
+            if(id=="a" || id=="aaaa") {
+                for(const auto& value:observation.at("observed")) {
+                    std::error_code error;const auto address=asio::ip::make_address(value.get<std::string>(),error);
+                    if(error || !public_address(address)) {record["status"]="mismatch";record["code"]="dns_private_address";continue;}
+                    if(addresses.size()<4 && std::find(addresses.begin(),addresses.end(),address)==addresses.end())addresses.push_back(address);
+                }
+                const auto configured=expected.at(id=="a"?"ipv4":"ipv6").get<std::string>();
+                if(configured.empty() && record.at("code")=="dns_unexpected_record") {record["status"]="published";record["code"]="dns_published";}
+                if(configured.empty() && record.at("status")=="not_configured" && record.at("observed").empty())record["status"]=id=="aaaa"?"skipped":"missing";
+            }
+        }
+    }
+    auto extra=[&](Json& item,std::uint16_t type,const std::string& wanted) {
+        try {
+            const auto lookup=exchange(options_,item.at("name").get<std::string>(),type,deadline);
+            auto observed=lookup.values;for(auto& value:observed)value=display_value(value);item["observed"]=observed;
+            bool matched=!observed.empty() && !lookup.alias;
+            for(const auto& value:observed)matched=matched && canonical(value)==canonical(wanted);
+            item["status"]=observed.empty()?"missing":matched?"matched":"mismatch";
+            item["code"]=observed.empty()?"dns_missing":matched?"dns_matched":"dns_mismatch";
+        }catch(const DnsError& error){item["status"]="error";item["code"]=error.code;}
+        catch(const std::exception&){item["status"]="error";item["code"]="dns_unavailable";}
+    };
+    // Reverse DNS checks every address actually published for this host, even
+    // when the administrator has not entered an expected IP. It is still set
+    // at the IP provider, never in the domain's ordinary TXT records.
+    auto& records=result["records"];
+    records.erase(std::remove_if(records.begin(),records.end(),[](const Json& item){return item.at("type")=="PTR";}),records.end());
+    for(std::size_t index=0;index<addresses.size();++index) {
+        Json item={{"id","ptr_"+std::to_string(index)},{"name",reverse_name(addresses[index])},{"host",reverse_name(addresses[index])},{"type","PTR"},
+            {"value",config.mail_hostname()+"."},{"required",config.outbound_mode()=="direct"},{"observed",Json::array()}};
+        extra(item,type_ptr,config.mail_hostname());records.push_back(std::move(item));
+    }
+    if(addresses.empty())records.push_back({{"id","ptr"},{"name",""},{"host",""},{"type","PTR"},{"value",config.mail_hostname()+"."},{"required",config.outbound_mode()=="direct"},{"observed",Json::array()},{"status","not_configured"}});
+    for(auto& item:records)if(item.at("type")=="SRV")extra(item,type_srv,item.at("value").get<std::string>());
+    std::vector<std::pair<std::string,int>> ports{{"smtp",25}};
+    for(const auto* service:{"smtp","imap","pop3"})for(const auto& listener:config.listeners(service)) {
+        if(listener.name=="smtp" && listener.port==25)continue;
+        ports.emplace_back(listener.name,listener.port);
+    }
+    ports.emplace_back("web",config.port("web"));
+    result["connectivity"]=Json::array();
+    for(const auto& [service,port]:ports) {
+        Json item={{"service",service},{"hostname",config.mail_hostname()},{"port",port},{"status","not_checked"},{"addresses",Json::array()}};
+        if(!addresses.empty()) {
+            item["status"]="unreachable";
+            for(const auto& address:addresses) {
+                if(Clock::now()>=deadline){if(item.at("status")!="reachable")item["status"]="timeout";break;}
+                bool reachable=false;
+                try {reachable=options_.connect?options_.connect(address,port,deadline):native_connect(address,port,deadline);}catch(const std::exception&){}
+                item["addresses"].push_back({{"address",address.to_string()},{"reachable",reachable}});
+                if(reachable)item["status"]="reachable";
+            }
+        }
+        result["connectivity"].push_back(std::move(item));
+    }
     return result;
 }
 }

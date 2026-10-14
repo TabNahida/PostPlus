@@ -69,6 +69,41 @@ int main() {
         rejects([&] { read_logs(config,"auth","fatal"); });
         rejects([&] { read_logs(config,"auth","",0); });
         rejects([&] { read_logs(config,"auth","",501); });
+        rejects([&] { read_logs(config,"auth","",100,std::string(257,'x')); });
+        rejects([&] { read_logs(config,"auth","",100,"","invalid"); });
+        // Pages reach beyond the old 64 KiB tail, tolerate append and rotation,
+        // and retain distinct events even when timestamps are identical.
+        const auto logs=directory/"logs";
+        for (const auto& item:std::filesystem::directory_iterator(logs))
+            if (item.path().filename().string().starts_with("auth.jsonl")) std::filesystem::remove(item.path());
+        {
+            std::ofstream file(logs/"auth.jsonl");
+            for (int i=0;i<1800;++i) file << Json{{"timestamp","2026-10-14T12:00:00.000Z"},{"service","auth"},{"level",i%2?"info":"warn"},
+                {"pid",42},{"message","Event " + std::to_string(i) + (i==7?" 验证码":"")}}.dump() << '\n';
+        }
+        auto first=read_logs(config,"auth","",100);
+        check(first["entries"][0]["message"]=="Event 1799" && !first["next_cursor"].get<std::string>().empty(),"first log page ordering failed");
+        {
+            std::ofstream file(logs/"auth.jsonl",std::ios::app);
+            file << Json{{"timestamp","2026-10-14T12:01:00.000Z"},{"service","auth"},{"level","info"},{"pid",42},{"message","appended"}}.dump() << '\n';
+        }
+        std::filesystem::rename(logs/"auth.jsonl",logs/"auth.jsonl.1");
+        {std::ofstream file(logs/"auth.jsonl");file << Json{{"timestamp","2026-10-14T12:02:00.000Z"},{"service","auth"},{"level","info"},{"pid",42},{"message","new log"}}.dump() << '\n';}
+        auto page=first;std::size_t count=first["entries"].size();int expected=1699;
+        while (!page["next_cursor"].get<std::string>().empty()) {
+            page=read_logs(config,"auth","",100,"",page["next_cursor"]);
+            for (const auto& item:page["entries"]) {
+                const auto text=item["message"].get<std::string>();
+                check(text=="Event " + std::to_string(expected)+(expected==7?" 验证码":""),"pagination skipped or repeated an event");
+                --expected;++count;
+            }
+        }
+        check(count==1800 && expected==-1,"older retained events were inaccessible");
+        const auto found=read_logs(config,"auth","warn",100,"验证码");
+        check(found["entries"].empty(),"search ignored severity");
+        auto search=read_logs(config,"auth","info",100,"验证码");
+        check(search["entries"].size()==1 && search["entries"][0]["message"]=="Event 7 验证码","search did not inspect older log data");
+        rejects([&] { read_logs(config,"auth","warn",100,"",first["next_cursor"]); });
         std::filesystem::remove_all(directory);
         std::cout << "Logging tests passed\n";
         return 0;

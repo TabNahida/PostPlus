@@ -34,6 +34,25 @@ function fixture({domain="example.com",hostname="",relay="",mode,selector,reques
 function result(overrides={}){
   return {ok:true,resolver:"Cloudflare public DNS (1.1.1.1)",checked_at:"2026-10-12T12:00:00Z",records:["a","aaaa","mx","spf","dkim","dmarc"].map(id=>({id,status:id==="aaaa"?"not_configured":"matched",observed:id==="aaaa"?[]:[id==="a"?"8.8.8.8":"observed "+id],...(overrides[id]||{})}))};
 }
+async function administration(){
+  const container=new Element(),pending=[],requests=[];
+  const sandbox={window:{},document:{createElement:tag=>new Element(tag),documentElement:{lang:"en"},querySelectorAll:()=>[],dispatchEvent(){},addEventListener(){}},localStorage:{getItem:()=>null,setItem(){}},CustomEvent:class{constructor(type){this.type=type;}}};
+  vm.runInNewContext(fs.readFileSync(path.join(root,"web/i18n.js"),"utf8"),sandbox);sandbox.PostPlusI18n=sandbox.window.PostPlusI18n;
+  vm.runInNewContext(fs.readFileSync(path.join(root,"web/admin-dns.js"),"utf8"),sandbox);
+  const component=sandbox.window.PostPlusAdminDns.create(container,{request:(path,options)=>{requests.push({path,options:JSON.parse(JSON.stringify(options))});return new Promise(resolve=>pending.push(resolve));}}),id=name=>descendants(container).find(item=>item.id===`admin-dns-${name}`);
+  const recommendation={ok:true,domain:"example.com",hostname:"mail.example.com",outbound_mode:"direct",expected:{ipv4:"",ipv6:"",spf:"v=spf1 mx -all",dkim_name:"",dkim_type:"TXT",dkim_value:"",dmarc:"v=DMARC1; p=none"},records:[{id:"mx",name:"example.com",host:"@",type:"MX",value:"10 mail.example.com.",observed:[],status:"unchecked"},{id:"srv_imaps",name:"_imaps._tcp.example.com",host:"_imaps._tcp",type:"SRV",value:"0 1 993 mail.example.com.",observed:[],status:"unchecked"}]};
+  assert.equal(requests.length,1,"Opening DNS loads recommendations independently of Save settings");assert.equal(requests[0].options.method,"GET");pending.shift()(recommendation);await new Promise(resolve=>setImmediate(resolve));
+  assert.equal(id("check").disabled,false,container.textContent);assert.equal(descendants(container).filter(item=>item.dataset.record).length,2);
+  id("ipv4").value="93.184.216.34";await id("ipv4").fire("input");assert.equal(id("spf").value,"v=spf1 ip4:93.184.216.34 -all","Actual expected IP can prepare direct SPF");
+  id("spf").value="v=spf1 include:relay.example.com -all";await id("spf").fire("input");id("ipv6").value="2606:4700::1111";await id("ipv6").fire("input");assert.match(id("spf").value,/include:relay/,"An existing customized SPF policy survives IP edits");
+  const checked=id("check").fire("click");assert.equal(requests.length,2);assert.equal(requests[1].path,"/check");assert.equal(requests[1].options.method,"POST");assert.equal(requests[1].options.body.ipv4,"93.184.216.34");assert.equal(requests[1].options.body.hostname,undefined,"Domain and connection targets are server-pinned");
+  pending.shift()({...recommendation,checked_at:"2026-10-14T12:00:00Z",resolver:"Public DNS",records:recommendation.records.map(record=>({...record,status:"matched",observed:[record.value]})),connectivity:[{service:"smtp",hostname:"mail.example.com",port:25,status:"reachable",addresses:[{address:"93.184.216.34",reachable:true}]}]});await checked;
+  assert.equal(descendants(container).filter(item=>item.dataset.record).length,2,"Matching configured records stay visible");assert.match(container.textContent,/TCP connection succeeded/);assert.ok(descendants(container).some(item=>item.readOnly&&item.value==="93.184.216.34"));
+  await id("ipv4").fire("input");assert.ok(descendants(container).filter(item=>item.dataset.record).every(item=>item.dataset.status==="stale"));
+  const reloading=id("reload").fire("click");component.dispose();pending.shift()(recommendation);await reloading;assert.equal(container.children.length,0,"A stale reply cannot restore DNS after sign-out or settings reload");
+  const settings=fs.readFileSync(path.join(root,"web/settings.js"),"utf8");assert.match(settings,/PostPlusAdminDns\.create/);assert.match(settings,/showDns:!options\.dnsRequest/);
+  assert.match(fs.readFileSync(path.join(root,"web/admin.html"),"utf8"),/src="\/admin-dns\.js"/);
+}
 async function main(){
   const f=fixture();
   assert.equal(f.inputs.hostname.value,"mail.example.com","Mail server uses a subdomain; root website remains independent");
@@ -168,6 +187,7 @@ async function main(){
   assert.match(html,/src="\/dns\.js"/);assert.match(html,/id="setup-hostname"/);assert.match(html,/value="existing"/);assert.match(html,/value="http01"/);
   assert.match(html,/This method does not require public port 80/);
   assert.match(setup,/\/api\/setup\/dns\/check/);assert.doesNotMatch(fs.readFileSync(path.join(root,"web/dns.js"),"utf8"),/TCP port 80|inbound TCP 80|public TCP 80/);
-  console.log("DNS UI checks passed: independent mail hostname, provider records, TXT/CNAME, public address validation, real API contract, record statuses, unexpected AAAA, stale-response races, language switching, and certificate-method separation.");
+  await administration();
+  console.log("DNS UI checks passed: setup guidance, complete admin DNS records, independent diagnostics, expected-value drafts, preserved SPF, matching records, TCP results, stale replies and separate Network/DNS groups.");
 }
 main().catch(error=>{console.error(error);process.exitCode=1;});

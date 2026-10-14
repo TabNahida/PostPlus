@@ -62,15 +62,15 @@ def fingerprint_test(directory):
         assert smtp == release.fingerprint("postplus-smtp") and auth != release.fingerprint("postplus-auth"), "one module invalidated unrelated module"
         (sources / "src/core/core.cpp").write_text("new shared core")
         assert smtp != release.fingerprint("postplus-smtp"), "common code change omitted a consumer"
+        smtp = release.fingerprint("postplus-smtp")
+        (sources / "src/core/private.hpp").write_text("private shared declarations")
+        assert smtp != release.fingerprint("postplus-smtp"), "private shared header change omitted a consumer"
     finally:
         release.ROOT = original
 
 
-def main():
-    directory = ROOT / "build/test-runs" / ("release-manifest-" + secrets.token_hex(6))
-    directory.mkdir(parents=True)
-    fingerprint_test(directory)
-    packages = directory / "packages"
+def verify_mode(directory, legacy):
+    packages = directory / ("bridge-packages" if legacy else "archive-packages")
     packages.mkdir()
     for platform, arch, extension in release.PLATFORMS:
         package = archive(packages, platform, arch, extension)
@@ -84,15 +84,20 @@ def main():
         release.installed(package, platform, arch)
         release.modules(packages, platform, arch)
         manifest = json.loads((packages / f"postplus-update-{platform}-{arch}.json").read_text())
+        assert manifest["download"] == "archive"
         assert len(manifest["files"]) == len(release.BINARIES) + 2
         assert not any(item["path"].startswith(("config/", "docs/")) or item["path"] == "README.md" for item in manifest["files"])
         for item in manifest["files"]:
-            raw = (packages / item["asset"]).read_bytes()
+            assert ("asset" in item) == legacy
+            raw = ((packages / item["asset"]).read_bytes() if legacy else files[item["path"]])
             assert len(raw) == item["size"] and hashlib.sha256(raw).hexdigest() == item["sha256"]
             assert len(item["fingerprint"]) == 64
     release.checksums(packages)
     merged = json.loads((packages / "postplus-update.json").read_text())
     assert merged["repository"] == "TabNahida/PostPlus" and len(merged["targets"]) == 3
+    assert merged["minimum_updater"] == (1 if legacy else 2)
+    if not legacy:
+        assert len(list(packages.iterdir())) == 8, "archive release still has per-module files"
     sums = dict((line[66:], line[:64]) for line in (packages / "SHA256SUMS").read_text().splitlines())
     assert sums["postplus-update.json"] == hashlib.sha256((packages / "postplus-update.json").read_bytes()).hexdigest()
     sidecar = packages / "postplus-update-linux-x86_64.json"
@@ -107,6 +112,19 @@ def main():
     else:
         raise AssertionError("incorrect full-package digest accepted")
     sidecar.write_bytes(original)
+
+
+def main():
+    directory = ROOT / "build/test-runs" / ("release-manifest-" + secrets.token_hex(6))
+    directory.mkdir(parents=True)
+    fingerprint_test(directory)
+    original = release.legacy_assets
+    try:
+        for legacy in (True, False):
+            release.legacy_assets = lambda: legacy
+            verify_mode(directory, legacy)
+    finally:
+        release.legacy_assets = original
     bad = directory / "unsafe"
     bad.mkdir()
     for platform, arch, extension in release.PLATFORMS[:2]:
@@ -117,7 +135,7 @@ def main():
             pass
         else:
             raise AssertionError("unsafe archive path or link accepted")
-    print("PASS release source fingerprints, version-independent component identity, raw module inventory, aggregate checksums, preserved document/config scope and archive traversal/link rejection")
+    print("PASS release fingerprints, legacy migration bridge, eight-asset archive release, aggregate checksums, preserved config/docs and archive traversal/link rejection")
 
 
 if __name__ == "__main__":

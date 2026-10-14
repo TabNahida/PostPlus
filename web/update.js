@@ -7,7 +7,7 @@ window.PostPlusUpdate = (() => {
     let disposed=false,revision=0,timer=null,data={state:"idle",available:true},checking=false,action=false,started=0,problem="",reconnect=false;
     function node(tag,key,className){const item=document.createElement(tag);if(key)item.textContent=t(key);if(className)item.className=className;return item;}
     root.replaceChildren();
-    const title=node("h3","Update PostPlus"),intro=node("p","Check the latest stable GitHub Release. Download only changed files, review the affected services, then apply the prepared update.","field-hint"),version=node("p",null,"field-hint"),status=node("p",null,"dns-prerequisite"),error=node("p",null,"form-error"),plan=node("div",null,"update-plan"),files=node("ul",null,"update-files"),services=node("p",null,"field-hint"),size=node("p",null,"field-hint"),actions=node("div",null,"update-actions"),check=node("button","Check for updates","button secondary"),stage=node("button","Download changed files","button secondary"),apply=node("button","Apply prepared update","button primary"),retry=node("button","Refresh update status","button secondary"),open=node("a","Reopen administration ↗","button secondary"),release=node("a","View GitHub Release ↗","button secondary");
+    const title=node("h3","Update PostPlus"),intro=node("p","Check the latest stable GitHub Release. Download its complete package and replace only changed modules after reviewing the affected services.","field-hint"),version=node("p",null,"field-hint"),status=node("p",null,"dns-prerequisite"),error=node("p",null,"form-error"),plan=node("div",null,"update-plan"),files=node("ul",null,"update-files"),services=node("p",null,"field-hint"),size=node("p",null,"field-hint"),actions=node("div",null,"update-actions"),check=node("button","Check for updates","button secondary"),stage=node("button","Download update package","button secondary"),apply=node("button","Apply prepared update","button primary"),retry=node("button","Refresh update status","button secondary"),open=node("a","Reopen administration ↗","button secondary"),release=node("a","View GitHub Release ↗","button secondary");
     status.id=`${prefix}-status`;status.setAttribute("role","status");status.setAttribute("aria-live","polite");error.setAttribute("role","alert");
     for(const [name,button] of Object.entries({check,stage,apply,retry})){button.type="button";button.id=`${prefix}-${name}`;}open.id=`${prefix}-open`;open.hidden=true;release.id=`${prefix}-release`;release.hidden=true;release.target="_blank";release.rel="noopener noreferrer";plan.append(services,size,files);actions.append(check,stage,apply,retry,release,open);root.append(title,intro,version,status,error,plan,actions);
     function busy(){return checking||action||!reconnect&&activeStates.has(data.state);}
@@ -21,28 +21,29 @@ window.PostPlusUpdate = (() => {
     function render(){
       if(disposed)return;
       const working=busy(),enabled=data.available!==false;onBusy(working);root.setAttribute("aria-busy",String(working));
-      title.textContent=t("Update PostPlus");intro.textContent=t("Check the latest stable GitHub Release. Download only changed files, review the affected services, then apply the prepared update.");
+      title.textContent=t("Update PostPlus");intro.textContent=t("Check the latest stable GitHub Release. Download its complete package and replace only changed modules after reviewing the affected services.");
       version.textContent=current()?t("Installed version: {version}",{version:current()}):"";
       let key="Check for a release when you are ready to update.";
       if(!enabled)key="Automatic updates are unavailable for this server. Install a supported release layout and restart the launcher.";
       else if(data.supported===false)key="This release does not support verified module updates. Open its GitHub Release and follow the manual upgrade instructions.";
       else if(checking)key="Checking the latest GitHub Release…";
       else if(reconnect)key="Update completion could not be confirmed. Reopen administration, sign in, and refresh the update status.";
-      else if(data.state==="pending_download"||data.state==="downloading")key="Downloading and verifying changed files for {version}…";
+      else if(data.state==="pending_download"||data.state==="downloading")key="Downloading and verifying the update package for {version}…";
       else if(data.state==="staged")key="Update {version} is prepared. Review the file and service list, then apply it.";
       else if(data.state==="pending_apply"||data.state==="applying")key=data.requires_launcher_restart?"Applying update {version}. The launcher will restart; administration may disconnect.":"Applying update {version}. Only affected services restart; administration may disconnect.";
       else if(data.state==="complete")key="Update {version} completed.";
       else if(data.state==="failed")key=data.rolled_back?"The update failed. Previous files and services were restored.":"The update failed. Review the server error and logs before retrying.";
-      else if(newer())key="Release {version} is available. Download its changed files to prepare the update.";
+      else if(newer())key="Release {version} is available. Download its package to prepare the changed modules.";
       else if(data.checked_at||target())key="PostPlus is up to date.";
       const detail=problem||(data.state==="failed"&&data.error?t("Server error: {error}",{error:data.error}):"");
       status.textContent=t(key,{version:target()});error.hidden=!detail;error.textContent=detail;
       const serviceNames=Array.isArray(data.services)?data.services.filter(value=>typeof value==="string"):[];
       services.textContent=serviceNames.length?t("Affected services: {services}",{services:serviceNames.join(", ")}):"";
-      size.textContent=Number.isSafeInteger(data.download_bytes)&&data.download_bytes>=0?t("Changed-file download: {bytes} bytes.",{bytes:data.download_bytes.toLocaleString()}):"";
+      size.textContent=Number.isSafeInteger(data.download_bytes)&&data.download_bytes>=0?t("Package download: {bytes} bytes.",{bytes:data.download_bytes.toLocaleString()}):"";
+      if(Number.isSafeInteger(data.changed_bytes)&&data.changed_bytes>=0)size.textContent+=" "+t("Changed modules: {bytes} bytes.",{bytes:data.changed_bytes.toLocaleString()});
       files.replaceChildren();for(const entry of (data.files || []).slice(0,128)){const path=typeof entry==="string"?entry:entry?.path||entry?.name;if(typeof path==="string")files.append(node("li",path));}
       plan.hidden=!serviceNames.length&&!files.children.length&&!size.textContent;
-      check.textContent=t("Check for updates");stage.textContent=t("Download changed files");apply.textContent=t("Apply prepared update");retry.textContent=t("Refresh update status");open.textContent=t("Reopen administration ↗");release.textContent=t("View GitHub Release ↗");
+      check.textContent=t("Check for updates");stage.textContent=t("Download update package");apply.textContent=t("Apply prepared update");retry.textContent=t("Refresh update status");open.textContent=t("Reopen administration ↗");release.textContent=t("View GitHub Release ↗");
       check.disabled=!enabled||working;stage.hidden=data.supported===false||!newer()||data.state==="staged"||activeStates.has(data.state)||reconnect;stage.disabled=!enabled||working||!canChange();apply.hidden=data.state!=="staged"||reconnect;apply.disabled=working||!canChange();retry.hidden=!data.job_id&&!problem;retry.disabled=checking||action;open.hidden=!reconnect;
       release.hidden=typeof data.release_url!=="string"||!/^https:\/\/github\.com\/TabNahida\/PostPlus\/releases\/tag\/v[0-9]+\.[0-9]+\.[0-9]+$/.test(data.release_url);if(!release.hidden)release.href=data.release_url;
       if(reconnect){try{const url=new URL(adminUrl());if(!["http:","https:"].includes(url.protocol)||url.username||url.password)throw new Error();open.href=url.href;}catch{open.hidden=true;}}

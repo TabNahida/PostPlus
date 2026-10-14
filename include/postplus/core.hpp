@@ -46,7 +46,8 @@ std::string base64_encode(std::string_view input);
 std::string base64_decode(std::string_view input);
 void configure_logging(const Config& config, const std::string& service);
 void log(const std::string& service, const std::string& message, const std::string& level = "info");
-Json read_logs(const Config& config, const std::string& service = "", const std::string& level = "", std::size_t limit = 100);
+Json read_logs(const Config& config, const std::string& service = "", const std::string& level = "", std::size_t limit = 100,
+               const std::string& search = "", const std::string& cursor = "");
 
 // Each connection owns its executor. Operations enforce a per-operation deadline.
 class Connection {

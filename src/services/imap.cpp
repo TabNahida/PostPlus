@@ -357,7 +357,7 @@ bool wildcard(std::string pattern, const std::string& value) {
     return before.back();
 }
 void imap(Connection& c, const Config& cfg) {
-    std::string user, selected_folder = "INBOX"; bool selected = false, readonly = false;
+    std::string user, credential_version, selected_folder = "INBOX"; bool selected = false, readonly = false;
     unsigned auth_failures = 0;
     const auto auth_limit = static_cast<unsigned>(std::clamp(cfg.number("max_auth_attempts", 5), 1, 20));
     std::vector<Json> messages; std::set<std::string> deleted;
@@ -430,6 +430,10 @@ void imap(Connection& c, const Config& cfg) {
             cmd = upper(args[1]); args.erase(args.begin(), args.begin() + 2);
             auto done = [&](const std::string& text = "completed") { c.write(tag + " OK " + cmd + " " + text + "\r\n"); };
             auto require_count = [&](std::size_t count) { if (args.size() != count) throw Bad("Wrong number of arguments"); };
+            if (!user.empty()) {
+                const auto valid = rpc(cfg, "auth", {{"op", "session_check"}, {"username", user}, {"credential_version", credential_version}});
+                if (!valid.value("ok", false) || !valid.value("valid", false)) { c.write("* BYE Account credentials changed\r\n"); return; }
+            }
             if (cmd == "LOGOUT") { require_count(0); c.write("* BYE Goodbye\r\n"); done(); return; }
             if (cmd == "CAPABILITY") { require_count(0); c.write("* CAPABILITY " + capability() + "\r\n"); done(); continue; }
             if (cmd == "NOOP") { require_count(0); if (selected) refresh(); done(); continue; }
@@ -456,13 +460,13 @@ void imap(Connection& c, const Config& cfg) {
                     candidate = lower(decoded.substr(a + 1, b - a - 1)); password = decoded.substr(b + 1);
                     if (a && lower(decoded.substr(0, a)) != candidate) throw Bad("Authorization identity mismatch");
                 }
-                auto result = rpc(cfg, "auth", {{"op", "verify"}, {"username", candidate}, {"password", password}});
+                auto result = rpc(cfg, "auth", {{"op", "verify"}, {"username", candidate}, {"password", password}, {"session", true}});
                 if (!result.value("ok", false)) {
                     c.write(tag + " NO [AUTHENTICATIONFAILED] Invalid credentials\r\n");
                     if (++auth_failures >= auth_limit) { c.write("* BYE Too many failed authentication attempts\r\n"); return; }
                     continue;
                 }
-                user = result.value("username", candidate); done(); continue;
+                user = result.value("username", candidate); credential_version = result.at("credential_version").get<std::string>(); done(); continue;
             }
             if (user.empty()) { c.write(tag + " NO Authenticate first\r\n"); continue; }
             if(cmd=="APPEND") {

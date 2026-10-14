@@ -75,6 +75,33 @@ async function invitationClipboardDisposalChecks(){
   const clipboard=deferred();f.sandbox.navigator.clipboard.writeText=()=>clipboard.promise;const copy=f.button("Copy invitation link").fire("click");component.dispose();clipboard.resolve();await copy;
   assert.equal(f.notices.length,0,"Detached invitation pane cannot emit delayed clipboard notices");
 }
+async function accountOrganizationChecks(){
+  const f=fixture("admin-access.js"),actions=new Element(),refreshes=[];f.run();
+  const component=f.sandbox.window.PostPlusAdminAccess.mount(f.element,{api:f.api,notice:f.notice,inviteActions:actions,afterDelete:async()=>refreshes.push(true)});
+  resolveAccess(f.requests);await tick();
+  assert.equal(actions.children[0].textContent,"Invite to mailbox","Invitation entry belongs beside Create user");
+  const forwarding=descendants(f.element).find(node=>node.tagName==="DETAILS");assert.equal(Boolean(forwarding.open),false,"Forwarding rules start collapsed");assert.ok(descendants(forwarding).some(node=>node.tagName==="TABLE"));
+  const inviteDialog=descendants(f.element).find(node=>node.tagName==="DIALOG");assert.ok(!inviteDialog.open);await actions.children[0].fire("click");assert.equal(inviteDialog.open,true);f.requests.at(-1).resolve({invitations:[]});await tick();
+  const inviteForm=f.find("Invitation name").parentNode.parentNode,pending=inviteForm.fire("submit"),late=f.requests.at(-1),response={registration_url:"https://mail.example.com/register#must-clear-on-close"};
+  await f.button("Close").fire("click");late.resolve(response);await pending;assert.equal(response.registration_url,"");assert.equal(f.find("Invitation link").value,"","Closing invitations clears late one-time links");
+  component.deleteAccount({username:"delete@localhost",deletion_pending:false});const confirm=f.find("Type the complete email address to confirm"),form=confirm.parentNode.parentNode.parentNode;
+  assert.equal(f.button("Delete account").disabled,true);confirm.value="different@localhost";await confirm.fire("input");assert.equal(f.button("Delete account").disabled,true);await form.fire("submit");assert.notEqual(f.requests.at(-1).url,"/api/admin/users");
+  confirm.value="DELETE@localhost";await confirm.fire("input");assert.equal(f.button("Delete account").disabled,false);
+  const deleting=form.fire("submit"),request=f.requests.at(-1);assert.equal(request.url,"/api/admin/users");assert.equal(request.options.method,"DELETE");assert.equal(request.options.body.username,"delete@localhost");assert.equal(request.options.body.confirm_username,"DELETE@localhost");
+  request.resolve({ok:true});await tick();f.requests.at(-1).resolve({rules:[]});await deleting;assert.equal(refreshes.length,1);assert.equal(confirm.value,"");
+  component.dispose();assert.equal(actions.children.length,0);assert.equal(f.element.children.length,0);
+}
+function accountSearchChecks(){
+  const f=fixture("admin-access.js"),source=read("admin.js"),start=source.indexOf("function renderUsers()"),end=source.indexOf('$("users-search").addEventListener',start);
+  f.document.createDocumentFragment=()=>new Element();
+  Object.assign(f.sandbox,{$:f.id,t:f.sandbox.PostPlusI18n.t,element:(tag,className,text)=>{const node=new Element(tag);node.className=className||"";if(text!==undefined)node.textContent=text;return node;},state:{user:{username:"root@localhost"}},usersData:[{username:"root@localhost",admin:true},{username:"alice@localhost",admin:false},{username:"pending@localhost",admin:false,deletion_pending:true}],openUserDialog(){},openInspection(){},openQuota(){},accessControl:{deleteAccount(){}}});
+  vm.runInContext(source.slice(start,end)+"renderUsers();",f.sandbox);
+  const body=f.id("users-body");assert.match(body.textContent,/root@localhost.*alice@localhost.*pending@localhost/);assert.equal(f.id("users-count").textContent,"3 of 3 accounts");
+  assert.ok(descendants(body).find(node=>node.getAttribute("aria-label")==="Delete account root@localhost").disabled,"Current/last administrator deletion is disabled");
+  f.id("users-search").value="ALIce";vm.runInContext("renderUsers();",f.sandbox);assert.match(body.textContent,/alice@localhost/);assert.doesNotMatch(body.textContent,/root@localhost|pending@localhost/);assert.equal(f.id("users-count").textContent,"1 of 3 accounts");
+  f.id("users-search").value="nobody";vm.runInContext("renderUsers();",f.sandbox);assert.equal(f.id("users-empty").hidden,false);assert.equal(f.id("users-count").textContent,"0 of 3 accounts");
+  assert.match(read("admin.html"),/<details id="accounts-panel"[^>]* open>/,"Accounts table is expanded by default and collapsible");
+}
 function registrationFixture(token){
   const f=fixture("register.js");f.sandbox.location.hash="#"+token;f.id("register-form").hidden=true;f.id("register-login").hidden=true;f.run();return f;
 }
@@ -91,4 +118,4 @@ async function registrationChecks(){
   for(const invalid of ["",token.toUpperCase(),"pp_inv_"+"a".repeat(63),"pp_inv_<script>"]){const bad=registrationFixture(invalid);await tick();assert.equal(bad.requests.length,0);assert.equal(bad.id("register-form").hidden,true);assert.match(bad.id("register-error").textContent,/invalid, expired/);await bad.id("register-form").fire("submit");assert.equal(bad.requests.length,0);}
   const failed=registrationFixture(token);failed.requests[0].resolve({ok:false,json:async()=>({ok:false,error:"Expired invitation"})});await tick();assert.equal(failed.id("register-form").hidden,true);assert.equal(failed.id("register-status").textContent,"");assert.equal(failed.id("register-error").textContent,"Expired invitation");await failed.id("register-form").fire("submit");assert.equal(failed.requests.length,1);
 }
-(async()=>{let failures=0;for(const [name,check]of Object.entries({keyChecks,invitationChecks,accessListOrderingChecks,invitationClipboardDisposalChecks,registrationChecks})){try{await check();console.log(name+" passed");}catch(error){failures++;console.error(name+" failed:",error);}}if(failures)process.exitCode=1;else console.log("Access UI checks passed: exact grants, one-time secret clearing, disposed/stale replies, invitation ordering and private registration requests.");})();
+(async()=>{let failures=0;for(const [name,check]of Object.entries({keyChecks,invitationChecks,accessListOrderingChecks,invitationClipboardDisposalChecks,accountOrganizationChecks,accountSearchChecks,registrationChecks})){try{await check();console.log(name+" passed");}catch(error){failures++;console.error(name+" failed:",error);}}if(failures)process.exitCode=1;else console.log("Access UI checks passed: exact grants, one-time secret clearing, disposed/stale replies, invitation organization, account search/deletion confirmation and private registration requests.");})();

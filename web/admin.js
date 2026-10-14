@@ -14,6 +14,7 @@ let updateControl=null,updateBusy=false;
 let passwordPolicyData=null, passwordPolicyVersion=0, userDialogVersion=0, policySaving=false;
 let apiKeysData=null,apiKeysVersion=0,apiKeyDialogVersion=0,apiKeyCreating=false,apiKeyRevoking=false,apiKeyRevokeTarget=null;
 let keyPermissionEditor=null,accessControl=null;
+let usersData=[];
 let restartJob=null,restartVersion=0,restartTimer=null,restartStarted=0,restartBusy=false,restartText="",restartSubmitting=false;
 let noticeTimer;
 const accountAddress=PostPlusAddress.create($("new-email"),$("new-email-domain"));
@@ -76,6 +77,7 @@ function element(tag, className, text) {
 
 function signedOut() {
   state.user = null;
+  usersData=[];$("users-search").value="";$("users-count").textContent="";$("users-empty").hidden=true;
   accessControl?.dispose();accessControl=null;keyPermissionEditor?.clear();keyPermissionEditor=null;
   clearRestart();
   updateControl?.dispose();updateControl=null;updateBusy=false;
@@ -95,7 +97,7 @@ function signedOut() {
   $("login-password").value = "";
   $("user-form").reset();
   for (const id of ["users-body", "queue-body", "logs-body", "settings-fields"]) $(id).replaceChildren();
-  logData = null;
+  logData = null;clearTimeout(logSearchTimer);$("logs-search").value="";$("logs-more").hidden=true;
   logVersion++;
   settingsData = null;
   settingsEditor?.dispose();
@@ -110,7 +112,7 @@ async function signedIn(user) {
   if (!user.admin) throw new Error(t("Administrator access is required."));
   state.user = user;
   accessControl?.dispose();
-  if(window.PostPlusAdminAccess)accessControl=PostPlusAdminAccess.mount($("view-accounts"),{api,notice:showNotice});
+  if(window.PostPlusAdminAccess)accessControl=PostPlusAdminAccess.mount($("view-accounts"),{api,notice:showNotice,inviteActions:$("account-create-actions"),afterDelete:loadAdmin});
   $("login-screen").hidden = true;
   $("app-screen").hidden = false;
   $("settings-success").hidden = true;
@@ -170,6 +172,24 @@ async function switchView(view) {
 }
 document.querySelectorAll("[data-view]").forEach(button => button.addEventListener("click", () => switchView(button.dataset.view)));
 $("admin-refresh").addEventListener("click", () => state.view === "logs" ? loadLogs() : state.view === "api-keys" ? loadApiKeys() : Promise.allSettled([loadAdmin(),state.view==="accounts" ? accessControl?.refresh() : null]));
+
+function renderUsers() {
+  const query=$("users-search").value.trim().toLowerCase(),accounts=usersData.filter(account=>account.username.toLowerCase().includes(query));
+  const fragment=document.createDocumentFragment(),admins=usersData.filter(account=>account.admin).length;
+  for(const account of accounts){
+    const row=element("tr"),email=element("td","",account.username),role=element("td"),actions=element("td","account-actions");
+    role.append(element("span",account.admin?"role-badge admin":"role-badge",t(account.deletion_pending?"Deletion pending":account.admin?"Administrator":"User")));
+    if(!account.deletion_pending){
+      const reset=element("button","table-action",t("Reset password"));reset.type="button";reset.setAttribute("aria-label",t("Reset password for {username}",{username:account.username}));reset.addEventListener("click",()=>openUserDialog(account.username));
+      const inspect=element("button","table-action",t("Inspect mail"));inspect.type="button";inspect.addEventListener("click",()=>openInspection(account.username));
+      const quota=element("button","table-action",t("Storage quota"));quota.type="button";quota.addEventListener("click",()=>openQuota(account.username));actions.append(inspect,quota,reset);
+    }
+    const remove=element("button","table-action danger-text",t(account.deletion_pending?"Finish deletion":"Delete account"));remove.type="button";remove.disabled=account.username===state.user?.username||(account.admin&&admins<=1);remove.setAttribute("aria-label",t("Delete account {username}",{username:account.username}));remove.addEventListener("click",()=>accessControl?.deleteAccount(account));actions.append(remove);row.append(email,role,actions);fragment.append(row);
+  }
+  $("users-body").replaceChildren(fragment);$("users-empty").hidden=accounts.length>0;$("users-count").textContent=t("{shown} of {total} accounts",{shown:accounts.length,total:usersData.length});
+}
+$("users-search").addEventListener("input",renderUsers);
+
 async function loadAdmin() {
   if (!state.user?.admin || restartBusy) return;
   const user = state.user;
@@ -187,29 +207,10 @@ async function loadAdmin() {
       showNotice(results[0].reason.message, true);
     }
     if (results[1].status === "fulfilled") {
-      const fragment = document.createDocumentFragment();
-      results[1].value.users.forEach((account) => {
-        const row = element("tr");
-        const email = element("td", "", account.username);
-        const role = element("td");
-        role.append(element("span", account.admin ? "role-badge admin" : "role-badge", t(account.admin ? "Administrator" : "User")));
-        const actions = element("td");
-        const button = element("button", "table-action", t("Reset password"));
-        button.type = "button";
-        button.setAttribute("aria-label", t("Reset password for {username}", {username: account.username}));
-        button.addEventListener("click", () => openUserDialog(account.username));
-        const inspect = element("button","table-action",t("Inspect mail"));
-        inspect.type="button";inspect.addEventListener("click",()=>openInspection(account.username));
-        const quota = element("button","table-action",t("Storage quota"));
-        quota.type="button";quota.addEventListener("click",()=>openQuota(account.username));
-        actions.classList.add("account-actions");
-        actions.append(inspect,quota,button);
-        row.append(email, role, actions);
-        fragment.append(row);
-      });
-      $("users-body").replaceChildren(fragment);
+      usersData=results[1].value.users;
+      renderUsers();
     } else {
-      $("users-body").replaceChildren();
+      usersData=[];renderUsers();
       showNotice(results[1].reason.message, true);
     }
     if (results[2].status === "fulfilled") {
@@ -397,7 +398,7 @@ document.querySelectorAll("[data-close]").forEach((button) => {
 $("user-dialog").addEventListener("close", () => { userDialogVersion++;$("new-password").value = ""; });
 
 
-let logVersion = 0;
+let logVersion = 0,logSearchTimer;
 let logData = null;
 function renderLogs() {
   if (!logData) return;
@@ -422,41 +423,51 @@ function renderLogs() {
   });
   $("logs-body").replaceChildren(fragment);
   $("logs-empty").hidden = Boolean(logData.entries?.length);
-  $("logs-status").textContent = t(logData.truncated ? "Showing {count} recent events. Older events are omitted." : "Showing {count} recent events.", {count: logData.entries?.length || 0});
+  $("logs-more").hidden = !logData.next_cursor;
+  $("logs-status").textContent = t("Showing {count} events.",{count:logData.entries?.length||0}) + " " +
+    t(logData.next_cursor ? "Load more to search older retained logs." : "End of retained logs.") +
+    (logData.rotated ? " "+t("Some older logs expired during browsing. Refresh to start again.") : "");
 }
-async function loadLogs() {
+async function loadLogs(more = false) {
   if (!state.user?.admin) return;
+  if (more && (!logData?.next_cursor || $("logs-more").disabled)) return;
+  clearTimeout(logSearchTimer);
   const user = state.user;
   const version = ++logVersion;
   const query = new URLSearchParams({limit:"100"});
   if ($("logs-service").value) query.set("service", $("logs-service").value);
   if ($("logs-level").value) query.set("level", $("logs-level").value);
+  if ($("logs-search").value.trim()) query.set("q", $("logs-search").value.trim());
+  if (more) query.set("cursor",logData.next_cursor);
+  else {logData=null;$("logs-body").replaceChildren();$("logs-empty").hidden=true;$("logs-more").hidden=true;}
   $("logs-refresh").disabled = true;
+  $("logs-more").disabled = true;
   $("logs-body").setAttribute("aria-busy", "true");
   $("logs-status").textContent = t("Loading logs…");
   formError("logs-error");
   try {
     const result = await api(`/api/admin/logs?${query}`);
     if (version !== logVersion || user !== state.user) return;
-    logData = result;
+    logData = more ? {...result,entries:[...logData.entries,...result.entries],rotated:logData.rotated||result.rotated} : result;
     renderLogs();
   } catch (error) {
     if (version !== logVersion || user !== state.user) return;
-    logData = null;
-    $("logs-body").replaceChildren();
-    $("logs-empty").hidden = true;
-    $("logs-status").textContent = "";
+    if (!more) {logData=null;$("logs-body").replaceChildren();$("logs-empty").hidden=true;$("logs-status").textContent="";}
+    else renderLogs();
     formError("logs-error", error.message);
   } finally {
     if (version === logVersion) {
       $("logs-refresh").disabled = false;
+      $("logs-more").disabled = false;
       $("logs-body").removeAttribute("aria-busy");
     }
   }
 }
-$("logs-refresh").addEventListener("click", loadLogs);
-$("logs-service").addEventListener("change", loadLogs);
-$("logs-level").addEventListener("change", loadLogs);
+$("logs-refresh").addEventListener("click", () => loadLogs());
+$("logs-more").addEventListener("click", () => loadLogs(true));
+$("logs-service").addEventListener("change", () => loadLogs());
+$("logs-level").addEventListener("change", () => loadLogs());
+$("logs-search").addEventListener("input",()=>{clearTimeout(logSearchTimer);logVersion++;$("logs-more").disabled=true;logSearchTimer=setTimeout(()=>loadLogs(),350);});
 
 function setLink(id, value) {
   const destination = new URL(value);
@@ -479,7 +490,7 @@ async function loadSettings() {
     $("restart-open").disabled=data.restart_available===false;
     maintenanceStatus("settings-apply-hint",data.restart_available===false ? "This standalone service saves settings without restarting. Restart the affected services manually after saving." : "Saving validates the configuration and restarts only affected services. Other services continue running.");
     settingsEditor?.dispose();
-    settingsEditor = PostPlusSettings.create($("settings-fields"),data.schema,data.values,{prefix:"config",secretStatus:data.secret_status,mailClients:true,generateDkim:body=>api("/api/admin/dkim",{method:"POST",body})});
+    settingsEditor = PostPlusSettings.create($("settings-fields"),data.schema,data.values,{prefix:"config",secretStatus:data.secret_status,mailClients:true,dnsRequest:(path,options)=>api('/api/admin/dns'+path,options),generateDkim:body=>api("/api/admin/dkim",{method:"POST",body})});
     $("settings-success").hidden = true;
     $("settings-form").hidden = false;
     setLink("open-webmail",data.web_url);
@@ -645,7 +656,7 @@ document.addEventListener("postplus:language", () => {
   renderInspection();
   renderApiKeys();
   renderRestart();
-  if (state.user) { accessControl?.dispose();if(window.PostPlusAdminAccess)accessControl=PostPlusAdminAccess.mount($("view-accounts"),{api,notice:showNotice}); loadAdmin(); renderLogs(); }
+  if (state.user) { accessControl?.dispose();if(window.PostPlusAdminAccess)accessControl=PostPlusAdminAccess.mount($("view-accounts"),{api,notice:showNotice,inviteActions:$("account-create-actions"),afterDelete:loadAdmin}); loadAdmin(); renderLogs(); }
 });
 
 const mailFolderLabels={INBOX:"Inbox",Sent:"Sent",Drafts:"Drafts",Trash:"Trash",Junk:"Junk",Archive:"Archive"};

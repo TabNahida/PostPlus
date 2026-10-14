@@ -46,7 +46,7 @@ window.PostPlusMailClients = (() => {
     if(value.outboundMode==="disabled")lines.push(t("Outgoing delivery to other domains is disabled. SMTP submission can send local mail only."));
     return lines.join("\n");
   }
-  function create(root, {readConfig, prefix="mail-clients"} = {}) {
+  function create(root, {readConfig, prefix="mail-clients",showDns=true} = {}) {
     let disposed = false, current = null, copied = false, selected = false, revision = 0;
     function node(tag, text, className) {const result = document.createElement(tag);if(text){result.dataset.i18n=text;result.textContent=t(text);}if(className)result.className=className;return result;}
     root.replaceChildren();
@@ -55,6 +55,7 @@ window.PostPlusMailClients = (() => {
     text.id=`${prefix}-copy`;text.readOnly=true;text.rows=5;text.spellcheck=false;copyLabel.htmlFor=text.id;copyButton.type="button";copyButton.id=`${prefix}-copy-button`;copyStatus.setAttribute("role","status");copyStatus.setAttribute("aria-live","polite");text.addEventListener("click",()=>text.select());
     const discovery = node("details",null,"mail-discovery"), discoveryHeading = node("summary","Optional DNS for mail apps"), discoveryIntro = node("p","SRV records help compatible mail apps find these services. Add only the records for services you enable, using DNS-only mode.","field-hint"), records = node("div",null,"dns-record-grid"), endpoints=node("div",null,"mail-discovery-endpoints"), discoveryHint=node("p",null,"field-hint");
     discovery.append(discoveryHeading,discoveryIntro,records,endpoints,discoveryHint,node("p","SRV value order is priority, weight, port, target. If your DNS provider uses separate fields, enter 0, 1, the port, and the mail hostname. A successful DNS lookup does not test the listener or certificate.","field-hint"));
+    discovery.hidden=!showDns;
     root.append(summary,rows,web,warning,copyLabel,text,copyButton,copyStatus,discovery);
     function copyField(parent,label,value) {const wrap=node("div",null,"dns-copy"),caption=node("span",label),input=node("input");input.type="text";input.readOnly=true;input.spellcheck=false;input.value=value;input.setAttribute("aria-label",t(label));input.addEventListener("click",()=>input.select());wrap.append(caption,input);parent.append(wrap);}
     function status() {copyStatus.textContent=t(copied?"Client configuration copied.":selected?"The configuration is selected. Copy it with Ctrl+C or your device's copy command.":"Use your full email address and mailbox password. Never use the one-time setup password or an administration API key.");}

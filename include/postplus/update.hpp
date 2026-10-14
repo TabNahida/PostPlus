@@ -33,7 +33,8 @@ std::string update_build_version();
 std::string update_platform();
 std::string update_architecture();
 std::string installed_update_version(const UpdateOptions& options);
-// Fixed source: HTTPS GitHub latest stable Release in TabNahida/PostPlus.
+// Fixed source: highest stable semantic version among the latest 20 official
+// GitHub Releases in TabNahida/PostPlus; independent of the legacy Latest badge.
 // Results contain changed files/services and whether the launcher must relaunch.
 Json check_update(const UpdateOptions& options);
 // Caller owns async job scheduling and global restart/settings/backup exclusion.

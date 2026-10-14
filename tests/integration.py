@@ -15,6 +15,7 @@ import subprocess
 import threading
 import time
 import traceback
+from urllib.parse import urlencode
 
 ROOT = Path(__file__).resolve().parents[1]
 PASSWORD = "Integration-passphrase-2026!"
@@ -254,6 +255,14 @@ def run(s):
     assert status == 200 and 0 < len(logs["entries"]) <= 2, logs
     assert all(entry["service"] == "admin" and entry["level"] == "info" for entry in logs["entries"]), logs
     assert PASSWORD not in json.dumps(logs) and s.token not in json.dumps(logs), "secrets in admin logs"
+    if logs["next_cursor"]:
+        query=urlencode(dict(service="admin",level="info",limit=2,cursor=logs["next_cursor"]))
+        status,_,older=s.http("admin","GET","/api/admin/logs?"+query,headers=admin_headers)
+        assert status==200 and len(older["entries"])<=2,older
+    query=urlencode(dict(service="admin",q="administrator",limit=100))
+    status,_,searched=s.http("admin","GET","/api/admin/logs?"+query,headers=admin_headers)
+    assert status==200 and all("administrator" in e["message"].lower() for e in searched["entries"]),searched
+    assert s.http("admin","GET","/api/admin/logs?cursor=invalid",headers=admin_headers)[0]==400
     for query in ("service=../auth", "service=%2e%2e", "level=critical", "limit=0", "limit=501", "limit=-1", "limit=2&limit=3", "path=config"):
         assert s.http("admin", "GET", "/api/admin/logs?" + query, headers=admin_headers)[0] == 400, query
     alice_id = s.rpc("storage", op="list", username=alice)["messages"][0]["id"]

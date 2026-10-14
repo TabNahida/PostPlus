@@ -16,7 +16,19 @@ No match returns `{"ok":true,"found":false}`. Times are Unix seconds. `expires_a
 
 ## Mailbox invitations
 
-Administration → **User accounts** creates, lists and revokes invitations.
+Administration → **User accounts** → **Invite to mailbox** opens invitation creation, metadata and revocation in a dialog beside **Create user**. Closing it clears any one-time registration link, including a late creation reply.
+
+The account table starts expanded, can be collapsed, and filters email addresses as you type. Wildcard forwarding is a separate, initially collapsed table alongside the account password policy.
+
+## Account deletion
+
+**Delete account** asks for the complete email address before removing an account. The signed-in account and the last administrator are protected. The equivalent API is `DELETE /api/admin/users` with `{"username":"friend@example.com","confirm_username":"friend@example.com"}` and `users:write`; session requests also require CSRF.
+
+Deletion first disables credentials, API keys and invitations, then purges stored messages, mailbox quota, forwarding rules targeting the inbox, and queued mail to or from the account. Work already sent to an external SMTP server cannot be recalled. Existing Webmail, IMAP, POP3 and authenticated SMTP sessions stop working; credential versions prevent old sessions accessing a later account at the same address.
+
+If storage cleanup is unavailable, the account stays disabled and appears as **Deletion pending**. **Finish deletion** retries cleanup; the address cannot be registered again until cleanup succeeds. This state survives service restarts. A successfully reused address gets an empty mailbox and fresh UID validity. Empty delivery receipts prevent an already-running worker from restoring mail from a deleted queue snapshot.
+
+## Invitation API
 
 | Method and path | Body / result | Key permission |
 | --- | --- | --- |

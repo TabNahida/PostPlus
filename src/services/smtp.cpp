@@ -31,7 +31,7 @@ void smtp(Connection& c, const Config& cfg, std::chrono::seconds data_timeout, b
     unsigned auth_failures = 0;
     const auto auth_limit = static_cast<unsigned>(std::clamp(cfg.number("max_auth_attempts", 5), 1, 20));
     const auto recipient_limit = static_cast<std::size_t>(std::clamp(cfg.number("max_recipients", 100), 1, 100));
-    std::string username, sender;
+    std::string username, credential_version, sender;
     std::vector<std::string> recipients;
     Json recipient_routes = Json::object();
     auto reset = [&] { have_sender = false; sender.clear(); recipients.clear(); recipient_routes.clear(); };
@@ -49,6 +49,10 @@ void smtp(Connection& c, const Config& cfg, std::chrono::seconds data_timeout, b
         if (verb == "mail") reset();
         if (verb != "auth" && command_line.size() > 510) { reply("500 5.5.2 Command line too long\r\n"); continue; }
         try {
+            if (!username.empty()) {
+                const auto valid = rpc(cfg, "auth", {{"op", "session_check"}, {"username", username}, {"credential_version", credential_version}});
+                if (!valid.value("ok", false) || !valid.value("valid", false)) { reply("421 4.7.0 Account credentials changed\r\n"); return; }
+            }
             if (verb == "quit") { reply("221 2.0.0 Goodbye\r\n"); return; }
             if (verb == "noop") { reply("250 2.0.0 OK\r\n"); continue; }
             if (verb == "rset") { reset(); reply("250 2.0.0 Reset\r\n"); continue; }
@@ -95,9 +99,9 @@ void smtp(Connection& c, const Config& cfg, std::chrono::seconds data_timeout, b
                         password = base64_decode(initial);
                     } else { reply("504 5.5.4 Unsupported authentication mechanism\r\n"); continue; }
                 } catch (const std::exception&) { if (auth_failure("501 5.5.2 Invalid authentication encoding\r\n")) return; continue; }
-                auto result = rpc(cfg, "auth", {{"op", "verify"}, {"username", user}, {"password", password}});
+                auto result = rpc(cfg, "auth", {{"op", "verify"}, {"username", user}, {"password", password}, {"session", true}});
                 if (!result.value("ok", false)) { if (auth_failure("535 5.7.8 Invalid credentials\r\n")) return; continue; }
-                username = result.value("username", user); reply("235 2.7.0 Authentication successful\r\n"); continue;
+                username = result.value("username", user); credential_version = result.at("credential_version").get<std::string>(); reply("235 2.7.0 Authentication successful\r\n"); continue;
             }
             if (verb == "mail") {
                 if (submission && !c.encrypted()) { reply("530 5.7.0 Must issue STARTTLS first\r\n"); continue; }

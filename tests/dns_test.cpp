@@ -14,6 +14,7 @@ struct Fixture {
     int requests=0;unsigned rcode=0;bool truncated=false,wrong_id=false,wrong_question=false,bad_pointer=false,alias=false;bool timeout=false;
     static Bytes txt(const std::string& value,bool split=false){Bytes data;const auto first=split?value.size()/2:value.size();data.push_back(static_cast<unsigned char>(first));data.insert(data.end(),value.begin(),value.begin()+first);if(split){data.push_back(static_cast<unsigned char>(value.size()-first));data.insert(data.end(),value.begin()+first,value.end());}return data;}
     static Bytes mx(unsigned preference,const std::string& host){Bytes data;number(data,preference);name(data,host);return data;}
+    static Bytes srv(unsigned priority,unsigned weight,unsigned port,const std::string& host){Bytes data;number(data,priority);number(data,weight);number(data,port);name(data,host);return data;}
     static Bytes address(const std::string& value){const auto parsed=asio::ip::make_address(value);if(parsed.is_v4()){const auto bytes=parsed.to_v4().to_bytes();return {bytes.begin(),bytes.end()};}const auto bytes=parsed.to_v6().to_bytes();return {bytes.begin(),bytes.end()};}
     Bytes send(const Bytes& request,std::chrono::steady_clock::time_point deadline){
         ++requests;check(deadline>std::chrono::steady_clock::now(),"invalid DNS deadline");if(timeout)throw DnsError("dns_timeout","test timeout");
@@ -48,6 +49,29 @@ int main(){try {
     for(const auto& item:result.at("records"))check(item.at("status")=="matched","correct DNS value did not match");
     check(record(result,"mx").at("observed")==Json::array({"10 mail.example.com"}),"MX priority was discarded");
     check(record(result,"spf").at("observed")==Json::array({"v=spf1 include:relay.example.com -all"}),"TXT chunks were not joined or unrelated TXT was included");
+    Config config;config.values={{"domain","example.com"},{"mail_hostname","mail.example.com"},{"bind","0.0.0.0"},{"outbound_mode","direct"},{"tls_certificate","cert.pem"},{"tls_private_key","key.pem"},{"ports",{{"smtp",2525},{"web",443},{"pop3s",0}}}};
+    auto recommendations=dns_recommendations(config);
+    check(record(recommendations,"spf").at("value")=="v=spf1 mx -all","direct recommendation needs a publishable SPF even before an IP is entered");
+    check(record(recommendations,"dkim").at("value")=="" && record(recommendations,"dkim").at("status")=="not_configured","DNS page must not fabricate or create a signing key");
+    check(record(recommendations,"srv_imaps").at("value")=="0 1 993 mail.example.com." && record(recommendations,"srv_autodiscover").at("value")=="0 1 443 mail.example.com.","SRV recommendations must use enabled saved listeners");
+    check(std::none_of(recommendations.at("records").begin(),recommendations.at("records").end(),[](const Json& item){return item.at("id")=="srv_pop3s";}),"disabled listeners must not be recommended");
+    Bytes reverse;name(reverse,"mail.example.com");fixture.answers[{"34.216.184.93.in-addr.arpa",12}]={reverse};
+    fixture.answers[{"_imaps._tcp.example.com",33}]={Fixture::srv(0,1,993,"mail.example.com")};
+    auto options=fixture.options();std::vector<std::pair<std::string,int>> probes;
+    options.connect=[&](const asio::ip::address& address,int port,auto deadline){check(deadline>std::chrono::steady_clock::now(),"expired TCP probe deadline");probes.emplace_back(address.to_string(),port);return port==25 || port==993;};
+    Json diagnostic=request();diagnostic.erase("domain");diagnostic.erase("hostname");diagnostic["ipv4"]="";diagnostic["ipv6"]="";
+    auto server=DnsChecker(options).check_server(config,diagnostic);
+    check(record(server,"a").at("status")=="published","configured public DNS addresses stay visible without entering their expected values");
+    check(record(server,"srv_imaps").at("status")=="matched" && record(server,"ptr_0").at("status")=="matched","SRV and PTR records must be queried and compared");
+    check(record(server,"mx").at("status")=="matched","an already configured MX record stays in the complete DNS report");
+    check(server.at("connectivity").at(0).at("port")==25 && server.at("connectivity").at(0).at("status")=="reachable","Internet reception must test public port25 even with a2525 listener");
+    check(std::any_of(probes.begin(),probes.end(),[](const auto& probe){return probe.second==2525;}),"configured SMTP listener is also tested");
+    check(std::none_of(probes.begin(),probes.end(),[](const auto& probe){return probe.second==8081 || probe.second==18081;}),"diagnostics never probe administration or internal service ports");
+    const auto probe_count=probes.size();const auto query_count=fixture.requests;diagnostic["hostname"]="arbitrary.example.org";rejects([&]{DnsChecker(options).check_server(config,diagnostic);});
+    check(probes.size()==probe_count && fixture.requests==query_count,"caller-selected hosts must be rejected before DNS or TCP traffic");diagnostic.erase("hostname");
+    fixture.answers[{"mail.example.com",1}]={Fixture::address("127.0.0.1")};fixture.answers[{"mail.example.com",28}].clear();probes.clear();server=DnsChecker(options).check_server(config,diagnostic);
+    check(probes.empty() && record(server,"a").at("code")=="dns_private_address","DNS rebinding to a private address must never create a TCP probe");
+    fixture.answers[{"mail.example.com",1}]={Fixture::address("93.184.216.34")};fixture.answers[{"mail.example.com",28}]={Fixture::address("2606:4700::1111")};
     input=request();input["dmarc"]="v=DMARC1 ; rua=mailto:reports@example.com; p=none";fixture.answers[{"_dmarc.example.com",16}]={Fixture::txt(input.at("dmarc").get<std::string>())};result=checker.check(input);check(record(result,"dmarc").at("status")=="matched","valid DMARC tag order or spacing failed");fixture.answers[{"_dmarc.example.com",16}]={Fixture::txt("v=DMARC1; p=none")};
     fixture.alias=true;result=checker.check(request());check(record(result,"a").at("code")=="dns_mx_alias" && record(result,"mx").at("status")=="mismatch","MX hostname CNAME alias passed");fixture.alias=false;
     fixture.answers[{"mail.example.com",1}].push_back(Fixture::address("93.184.216.35"));result=checker.check(request());check(record(result,"a").at("status")=="mismatch","an additional incorrect address passed");

@@ -31,6 +31,13 @@ Existing custom ports remain unchanged after upgrading. **Apply standard ports**
 
 ## Optional DNS discovery / 可选 DNS 自动发现
 
+In administration, DNS recommendations and server diagnostics are now in the
+separate **DNS** group. It keeps all records visible, including matches, and
+checks SRV, PTR, and public service TCP connections independently of saving
+configuration. See [DNS diagnostics](dns.md) for the scope and limitations.
+
+管理后台将 DNS 推荐记录和服务器诊断放在独立的 **DNS** 分组中，保留已经匹配的记录，并支持独立于保存配置的 SRV、PTR 和公网服务 TCP 检查。检查范围与限制见 [DNS 诊断](dns.md)。
+
 Publish A/AAAA and MX first, then SPF, DKIM, and DMARC as shown in the setup DNS guide. The client guide prepares SRV records from enabled secure listeners. For example, with the standard secure ports:
 
 | Type | Name in the `example.com` zone | Value |

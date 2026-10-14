@@ -5,6 +5,7 @@
 #include "postplus/maintenance.hpp"
 #include "postplus/restart.hpp"
 #include "postplus/mail_clients.hpp"
+#include "postplus/dns.hpp"
 #include "postplus/access.hpp"
 #include "postplus/forwarding.hpp"
 #include "postplus/verification_code.hpp"
@@ -132,27 +133,19 @@ bool api_key_management_route(const std::string& path) {
 }
 
 Json log_query(const Config& config, const std::string& path) {
-    std::string service, level;
+    std::string service, level, search, cursor;
     std::size_t limit = 100;
-    const auto question = path.find('?');
-    std::set<std::string> seen;
-    if (question != std::string::npos) {
-        std::istringstream query(path.substr(question + 1));
-        std::string item;
-        while (std::getline(query,item,'&')) {
-            const auto equals = item.find('=');
-            if (equals == std::string::npos) throw ApiError(400,"Invalid log filters.");
-            const auto key = item.substr(0,equals), value = item.substr(equals + 1);
-            if (!seen.insert(key).second) throw ApiError(400,"Invalid log filters.");
+    for (const auto& [key,value] : query_fields(path)) {
             if (key == "service") service = value;
             else if (key == "level") level = value;
+            else if (key == "q") search = value;
+            else if (key == "cursor") cursor = value;
             else if (key == "limit") {
                 const auto [end,error] = std::from_chars(value.data(),value.data()+value.size(),limit);
                 if (error != std::errc{} || end != value.data()+value.size()) throw ApiError(400,"Invalid log limit.");
             } else throw ApiError(400,"Invalid log filters.");
-        }
     }
-    try { return read_logs(config,service,level,limit); }
+    try { return read_logs(config,service,level,limit,search,cursor); }
     catch (const std::invalid_argument&) { throw ApiError(400,"Invalid log filters or limit."); }
 }
 
@@ -281,6 +274,7 @@ public:
             load_static(root, "/settings.js", "settings.js", "application/javascript; charset=utf-8");
             load_static(root, "/acme.js", "acme.js", "application/javascript; charset=utf-8");
             load_static(root, "/mail-clients.js", "mail-clients.js", "application/javascript; charset=utf-8");
+            load_static(root, "/admin-dns.js", "admin-dns.js", "application/javascript; charset=utf-8");
             load_static(root, "/update.js", "update.js", "application/javascript; charset=utf-8");
             load_static(root, "/admin-access.js", "admin-access.js", "application/javascript; charset=utf-8");
         } else {
@@ -802,6 +796,16 @@ private:
                 log(service_name,"administrator " + session.username + " inspected message " + id + " in mailbox " + username);
                 return json_response(result);
             }
+            if ((request.method == "GET" && path == "/api/admin/dns") ||
+                (request.method == "POST" && path == "/api/admin/dns/check")) {
+                const auto saved=Config::from_file(config_.source);
+                try {
+                    if(request.method=="GET") return json_response(dns_recommendations(saved));
+                    return json_response(DnsChecker().check_server(saved,request_json(request)));
+                } catch(const DnsError& error) {
+                    return json_response({{"ok",false},{"code",error.code},{"error",error.what()}},400);
+                }
+            }
             if (request.path == "/api/admin/config") {
                 if (request.method == "GET") return json_response(settings_view(config_));
                 if (request.method == "POST") {
@@ -878,6 +882,26 @@ private:
                 auto result = rpc(config_, "auth", {{"op", "list"}});
                 require_ok(result, "Unable to load accounts.");
                 return json_response(result);
+            }
+            if (request.method == "DELETE" && request.path == "/api/admin/users") {
+                const auto input = request_json(request);
+                const auto username = username_field(input);
+                if (input.size() != 2 || !input.contains("confirm_username") || !input.at("confirm_username").is_string() ||
+                        lower(trim(input.at("confirm_username").get<std::string>())) != username)
+                    throw ApiError(400, "Type the complete email address to confirm account deletion.");
+                auto prepared = rpc(config_, "auth", {{"op", "user_delete"}, {"username", username}, {"actor", session.username}});
+                if (!prepared.value("ok", false)) return json_response(prepared, prepared.value("code", std::string{}) == "account_not_found" ? 404 : 409);
+                try {
+                    auto cleaned = rpc(config_, "storage", {{"op", "mailbox_delete"}, {"username", username}});
+                    require_ok(cleaned, "The account is disabled. Retry deletion to finish removing its mailbox.", 503);
+                    auto result = rpc(config_, "auth", {{"op", "user_delete_finish"}, {"username", username}, {"actor", session.username}, {"cleanup_id", prepared.at("cleanup_id")}});
+                    require_ok(result, "The account is disabled. Retry deletion to finish removing its mailbox.", 503);
+                } catch (const std::exception&) {
+                    return json_response({{"ok", false}, {"code", "account_cleanup_pending"}, {"error", "The account is disabled. Retry deletion to finish removing its mailbox."}}, 503);
+                }
+                { std::lock_guard lock(mutex_); std::erase_if(sessions_, [&username](const auto& item) { return item.second.username == username; }); }
+                log(service_name, "administrator " + session.username + " deleted account " + username);
+                return json_response({{"ok", true}, {"username", username}});
             }
             if (request.method == "GET" && request.path == "/api/admin/stats") {
                 auto result = rpc(config_, "storage", {{"op", "stats"}});

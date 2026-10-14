@@ -1,6 +1,7 @@
 #include <postplus/update.hpp>
 #include <postplus/data_lock.hpp>
 #include <postplus/restart.hpp>
+#include "update_archive.hpp"
 #include <openssl/evp.h>
 #include <algorithm>
 #include <array>
@@ -23,8 +24,9 @@ namespace {
 namespace fs = std::filesystem;
 using Clock = std::chrono::steady_clock;
 constexpr std::size_t max_module = 128 * 1024 * 1024, max_metadata = 4 * 1024 * 1024;
+constexpr std::size_t max_archive = 512 * 1024 * 1024;
 constexpr std::string_view repository = "TabNahida/PostPlus";
-constexpr std::string_view latest_url = "https://api.github.com/repos/TabNahida/PostPlus/releases/latest";
+constexpr std::string_view releases_url = "https://api.github.com/repos/TabNahida/PostPlus/releases?per_page=20";
 [[noreturn]] void invalid(const std::string& message, const std::string& code = "invalid_update", int status = 503) {
     throw UpdateError(code, message, status);
 }
@@ -290,7 +292,7 @@ Url trusted_url(const std::string& url) {
     Url result{url.substr(8, slash - 8), url.substr(slash)};
     if (result.host != "api.github.com" && result.host != "github.com" && result.host != "release-assets.githubusercontent.com" && result.host != "objects.githubusercontent.com")
         invalid("Update URL is outside the official GitHub download hosts.", "untrusted_url");
-    if (result.host == "api.github.com" && result.target != "/repos/TabNahida/PostPlus/releases/latest") invalid("Update API repository is not trusted.", "untrusted_url");
+    if (result.host == "api.github.com" && result.target != "/repos/TabNahida/PostPlus/releases?per_page=20") invalid("Update API repository is not trusted.", "untrusted_url");
     if (result.host == "github.com" && !result.target.starts_with("/TabNahida/PostPlus/releases/download/v")) invalid("Update download repository is not trusted.", "untrusted_url");
     return result;
 }
@@ -372,7 +374,19 @@ std::string installed_version(const UpdateOptions& options) {
     return semver(version) > semver(options.current_version) ? version : options.current_version;
 }
 Json inspect_release(const UpdateOptions& options) {
-    const auto release = Json::parse(download(options, std::string(latest_url), max_metadata));
+    const auto releases = Json::parse(download(options, std::string(releases_url), max_metadata));
+    if (!releases.is_array() || releases.size() > 20) invalid("GitHub did not return the stable release list.");
+    Json release; std::array<unsigned, 3> newest{};
+    for (const auto& candidate : releases) {
+        if (candidate.value("draft", true) || candidate.value("prerelease", true)) continue;
+        const auto tag = candidate.value("tag_name", "");
+        if (!tag.starts_with('v')) continue;
+        try {
+            const auto version = semver(tag.substr(1));
+            if (release.is_null() || version > newest) { release = candidate; newest = version; }
+        } catch (const UpdateError&) { /* Unrelated/nonstable tags are not updates. */ }
+    }
+    if (release.is_null()) invalid("GitHub has no supported stable release.");
     const auto tag = release.at("tag_name").get<std::string>();
     if (release.value("draft", true) || release.value("prerelease", true) || !tag.starts_with('v')) invalid("GitHub did not return a stable release.");
     const auto version = tag.substr(1); (void)semver(version);
@@ -396,13 +410,32 @@ Json inspect_release(const UpdateOptions& options) {
     const auto bytes = download(options, assets.at("postplus-update.json"), max_metadata);
     if (!sums.contains("postplus-update.json") || sha256(bytes) != sums.at("postplus-update.json")) invalid("Release manifest checksum mismatch.", "checksum_mismatch");
     const auto manifest = Json::parse(bytes);
-    if (manifest.value("schema", 0) != 1 || manifest.value("minimum_updater", 999) > 1 || manifest.value("repository", "") != repository ||
+    if (manifest.value("schema", 0) != 1 || manifest.value("minimum_updater", 999) > 2 || manifest.value("repository", "") != repository ||
         manifest.value("version", "") != version) invalid("Unsupported updater manifest or repository.", "incompatible_release");
     Json target; unsigned matches = 0;
     for (const auto& value : manifest.at("targets")) if (value.value("platform", "") == update_platform() && value.value("arch", "") == update_architecture()) { target = value; ++matches; }
     if (matches != 1 || target.value("service_contract", 0) != 1 || semver(target.at("minimum_version").get<std::string>()) > semver(current))
         invalid("This release is not compatible with the installed platform or service contract.", "incompatible_release");
     if (!target.at("files").is_array() || target.at("files").size() > 128) invalid("Invalid release module inventory.");
+    const bool archive_download = target.value("download", "modules") == "archive";
+    if (!archive_download) {
+#ifndef POSTPLUS_LEGACY_UPDATES
+        invalid("This release uses the retired module download format.", "incompatible_release");
+#endif
+        if (target.value("download", "modules") != "modules") invalid("Unknown release download format.", "incompatible_release");
+    }
+    if (archive_download) {
+        const auto archive = target.at("archive");
+        const auto asset = archive.at("asset").get<std::string>();
+        const auto extension = update_platform() == "windows" ? ".zip" : ".tar.gz";
+        const auto expected = "postplus-" + version + "-" + update_platform() + "-" + update_architecture() + extension;
+        const auto size = archive.at("size").get<std::uint64_t>();
+        const auto hash = archive.at("sha256").get<std::string>();
+        if (asset != expected || !size || size > max_archive || !hex(hash, 64) || !assets.contains(asset) ||
+            !sums.contains(asset) || sums.at(asset) != hash) invalid("Release archive violates its package or checksum inventory.");
+        result["archive"] = archive; result["archive"]["download_url"] = assets.at(asset);
+    }
+    result["download_format"] = archive_download ? "archive" : "modules";
     std::set<std::string> paths, services; std::uint64_t total = 0;
     Json baseline = Json::object();
     const auto installed_path = options.install_directory / "postplus-update.json";
@@ -414,14 +447,23 @@ Json inspect_release(const UpdateOptions& options) {
     result["installation_manifest"] = Json{{"schema", 1}, {"repository", repository}, {"version", version},
         {"platform", update_platform()}, {"arch", update_architecture()}, {"files", Json::array()}};
     for (auto file : target.at("files")) {
-        const auto path = file.at("path").get<std::string>(), asset = file.at("asset").get<std::string>(), hash = file.at("sha256").get<std::string>();
+        const auto path = file.at("path").get<std::string>(), hash = file.at("sha256").get<std::string>();
         const auto fingerprint = file.at("fingerprint").get<std::string>();
         const auto size = file.at("size").get<std::uint64_t>();
-        if (!permitted(path) || !paths.insert(path).second || !safe_name(asset) || !hex(hash, 64) || !hex(fingerprint, 64) || !size || size > max_module ||
-            !assets.contains(asset) || !sums.contains(asset) || sums.at(asset) != hash || !file.at("executable").is_boolean() ||
+        if (!permitted(path) || !paths.insert(path).second || !hex(hash, 64) || !hex(fingerprint, 64) || !size || size > max_module ||
+            !file.at("executable").is_boolean() ||
             file.at("executable").get<bool>() != !path.starts_with("web/")) invalid("Release module violates the updater allowlist or checksum inventory.");
+#ifdef POSTPLUS_LEGACY_UPDATES
+        if (!archive_download) {
+            const auto asset = file.at("asset").get<std::string>();
+            if (!safe_name(asset) || !assets.contains(asset) || !sums.contains(asset) || sums.at(asset) != hash)
+                invalid("Release module violates the updater checksum inventory.");
+            file["download_url"] = assets.at(asset);
+        }
+#endif
         const auto local = current_hash(target_path(options, path));
         auto installed_file = file;
+        installed_file.erase("download_url");
         const bool same_component = baseline.contains(path) && baseline[path].value("fingerprint", "") == fingerprint &&
             baseline[path].value("sha256", "") == local && !local.empty();
         if (same_component) {
@@ -430,7 +472,7 @@ Json inspect_release(const UpdateOptions& options) {
         }
         result["installation_manifest"]["files"].push_back(std::move(installed_file));
         if (local == hash || same_component) continue;
-        file["old_sha256"] = local; file["id"] = sha256(path); file["download_url"] = assets.at(asset);
+        file["old_sha256"] = local; file["id"] = sha256(path);
         result["files"].push_back(std::move(file)); total += size;
         if (total > 1024ULL * 1024 * 1024) invalid("Release modules exceed the total download limit.");
         if (path.starts_with("web/")) { services.insert("web"); services.insert("admin"); }
@@ -454,7 +496,9 @@ Json inspect_release(const UpdateOptions& options) {
             invalid("Release omits an installed native module.", "incomplete_release");
     }
     for (const auto& service : supervisor_services()) if (services.contains(service)) result["services"].push_back(service);
-    result["supported"] = true; result["download_bytes"] = total; return result;
+    result["supported"] = true; result["changed_bytes"] = total;
+    result["download_bytes"] = archive_download && !result["files"].empty() ? result["archive"]["size"] : Json(total);
+    return result;
 }
 void verified_contents(const Json& file, std::string_view bytes) {
     if (bytes.size() != file.at("size").get<std::size_t>() || sha256(bytes) != file.at("sha256").get<std::string>()) invalid("Downloaded module checksum or size mismatch.", "checksum_mismatch");
@@ -537,13 +581,28 @@ Json stage_update(const UpdateOptions& input, const std::string& version, const 
         if (!release.value("available", false)) invalid("This release is not newer than the installed version.", "not_newer", 409);
         for (const auto& [key, value] : release.items()) job[key] = value;
         job["state"] = "staging"; save_job(options, job);
-        for (auto& file : job["files"]) {
+        if (job.value("download_format", "") == "archive" && !job["files"].empty()) {
+            const auto archive = job.at("archive");
+            const auto bytes = download(options, archive.at("download_url").get<std::string>(), archive.at("size").get<std::size_t>());
+            verified_contents(archive, bytes);
+            job["downloaded_bytes"] = bytes.size(); save_job(options, job);
+            if (progress) progress(public_job(job));
+            extract_update_modules(bytes, archive.at("asset").get<std::string>(), version, job.at("files"), cancel,
+                [&](const Json& file, std::string_view contents) {
+                    verified_contents(file, contents);
+                    private_file(directory / "modules" / file.at("id").get<std::string>(), contents);
+                });
+            job["archive"].erase("download_url");
+        }
+#ifdef POSTPLUS_LEGACY_UPDATES
+        else for (auto& file : job["files"]) {
             if (cancel.load()) invalid("Update download cancelled.", "cancelled", 409);
             const auto bytes = download(options, file.at("download_url").get<std::string>(), file.at("size").get<std::size_t>());
             verified_contents(file, bytes); private_file(directory / "modules" / file.at("id").get<std::string>(), bytes);
             file.erase("download_url"); job["downloaded_bytes"] = job["downloaded_bytes"].get<std::uint64_t>() + bytes.size(); save_job(options, job);
             if (progress) progress(public_job(job));
         }
+#endif
         if (cancel.load()) invalid("Update download cancelled.", "cancelled", 409);
         job["state"] = "staged"; save_job(options, job); return public_job(std::move(job));
     } catch (const std::exception& error) {

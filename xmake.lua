@@ -1,5 +1,5 @@
 set_project("PostPlus")
-set_version("0.3.0")
+set_version("0.3.1")
 set_xmakever("2.9.8")
 set_languages("c++20")
 set_warnings("allextra")
@@ -13,6 +13,7 @@ add_requires("nlohmann_json 3.12.0", {system = false})
 -- developer machine's package cache or an unpinned system installation.
 add_requires("openssl3 3.6.1", {system = false, configs = {shared = false}})
 add_requires("sqlite3 3.51.0+300", {system = false, configs = {shared = false}})
+add_requires("zlib 1.3.1", {system = false, configs = {shared = false}})
 
 target("postplus-core")
     set_kind("static")
@@ -20,8 +21,10 @@ target("postplus-core")
     add_headerfiles("include/(postplus/*.hpp)")
     add_includedirs("include", {public = true})
     add_defines("ASIO_STANDALONE", "ASIO_NO_DEPRECATED", {public = true})
-    add_defines('POSTPLUS_VERSION="0.3.0"', {public = true})
-    add_packages("asio", "nlohmann_json", "openssl3", "sqlite3", {public = true})
+    -- Removed after the 0.3.1 migration bridge has been published.
+    add_defines("POSTPLUS_LEGACY_UPDATES", {public = true})
+    add_defines('POSTPLUS_VERSION="0.3.1"', {public = true})
+    add_packages("asio", "nlohmann_json", "openssl3", "sqlite3", "zlib", {public = true})
     if is_plat("windows") then
         add_defines("_WIN32_WINNT=0x0A00", "WIN32_LEAN_AND_MEAN", "NOMINMAX", "_CRT_SECURE_NO_WARNINGS", {public = true})
         add_syslinks("ws2_32", "mswsock", "advapi32", "crypt32", {public = true})

@@ -9,6 +9,7 @@
 #include <iostream>
 #include <mutex>
 #include <sstream>
+#include <openssl/sha.h>
 #ifdef _WIN32
 #include <windows.h>
 #include <sddl.h>
@@ -219,51 +220,130 @@ void log(const std::string& service, const std::string& message, const std::stri
         std::cerr << "[logging] unable to persist log entry\n";
     }
 }
-Json read_logs(const Config& config, const std::string& service, const std::string& level, std::size_t limit) {
+Json read_logs(const Config& config, const std::string& service, const std::string& level, std::size_t limit,
+               const std::string& search, const std::string& cursor) {
     if (!service.empty() && !known_service(service)) throw std::invalid_argument("unknown log service");
     if (!level.empty()) (void)level_index(level);
     if (!limit || limit > 500) throw std::invalid_argument("log limit must be 1..500");
-    const auto directory = log_directory(config);
-    const auto backups = std::clamp(config.number("log_backups",3),1,10);
-    std::vector<Json> entries;
-    bool truncated = false;
-    constexpr std::streamoff tail_bytes = 64 * 1024;
-    auto newest = [](const Json& a,const Json& b) { return a.at("timestamp").get_ref<const std::string&>() > b.at("timestamp").get_ref<const std::string&>(); };
-    for (const auto& name : services) {
-        if (!service.empty() && name != service) continue;
-        for (int part = 0; part <= backups; ++part) {
-            const auto path = directory / (name + ".jsonl" + (part ? "." + std::to_string(part) : ""));
+    if (search.size() > 256 || search.find_first_of("\r\n") != std::string::npos || cursor.size() > 7000)
+        throw std::invalid_argument("invalid log search or cursor");
+    auto positions = Json::array();
+    if (!cursor.empty()) {
+        auto decoded = base64_decode(cursor);
+        auto saved = Json::parse(decoded,nullptr,false);
+        if (base64_encode(decoded) != cursor || !saved.is_object() || saved.value("s",Json()) != service ||
+            saved.value("l",Json()) != level || saved.value("q",Json()) != search ||
+            !saved.value("f",Json()).is_array() || saved["f"].size() > services.size()*11)
+            throw std::invalid_argument("invalid log cursor");
+        positions = saved["f"];
+        for (const auto& item : positions)
+            if (!item.is_array() || item.size()!=3 || !item[0].is_number_unsigned() || item[0].get<std::size_t>()>=services.size() ||
+                !item[1].is_string() || item[1].get_ref<const std::string&>().size()!=16 ||
+                !item[2].is_number_unsigned() || item[2].get<std::uint64_t>() > 1024ULL*1024*1024)
+                throw std::invalid_argument("invalid log cursor");
+    }
+    // A cursor stores byte positions in a fixed snapshot of the rotated files.
+    // First-line identities survive rename/rotation; new writes cannot shift pages.
+    struct Reader {
+        std::ifstream file;
+        std::size_t service_index=0;
+        std::string identity, buffer;
+        std::streamoff offset=0, buffer_start=0, pending_end=0;
+        Json pending;
+        std::optional<std::string> previous(std::size_t& budget) {
+            const auto original=offset;
+            std::string reversed;
+            bool oversized=false, started=false;
+            while (offset>0) {
+                if (buffer.empty() || offset<=buffer_start || offset>buffer_start+static_cast<std::streamoff>(buffer.size())) {
+                    if (!budget) {offset=original;return {};}
+                    const auto count=static_cast<std::size_t>(std::min<std::streamoff>(offset,std::min<std::size_t>(65536,budget)));
+                    buffer_start=offset-static_cast<std::streamoff>(count);
+                    buffer.assign(count,'\0');file.clear();file.seekg(buffer_start);file.read(buffer.data(),static_cast<std::streamsize>(count));
+                    budget-=count;
+                    if (static_cast<std::size_t>(file.gcount())!=count) {offset=0;return {};}
+                }
+                const auto ch=buffer[static_cast<std::size_t>(--offset-buffer_start)];
+                if (!started && ch=='\n') {started=true;continue;}
+                started=true;
+                if (ch=='\n') break;
+                if (reversed.size()<16384) reversed+=ch; else oversized=true;
+            }
+            if (oversized) return std::string{};
+            std::reverse(reversed.begin(),reversed.end());return reversed;
+        }
+    };
+    std::vector<Reader> readers;
+    const auto directory=log_directory(config);
+    const auto backups=std::clamp(config.number("log_backups",3),1,10);
+    bool rotated=false;
+    std::size_t found_positions=0;
+    for (std::size_t index=0;index<services.size();++index) {
+        if (!service.empty() && services[index]!=service) continue;
+        for (int part=0;part<=backups;++part) {
+            const auto path=directory/(services[index]+".jsonl"+(part?"."+std::to_string(part):""));
             try {
                 regular_or_absent(path);
-                std::ifstream file(path,std::ios::binary);
-                if (!file) continue;
-                file.seekg(0,std::ios::end);
-                auto size = file.tellg();
-                if (size < 0) continue;
-                file.seekg(size > tail_bytes ? size - tail_bytes : std::streampos(0));
-                std::string tail(static_cast<std::size_t>(std::min<std::streamoff>(size,tail_bytes)),'\0');
-                file.read(tail.data(),static_cast<std::streamsize>(tail.size()));
-                tail.resize(static_cast<std::size_t>(file.gcount()));
-                std::istringstream snapshot(tail);
-                std::string line;
-                if (size > tail_bytes) { std::getline(snapshot,line); truncated = true; }
-                while (std::getline(snapshot,line)) {
-                    if (line.size() > 16384) continue;
-                    auto item = Json::parse(line,nullptr,false);
-                    if (!item.is_object() || !item.value("timestamp",Json()).is_string() || !item.value("message",Json()).is_string() ||
-                        !item.value("service",Json()).is_string() || !item.value("level",Json()).is_string() || !item.value("pid",Json()).is_number_integer()) continue;
-                    if (!level.empty() && item.at("level") != level) continue;
-                    entries.push_back(std::move(item));
-                    if (entries.size() >= limit * 2) {
-                        std::stable_sort(entries.begin(),entries.end(),newest);
-                        entries.resize(limit); truncated = true;
-                    }
+                Reader reader;reader.file.open(path,std::ios::binary);
+                if (!reader.file) continue;
+                // Bound identity reads even if a damaged file contains no newline.
+                std::string first;
+                for (int i=0;i<16384;++i) {char c;if(!reader.file.get(c) || c=='\n')break;first+=c;}
+                if (first.empty()) continue;
+                unsigned char digest[SHA256_DIGEST_LENGTH];SHA256(reinterpret_cast<const unsigned char*>(first.data()),first.size(),digest);
+                constexpr char hex[]="0123456789abcdef";
+                for (int i=0;i<8;++i) {reader.identity+=hex[digest[i]>>4];reader.identity+=hex[digest[i]&15];}
+                reader.service_index=index;reader.file.clear();reader.file.seekg(0,std::ios::end);
+                reader.offset=static_cast<std::streamoff>(reader.file.tellg());
+                if (reader.offset<=0) continue;
+                if (!cursor.empty()) {
+                    auto saved=std::find_if(positions.begin(),positions.end(),[&](const Json& item) {return item[0]==index && item[1]==reader.identity;});
+                    if (saved==positions.end()) continue;
+                    ++found_positions;
+                    if ((*saved)[2].get<std::uint64_t>()>static_cast<std::uint64_t>(reader.offset)) {rotated=true;continue;}
+                    reader.offset=(*saved)[2].get<std::streamoff>();
                 }
-            } catch (const std::exception&) { /* A concurrent rotation can remove a file; skip that tail. */ }
+                readers.push_back(std::move(reader));
+            } catch (const std::exception&) {rotated=true;}
         }
     }
-    std::stable_sort(entries.begin(),entries.end(),newest);
-    if (entries.size() > limit) { entries.resize(limit); truncated = true; }
-    return {{"ok",true},{"entries",entries},{"services",services},{"truncated",truncated}};
+    if (!cursor.empty() && found_positions<positions.size()) rotated=true;
+    std::size_t budget=16*1024*1024;
+    const auto needle=lower(search);
+    auto prime=[&](Reader& reader) {
+        while (reader.pending.is_null() && reader.offset>0) {
+            const auto end=reader.offset;
+            auto line=reader.previous(budget);
+            if (!line) return false;
+            auto item=Json::parse(*line,nullptr,false);
+            if (!item.is_object() || !item.value("timestamp",Json()).is_string() || !item.value("message",Json()).is_string() ||
+                item.value("service",Json())!=services[reader.service_index] || !item.value("level",Json()).is_string() ||
+                !item.value("pid",Json()).is_number_integer()) continue;
+            if (!level.empty() && item["level"]!=level) continue;
+            if (!needle.empty() && lower(item["message"].get<std::string>()+" "+item["timestamp"].get<std::string>()+" "+
+                services[reader.service_index]+" "+item["level"].get<std::string>()+" "+item["pid"].dump()).find(needle)==std::string::npos) continue;
+            reader.pending=std::move(item);reader.pending_end=end;
+        }
+        return true;
+    };
+    auto entries=Json::array();
+    while (entries.size()<limit) {
+        Reader* newest=nullptr;bool complete=true;
+        for (auto& reader:readers) {
+            if (!prime(reader)) {complete=false;break;}
+            if (!reader.pending.is_null() && (!newest || reader.pending["timestamp"]>newest->pending["timestamp"])) newest=&reader;
+        }
+        if (!complete || !newest) break;
+        entries.push_back(std::move(newest->pending));newest->pending=nullptr;
+    }
+    auto next=Json::array();
+    for (const auto& reader:readers) {
+        const auto offset=reader.pending.is_null()?reader.offset:reader.pending_end;
+        if (offset>0) next.push_back(Json::array({reader.service_index,reader.identity,static_cast<std::uint64_t>(offset)}));
+    }
+    std::string next_cursor;
+    if (!next.empty()) next_cursor=base64_encode(Json{{"s",service},{"l",level},{"q",search},{"f",next}}.dump());
+    return {{"ok",true},{"entries",entries},{"services",services},{"truncated",!next.empty()},
+            {"next_cursor",next_cursor},{"scan_limited",budget==0},{"rotated",rotated}};
 }
 }

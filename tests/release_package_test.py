@@ -77,7 +77,7 @@ def windows_imports(binary):
 def dependencies(binary):
     if os.name == "nt":
         imports = windows_imports(binary)
-        forbidden = ("vcruntime", "msvcp", "ucrtbased", "libssl", "libcrypto", "sqlite")
+        forbidden = ("vcruntime", "msvcp", "ucrtbased", "libssl", "libcrypto", "sqlite", "zlib", "zlib1")
         assert not any(name.startswith(forbidden) for name in imports), (binary.name, imports)
     elif sys.platform == "darwin":
         output = subprocess.check_output(["otool", "-L", str(binary)], text=True)
@@ -86,7 +86,7 @@ def dependencies(binary):
     else:
         output = subprocess.check_output(["ldd", str(binary)], text=True)
         assert "not found" not in output, output
-        assert not any(name in output for name in ("libssl", "libcrypto", "libsqlite", ".xmake")), output
+        assert not any(name in output for name in ("libssl", "libcrypto", "libsqlite", "libz.so", ".xmake")), output
 
 
 def verify_inventory(root, platform, arch):
@@ -112,6 +112,16 @@ def verify_inventory(root, platform, arch):
         if os.name != "nt":
             assert os.access(binary, os.X_OK), f"executable bit was lost: {name}"
         dependencies(binary)
+
+
+def verify_native_extraction(archive, root, platform, arch):
+    # The same bounded native decoder used by online updates must accept the
+    # actual OS-generated package, including its ZIP flags and PAX metadata.
+    suffix = ".exe" if platform == "windows" else ""
+    tests = ROOT / "build" / platform / arch / "release" / ("postplus-update-tests" + suffix)
+    assert tests.is_file(), "native updater test binary was not built"
+    subprocess.run([str(tests), "--archive", str(archive), str(root / "postplus-update.json")],
+                   cwd=ROOT, timeout=120, check=True)
 
 
 def native_smoke(root, directory):
@@ -171,6 +181,7 @@ def main():
     try:
         root = unpack(archive, directory, "postplus-" + release)
         verify_inventory(root, args.platform, args.arch)
+        verify_native_extraction(archive, root, args.platform, args.arch)
         native_smoke(root, directory)
     except BaseException:
         print(f"Package test diagnostics: {directory}", flush=True)

@@ -723,9 +723,9 @@ window.PostPlusI18n = (() => {
     "Legacy port values detected. Apply standard ports and save to switch to public defaults.":"检测到旧版端口，点击应用标准端口并保存，即可切换到公网标准端口。",
     "Every PostPlus listener must use a different nonzero port.":"每个 PostPlus 监听服务必须使用不同的非零端口。",
     "Update PostPlus":"升级 PostPlus",
-    "Check the latest stable GitHub Release. Download only changed files, review the affected services, then apply the prepared update.":"检查 GitHub 最新稳定版，仅下载有变化的文件。确认受影响的服务后，再应用已准备好的升级。",
+    "Check the latest stable GitHub Release. Download its complete package and replace only changed modules after reviewing the affected services.":"检查 GitHub 最新稳定版，下载完整安装包。确认受影响的服务后，仅替换有变化的模块。",
     "Check for updates":"检查更新",
-    "Download changed files":"下载变化的文件",
+    "Download update package":"下载升级安装包",
     "Apply prepared update":"应用已准备的升级",
     "Refresh update status":"刷新升级状态",
     "Reopen administration ↗":"重新打开管理后台 ↗",
@@ -734,17 +734,18 @@ window.PostPlusI18n = (() => {
     "Automatic updates are unavailable for this server. Install a supported release layout and restart the launcher.":"此服务器无法使用自动升级，请按支持的发行版目录布局安装，并重启启动器。",
     "Checking the latest GitHub Release…":"正在检查 GitHub 最新稳定版…",
     "Update completion could not be confirmed. Reopen administration, sign in, and refresh the update status.":"尚未确认升级是否完成，请重新打开管理后台、登录并刷新升级状态。",
-    "Downloading and verifying changed files for {version}…":"正在下载并验证 {version} 中有变化的文件…",
+    "Downloading and verifying the update package for {version}…":"正在下载并验证 {version} 升级安装包…",
     "Update {version} is prepared. Review the file and service list, then apply it.":"{version} 升级已准备好，请确认文件和服务列表后应用。",
     "Applying update {version}. The launcher will restart; administration may disconnect.":"正在应用 {version} 升级，启动器将重启，管理后台连接可能中断。",
     "Applying update {version}. Only affected services restart; administration may disconnect.":"正在应用 {version} 升级，仅重启受影响的服务，管理后台连接可能中断。",
     "Update {version} completed.":"已完成 {version} 升级。",
     "The update failed. Previous files and services were restored.":"升级失败，已恢复之前的文件和服务。",
     "The update failed. Review the server error and logs before retrying.":"升级失败，请先检查服务器错误和日志，再重试。",
-    "Release {version} is available. Download its changed files to prepare the update.":"已有 {version} 稳定版，下载其中变化的文件以准备升级。",
+    "Release {version} is available. Download its package to prepare the changed modules.":"已有 {version} 稳定版，下载完整安装包以准备变化的模块。",
     "PostPlus is up to date.":"PostPlus 已是最新版本。",
     "Affected services: {services}":"受影响的服务：{services}",
-    "Changed-file download: {bytes} bytes.":"变化文件下载量：{bytes} 字节。",
+    "Package download: {bytes} bytes.":"安装包下载量：{bytes} 字节。",
+    "Changed modules: {bytes} bytes.":"变化模块：{bytes} 字节。",
     "Server error: {error}":"服务器错误：{error}"
   });
   Object.assign(chinese,{"Outgoing delivery to other domains is disabled. SMTP submission can send local mail only.":"向其他域名发信已禁用，SMTP 客户端发信服务仅能用于本域互发。"});
@@ -863,6 +864,57 @@ window.PostPlusI18n = (() => {
   "Unable to check recent verification codes.": "无法查询近期验证码。"
 });
   Object.assign(chinese,{"Choose an existing mailbox in this server's domain.":"请选择本服务器域名下的已有邮箱。","This forwarding pattern already exists.":"该转发规则已存在。"});
+  Object.assign(chinese,{
+    "Invite to mailbox":"邀请注册邮箱","Search accounts":"搜索账号","No accounts match this search.":"没有匹配的账号。","{shown} of {total} accounts":"显示 {shown} / {total} 个账号",
+    "Mailbox":"邮箱","Registrations":"注册次数","Expires":"到期时间","Close":"关闭","Delete account":"删除账号","Delete account?":"删除账号？","Delete account {username}":"删除账号 {username}",
+    "Deletion pending":"等待清理","Finish deleting account":"完成账号删除","Finish deletion":"完成删除","User account deleted.":"用户账号已删除。",
+    "This permanently removes the mailbox, stored mail, API keys, invitations and forwarding rules to this inbox. Pending mail to or from this account is removed.":"这将永久删除此邮箱及其邮件、API 密钥、邀请链接和指向此收件箱的转发规则，同时删除与此账号相关的待投递邮件。",
+    "Type the complete email address to confirm":"输入完整邮箱地址以确认","Type the complete email address to confirm account deletion.":"请输入完整邮箱地址以确认删除账号。",
+    "You cannot delete your signed-in account.":"不能删除当前登录的账号。","The last administrator cannot be deleted.":"不能删除最后一个管理员。",
+    "The account was not found. Refresh the account list.":"找不到此账号，请刷新账号列表。","Account deletion changed. Refresh the account list.":"账号删除状态已更改，请刷新账号列表。",
+    "Finish deleting this account before reusing its address.":"请完成此账号的删除，再重新使用该邮箱地址。","The account is disabled. Retry deletion to finish removing its mailbox.":"账号已禁用，请重试删除以完成邮箱清理。"
+  });
+  Object.assign(chinese,{
+    "Search logs":"搜索日志","Event, service or process ID":"事件、服务或进程 ID","Load more":"查看更多",
+    "Showing {count} events.":"已显示 {count} 条事件。","Load more to search older retained logs.":"点击查看更多以查阅更早保留的日志。",
+    "End of retained logs.":"已到保留日志末尾。","Some older logs expired during browsing. Refresh to start again.":"部分旧日志已在浏览时轮转过期，请刷新以重新加载。"
+  });
+  Object.assign(chinese,{
+  "DNS": "DNS",
+  "DNS uses the saved server settings. Publish these records at your DNS provider, then test them here without saving or restarting PostPlus.": "DNS 使用服务器已保存的设置。在 DNS 服务商处添加记录后，可在此单独测试，无需保存配置或重启 PostPlus。",
+  "Expected DNS values (optional)": "预期 DNS 记录值（可选）",
+  "Enter your actual public IPs to compare them with DNS and prepare an exact SPF policy. For a relay or an existing policy, enter the values you want to keep. These fields are only used for this check.": "填写实际公网 IP，用于核对 DNS 并生成精确的 SPF 记录。如果使用中继或已有策略，请填写需要保留的记录值。此处内容仅用于本次检查。",
+  "SPF TXT value": "SPF TXT 记录值",
+  "Full DKIM record name": "完整 DKIM 记录名",
+  "Reload DNS recommendations": "重新加载 DNS 推荐记录",
+  "Test DNS and connectivity": "测试 DNS 与连通性",
+  "Public service connectivity": "公网服务连通性",
+  "Connection tests run from this server to its published public addresses. A failure may be caused by firewall or NAT loopback rules; a success does not prove that another network can reach the server. These tests do not validate TLS certificates or mail delivery.": "连通性检查由本服务器连接 DNS 中发布的公网地址。防火墙或 NAT 回环规则可能导致失败；成功也不代表其他网络一定可以访问。此检查不验证 TLS 证书或邮件投递。",
+  "Set PTR at your VPS or IP provider. Keep A/AAAA and MX in DNS-only mode. Merge authorized senders into one SPF record and publish only one DMARC policy. Existing matching records remain listed here.": "PTR 需在 VPS 或 IP 服务商处设置。A/AAAA 和 MX 应使用仅 DNS 模式，将授权发信方合并至一条 SPF，并仅保留一条 DMARC。已经匹配的记录也会在此完整展示。",
+  "Published — verify the address": "已发布，请核实地址",
+  "Checking DNS and connectivity…": "正在检查 DNS 与连通性…",
+  "Checking public records and configured service ports…": "正在检查公网记录与已配置的服务端口…",
+  "Loading DNS recommendations…": "正在加载 DNS 推荐记录…",
+  "Expected values changed. Run the test again.": "预期记录值已修改，请重新测试。",
+  "DNS and connectivity checked at {time}.": "DNS 与连通性检查时间：{time}。",
+  "All recommended records are listed, including records already published. Enter expected values or run a test to see current public DNS.": "这里列出全部推荐记录，包括已经发布的记录。可填写预期值，或直接测试以查看当前公网 DNS。",
+  "PTR · reverse DNS": "PTR · 反向 DNS",
+  "Set at your IP provider": "在 IP 服务商处设置",
+  "Load the DKIM public key under Outgoing mail, or enter your relay's public record above.": "在“出站邮件”中加载 DKIM 公钥，或在上方填写中继服务商的公开记录。",
+  "MX value starts with priority 10, followed by the mail server hostname. Use separate fields if your DNS provider asks for them.": "MX 记录值先填优先级 10，再填邮件服务器主机名。如果 DNS 服务商提供独立字段，请分别填写。",
+  "Published: {values}": "已发布：{values}",
+  "Lookup failed; the published value is unknown.": "查询失败，暂时无法确认已发布的记录值。",
+  "The mail hostname resolves to a private or reserved address. Public connectivity was not tested for that address.": "邮件主机名解析到了内网或保留地址，因此没有针对该地址测试公网连通性。",
+  "TCP connection succeeded": "TCP 连接成功",
+  "TCP connection failed": "TCP 连接失败",
+  "Test time limit reached": "已达到测试时间限制",
+  "Not tested — no public address available": "未测试，尚无可用的公网地址",
+  "Reachable address": "可连通的地址",
+  "Unreachable address": "无法连通的地址",
+  "Configure a public mail domain and mail server hostname first.": "请先配置有效的公网邮箱域名与邮件服务器主机名。",
+  "Only expected public DNS values may be supplied. Hosts and ports come from saved settings.": "只能提交预期的公网 DNS 记录值；主机名与端口由服务器已保存的配置决定。",
+  "Enter public IPv4 and IPv6 addresses in their matching fields.": "请在对应字段中填写公网 IPv4 和 IPv6 地址。"
+});
   function error(data) {
     if(data?.code==="unknown_destination" || data?.code==="nonlocal_destination")return t("Choose an existing mailbox in this server's domain.");
     if(data?.code==="duplicate_forwarding")return t("This forwarding pattern already exists.");

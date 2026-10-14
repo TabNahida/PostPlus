@@ -60,7 +60,7 @@ jobs:
         run: xmake pack -f ${{ matrix.format }} --autobuild=n -o build/packages postplus
       - name: Verify and run the extracted package
         run: python tests/release_package_test.py --packages build/packages --platform ${{ matrix.platform }} --arch ${{ matrix.arch }}
-      - name: Generate native updater module assets
+      - name: Generate verified archive component metadata
         run: python scripts/release_manifest.py modules --packages build/packages --platform ${{ matrix.platform }} --arch ${{ matrix.arch }}
       - name: Upload verified release archive
         uses: actions/upload-artifact@v4
@@ -102,6 +102,10 @@ jobs:
         shell: bash
         run: |
           version="${GITHUB_REF_NAME#v}"
+          # Keep 0.3.1 as the /latest bridge for immutable 0.3.0 clients.
+          # New clients select the highest stable semantic version themselves.
+          latest=false
+          if [ "$version" = "0.3.1" ]; then latest=true; fi
           gh release create "$GITHUB_REF_NAME" release-assets/* \
-            --verify-tag --title "PostPlus $version" \
+            --verify-tag --latest="$latest" --title "PostPlus $version" \
             --notes-file "docs/releases/$version.md"
