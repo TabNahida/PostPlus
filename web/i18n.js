@@ -2,6 +2,19 @@
 // Only an explicit choice is persisted. A fresh browser always starts in English.
 window.PostPlusI18n = (() => {
   const chinese = {
+    "Review server settings":"检查服务器设置",
+    "{count} settings changed":"已更改 {count} 处设置",
+    "1 setting changed":"已更改 1 处设置",
+    "Back to messages":"返回邮件列表",
+    "Checking recent mail…":"正在检查近期邮件…",
+    "Control service availability. Review unsaved settings before continuing.":"管理服务的运行状态。继续前请检查尚未保存的设置。",
+    "Existing invitations":"已有邀请",
+    "Forward an exact mailbox address or alias to a local inbox. Wildcards are also supported: * matches any text and ? matches one character. Exact rules apply to existing accounts; wildcard rules apply only to unregistered addresses. Delivery goes directly to the destination inbox without further forwarding.":"将指定邮箱地址或别名转发到本域收件箱，也支持通配符：* 匹配任意文本，? 匹配单个字符。精确规则可用于已有账号；通配符规则仅匹配未注册地址。邮件直接送达目标收件箱，不会继续转发。",
+    "From recent {folder} mail. Copying does not mark it as read.":"来自近期的{folder}邮件。复制不会将邮件标记为已读。",
+    "Mail forwarding":"邮件转发",
+    "Mailbox address or pattern":"邮箱地址或匹配规则",
+    "No unsaved changes":"没有未保存的更改",
+    "Restart and shutdown":"重启与关机",
     "Forwarded message":"转发邮件",
     "Formatted message (scroll to read)":"格式化邮件（滚动阅读）",
     "Show formatted message":"查看格式化邮件",

@@ -3,7 +3,7 @@ window.PostPlusVerificationCode = (() => {
   const t = (...args) => PostPlusI18n.t(...args);
   const codePattern = /^(?:[0-9]{4,8}|(?=[A-Za-z0-9]{6,10}$)(?=.*[A-Za-z])(?=.*[0-9])[A-Za-z0-9]+)$/;
   function create(root, {request, prefix="verification-code"} = {}) {
-    let disposed=false, loadVersion=0, revision=0, current=null, timer=null, loading=false, error="", copied=false, selected=false;
+    let disposed=false, loadVersion=0, revision=0, current=null, timer=null, loading=false, error="", copied=false, selected=false, folder="INBOX";
     function node(tag,className) {const value=document.createElement(tag);if(className)value.className=className;return value;}
     root.replaceChildren();root.hidden=true;
     const header=node("div","verification-code-header"),title=node("h2"),copy=node("button","button secondary"),details=node("div","verification-code-details"),code=node("input","verification-code-value"),source=node("div","verification-code-source"),subject=node("p"),sender=node("p"),received=node("p"),status=node("p","verification-code-status");
@@ -17,7 +17,7 @@ window.PostPlusVerificationCode = (() => {
       code.value=current?.code||"";
       subject.textContent=current?.subject||t("(No subject)");sender.textContent=current?.from||"";
       received.textContent=current?t("Received {time}",{time:new Date(current.received_at*1000).toLocaleString(PostPlusI18n.language,{month:"short",day:"numeric",hour:"2-digit",minute:"2-digit"})}):"";
-      status.textContent=error||t(loading?"Checking recent inbox mail…":copied?"Verification code copied.":selected?"Code selected. Copy it with Ctrl+C or your device's copy command.":current?"From recent inbox mail. Copying does not mark it as read.":"No recent verification code.");
+      status.textContent=error||(loading?t("Checking recent mail…"):copied?t("Verification code copied."):selected?t("Code selected. Copy it with Ctrl+C or your device's copy command."):current?t("From recent {folder} mail. Copying does not mark it as read.",{folder:t(folder==="Trash"?"Trash":"Inbox")}):t("No recent verification code."));
       status.classList.toggle("error",Boolean(error));
     }
     function accept(value){
@@ -30,9 +30,12 @@ window.PostPlusVerificationCode = (() => {
       }
       render();
     }
-    async function load(){
-      if(disposed)return;const version=++loadVersion;loading=true;error="";copied=selected=false;revision++;root.hidden=false;render();
-      try {const value=await request("/api/verification-code",{quiet:true});if(disposed||version!==loadVersion)return;loading=false;accept(value);}
+    async function load(selectedFolder="INBOX"){
+      if(disposed)return;
+      if(!["INBOX","Trash"].includes(selectedFolder)){reset();return;}
+      if(selectedFolder!==folder){reset();folder=selectedFolder;}
+      const version=++loadVersion;loading=true;error="";copied=selected=false;revision++;root.hidden=false;render();
+      try {const value=await request(`/api/verification-code?folder=${encodeURIComponent(folder)}`,{quiet:true});if(disposed||version!==loadVersion)return;loading=false;accept(value);}
       catch(failure){if(disposed||version!==loadVersion)return;loading=false;error=failure?.message||t("Unable to check recent verification codes.");accept(null);}
     }
     copy.addEventListener("click",async()=>{

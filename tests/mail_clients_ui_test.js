@@ -25,7 +25,7 @@ class Element {
 function fixture(config){
   let current=config;
   const element=new Element(),sandbox={window:{},URL,navigator:{},document:{createElement:tag=>new Element(tag),documentElement:{lang:"en"},querySelectorAll:()=>[],dispatchEvent(){},addEventListener(){}},localStorage:{getItem:()=>null,setItem(){}},CustomEvent:class{constructor(type){this.type=type;}}};
-  for(const name of ["i18n","mail-clients","settings"]){vm.runInNewContext(fs.readFileSync(path.join(root,`web/${name}.js`),"utf8"),sandbox);sandbox[{i18n:"PostPlusI18n","mail-clients":"PostPlusMailClients",settings:"PostPlusSettings"}[name]]=sandbox.window[{i18n:"PostPlusI18n","mail-clients":"PostPlusMailClients",settings:"PostPlusSettings"}[name]];}
+  for(const name of ["i18n","size","mail-clients","settings"]){vm.runInNewContext(fs.readFileSync(path.join(root,`web/${name}.js`),"utf8"),sandbox);sandbox[{i18n:"PostPlusI18n",size:"PostPlusSize","mail-clients":"PostPlusMailClients",settings:"PostPlusSettings"}[name]]=sandbox.window[{i18n:"PostPlusI18n",size:"PostPlusSize","mail-clients":"PostPlusMailClients",settings:"PostPlusSettings"}[name]];}
   const api=sandbox.PostPlusMailClients,component=api.create(element,{readConfig:()=>current,prefix:"test"});
   const id=name=>descendants(element).find(item=>item.id===`test-${name}`);
   return {api,component,element,sandbox,id,set(value){current=value;component.render();}};
@@ -71,11 +71,30 @@ async function run(){
   f.component.dispose();assert.equal(f.element.children.length,0);
   // Use the production settings editor: filling a preset must remain a draft until read/save.
   const settingsRoot=new Element(),schema=[{key:"domain",group:"general",type:"text",label:"Mail domain"},{key:"mail_hostname",group:"network",type:"text",label:"Mail server hostname"},{key:"tls_certificate",group:"security",type:"text",label:"TLS certificate file"},{key:"tls_private_key",group:"security",type:"text",label:"TLS private key file"},...Object.keys(secure.ports).map(name=>({key:"ports."+name,group:"network",type:"number",label:name,min:["submission","smtps","pop3s","imaps"].includes(name)?0:1,max:65535}))];
-  const editor=f.sandbox.PostPlusSettings.create(settingsRoot,schema,secure,{prefix:"config",mailClients:true});
+  const changes=[];
+  const editor=f.sandbox.PostPlusSettings.create(settingsRoot,schema,secure,{prefix:"config",mailClients:true,onChange:count=>changes.push(count)});
+  assert.equal(changes.at(-1),0);
   assert.deepEqual(plain(editor.read()),{},"Loading existing settings does not change custom ports");
   const preset=descendants(settingsRoot).find(item=>item.id==="config-standard-ports");assert.ok(preset);await preset.fire("click");
   const changed=plain(editor.read());assert.equal(changed.ports.smtp,25);assert.equal(changed.ports.web,undefined,"Unchanged web443 is omitted from the save patch");assert.equal(changed.ports.submission,587);assert.equal(changed.ports.admin,undefined);assert.equal(changed.ports.auth,undefined);assert.equal(secure.ports.smtp,2525,"Preset never mutates the loaded configuration object");
+  assert.equal(changes.at(-1),7,"Programmatic preset updates the count by individual changed ports");
   editor.dispose();
+  const draftRoot=new Element(),draftSchema=[
+    {key:"domain",group:"general",type:"text",label:"Mail domain"},
+    {key:"max_message_bytes",group:"storage",type:"number",unit:"bytes",label:"Message size",min:1,max:104857600},
+    {key:"smarthost_password",group:"delivery",type:"password",label:"Relay password"},
+    {key:"allow_insecure_auth",group:"security",type:"boolean",label:"Allow insecure authentication"},
+    {key:"test_lines",group:"general",type:"lines",label:"Lines"},
+    {key:"test_json",group:"general",type:"json",label:"JSON"}];
+  const counts=[],draft=f.sandbox.PostPlusSettings.create(draftRoot,draftSchema,{domain:"example.com",max_message_bytes:1048576,allow_insecure_auth:false,test_lines:["a","b"],test_json:{a:1}},{secretStatus:{smarthost_password:true},onChange:count=>counts.push(count)});
+  const field=key=>descendants(draftRoot).find(item=>item.dataset.configKey===key);
+  field("domain").value=" example.com ";field("test_lines").value=" a \n b \n";field("test_json").value='{ "a": 1 }';draft.notify();assert.equal(counts.at(-1),0,"Whitespace-equivalent typed values are unchanged");assert.deepEqual(plain(draft.read()),{});
+  const unit=descendants(draftRoot).find(item=>item.id==="settings-max_message_bytes-unit");unit.value="KiB";await unit.fire("change");draft.notify();assert.equal(field("max_message_bytes").value,"1024");assert.equal(counts.at(-1),0,"Changing a display unit preserves byte equality");
+  field("max_message_bytes").value="oops";await draftRoot.fire("input");assert.equal(counts.at(-1),1);assert.equal(field("max_message_bytes").focused,undefined,"Counting an invalid draft does not validate or move focus");
+  field("max_message_bytes").value="1024";field("allow_insecure_auth").value="true";field("smarthost_password").value="new secret";draft.notify();assert.equal(counts.at(-1),2);
+  const clear=descendants(draftRoot).find(item=>item.type==="checkbox");clear.checked=true;await clear.fire("change");draft.notify();assert.equal(counts.at(-1),2,"Clearing and editing the same secret counts as one setting");assert.equal(plain(draft.read()).clear_smarthost_password,true);
+  clear.checked=false;await clear.fire("change");field("allow_insecure_auth").value="false";draft.notify();assert.equal(counts.at(-1),0,"Reverting settings returns to zero");
+  const previous=counts.length;draft.dispose();await draftRoot.fire("input");assert.equal(counts.length,previous,"Disposed editor stops emitting draft counts");
   for(const name of ["setup","admin"]){const html=fs.readFileSync(path.join(root,`web/${name}.html`),"utf8");assert.equal(html.split('src="/mail-clients.js"').length-1,1);}
   console.log("Mail client UI checks passed: preserved ports, explicit preset, enabled TLS services, SRV/discovery, local mode, copy fallback, localization and stale replies.");
 }

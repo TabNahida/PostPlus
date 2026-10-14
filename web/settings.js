@@ -36,6 +36,18 @@ window.PostPlusSettings = (() => {
     const controls = new Map();
     let deliverySection=null,dkimPanel=null,clientPanel=null,dnsPanel=null,disposed=false;
     const clientEvents=[];
+    function signature({field,input,sizeControl}) {
+      const value=sizeControl ? sizeControl.read() : field.type==="number" ? (input.value.trim()&&Number.isSafeInteger(Number(input.value))?Number(input.value):{invalid:input.value}) : field.type==="boolean" ? input.value==="true" : field.type==="lines" ? input.value.split(/\r?\n/).map(line=>line.trim()).filter(Boolean) : field.type==="json" ? JSON.parse(input.value) : field.type==="password" ? input.value : input.value.trim();
+      return JSON.stringify(value);
+    }
+    function changed(control) {
+      if(control.field.readonly)return false;
+      if(control.clearPassword?.checked)return true;
+      if(control.field.type==="password"&&!control.input.value)return false;
+      try{return signature(control)!==control.baseline;}catch{return true;}
+    }
+    function changedCount(){return [...controls.values()].filter(changed).length;}
+    function notify(){if(!disposed)options.onChange?.(changedCount());}
     const prefix = options.prefix || "settings";
     root.replaceChildren();
     for (const [group, [title, description]] of Object.entries(groups)) {
@@ -96,7 +108,8 @@ window.PostPlusSettings = (() => {
           }
         }
         input.addEventListener("input", () => input.removeAttribute("aria-invalid"));
-        controls.set(field.key,{field,input,initial:sizeControl ? Number(initial) : input.value,clearPassword,sizeControl});
+        const control={field,input,initial:sizeControl ? Number(initial) : input.value,clearPassword,sizeControl};
+        control.baseline=signature(control);controls.set(field.key,control);
         grid.append(wrapper);
       }
       section.append(grid);
@@ -126,7 +139,7 @@ window.PostPlusSettings = (() => {
         button.addEventListener("click",()=>{
           const config=clientConfig(),secure=Boolean(config.tls_certificate?.trim()&&config.tls_private_key?.trim());
           for(const [name,value] of Object.entries(PostPlusMailClients.standardPorts(secure))){const control=controls.get("ports."+name);if(control&&!control.field.readonly){control.input.value=String(value);control.input.removeAttribute("aria-invalid");}}
-          hint.dataset.i18n="Standard ports are filled in. Save the configuration to apply them.";hint.textContent=t(hint.dataset.i18n);legacy.hidden=!PostPlusMailClients.legacyPorts(clientConfig().ports);clientPanel.render();
+          hint.dataset.i18n="Standard ports are filled in. Save the configuration to apply them.";hint.textContent=t(hint.dataset.i18n);legacy.hidden=!PostPlusMailClients.legacyPorts(clientConfig().ports);clientPanel.render();notify();
         });
         const updateClients=event=>{if(!disposed&&!event.target.closest?.(".mail-clients")){legacy.hidden=!PostPlusMailClients.legacyPorts(clientConfig().ports);clientPanel?.render();}};for(const event of ["input","change"]){root.addEventListener(event,updateClients);clientEvents.push([event,updateClients]);}
       }
@@ -163,9 +176,10 @@ window.PostPlusSettings = (() => {
     function read({changedOnly = true} = {}) {
       dkimPanel?.check();
       const result = {};
-      for (const [key,{field,input,initial,clearPassword,sizeControl}] of controls) {
+      for (const [key,control] of controls) {
+        const {field,input,initial,clearPassword,sizeControl}=control;
         if (clearPassword?.checked) {result.clear_smarthost_password = true; continue;}
-        if (field.readonly || (!sizeControl && changedOnly && input.value === initial)) continue;
+        if (field.readonly || (changedOnly && !changed(control))) continue;
         if (field.type === "password" && !input.value) continue;
         let value;
         try {
@@ -180,7 +194,9 @@ window.PostPlusSettings = (() => {
       }
       return result;
     }
-    return {read,translate:() => {PostPlusI18n.apply(root);dkimPanel?.render();clientPanel?.translate();dnsPanel?.translate();},dispose(){disposed=true;dkimPanel?.dispose();clientPanel?.dispose();dnsPanel?.dispose();for(const [event,handler] of clientEvents)root.removeEventListener(event,handler);},highlight:key => {const control = controls.get(key); if(control) reveal(control.input);},clearSecrets:() => controls.forEach(({field,input}) => {if(field.type === "password") input.value = "";})};
+    for(const event of ["input","change"]){root.addEventListener(event,notify);clientEvents.push([event,notify]);}
+    notify();
+    return {read,changedCount,notify,translate:() => {PostPlusI18n.apply(root);dkimPanel?.render();clientPanel?.translate();dnsPanel?.translate();},dispose(){disposed=true;dkimPanel?.dispose();clientPanel?.dispose();dnsPanel?.dispose();for(const [event,handler] of clientEvents)root.removeEventListener(event,handler);},highlight:key => {const control = controls.get(key); if(control) reveal(control.input);},clearSecrets:() => {controls.forEach(({field,input}) => {if(field.type === "password") input.value = "";});notify();}};
   }
   return {create};
 })();

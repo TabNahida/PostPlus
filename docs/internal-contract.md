@@ -32,7 +32,7 @@ Minimum length counts UTF-8 Unicode code points. Optional categories require ASC
 
 - forwarding_list: limit1..1000, offset0..10000 -> ok,rules,total; forwarding_create: pattern,destination -> ok,rule; forwarding_delete: positive id -> ok,deleted. Patterns/destinations are confined to the configured domain and targets must exist in auth.
 - resolve_recipient: recipient, optional queue_id -> ok,exists,recipient,destination,forwarded,rule. Existing accounts precede local globs. Queue resolution uses durable accepted routes. Enqueue accepts recipient_routes keyed by original local address with destination and nullable rule; canonical destinations are deduplicated without rewriting raw mail.
-- verification_candidates: username, max_age_seconds1..86400(default900), limit1..50(default30) -> ok,messages:[{id,raw,internal_date}]. Newest eligible INBOX messages, excluding drafts/future dates and bounded by a source-byte budget; no flag changes. Raw uses the same binary-safe codec.
+- verification_candidates: username, folder(INBOX default or Trash only), max_age_seconds1..86400(default900), limit1..50(default30) -> ok,messages:[{id,raw,internal_date}]. Newest eligible messages in the selected folder, excluding drafts/future dates and bounded by a source-byte budget; no flag changes. Raw uses the same binary-safe codec.
 
 SQLite owned exclusively by storage process; auth owns a separate auth SQLite DB.
 

@@ -25,25 +25,25 @@ SHA-256 value against its entry before extracting it:
 
 ```powershell
 # Windows PowerShell
-Get-FileHash .\postplus-0.3.2-windows-x64.zip -Algorithm SHA256
-Expand-Archive .\postplus-0.3.2-windows-x64.zip -DestinationPath .
-Set-Location .\postplus-0.3.2
+Get-FileHash .\postplus-0.3.3-windows-x64.zip -Algorithm SHA256
+Expand-Archive .\postplus-0.3.3-windows-x64.zip -DestinationPath .
+Set-Location .\postplus-0.3.3
 .\postplus.exe
 ```
 
 ```sh
 # Linux
-sha256sum postplus-0.3.2-linux-x86_64.tar.gz
-tar -xzf postplus-0.3.2-linux-x86_64.tar.gz
-cd postplus-0.3.2
+sha256sum postplus-0.3.3-linux-x86_64.tar.gz
+tar -xzf postplus-0.3.3-linux-x86_64.tar.gz
+cd postplus-0.3.3
 ./postplus
 ```
 
 ```sh
 # macOS
-shasum -a 256 postplus-0.3.2-macosx-arm64.tar.gz
-tar -xzf postplus-0.3.2-macosx-arm64.tar.gz
-cd postplus-0.3.2
+shasum -a 256 postplus-0.3.3-macosx-arm64.tar.gz
+tar -xzf postplus-0.3.3-macosx-arm64.tar.gz
+cd postplus-0.3.3
 ./postplus
 ```
 
@@ -81,14 +81,18 @@ starts all ten services, checks both web interfaces, and stops the native server
 
 ## Release process
 
-The [release workflow](../.github/workflows/release.yml) runs the complete
-Debug/Release test matrix on Linux, Windows, and macOS. Separate native jobs
-build the three release packages and run the extracted-package checks.
-Only when every job passes does the publication job calculate `SHA256SUMS`
-and publish the version tag with all three archives, the updater manifest and
-hash-addressed module assets. Complete archives include the installed component
-baseline required for subsequent incremental updates. Only that final job has
-repository write permission.
+The [release workflow](../.github/workflows/release.yml) reuses successful
+branch CI for the exact release commit. If none exists, it runs the complete
+Debug/Release test matrix on Linux, Windows, and macOS. Failed or cancelled
+branch checks block publication. Three native packaging jobs run in parallel
+and test the extracted packages.
+
+Only after the required checks and packages succeed does publication calculate
+`SHA256SUMS` and publish the stable release as Latest. Releases contain eight
+assets: three complete packages, three platform metadata files, the combined
+updater manifest, and checksums. Complete archives include the component
+baseline used to replace only changed modules during later updates. Only the
+final publication job has repository write permission.
 
 A manual run on a branch uploads tested packages as workflow artifacts without
 publishing a release. To publish, update `set_version` and add matching release

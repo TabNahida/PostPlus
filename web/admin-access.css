@@ -1,0 +1,59 @@
+/* Account management uses one disclosure rhythm and keeps secret actions above history. */
+#view-accounts>.settings-group {
+  margin:0 0 18px;
+  padding:20px 24px;
+}
+#view-accounts>.settings-group>summary {
+  display:list-item;
+  min-height:26px;
+  font-size:17px;
+  line-height:26px;
+  font-weight:600;
+  list-style-position:inside;
+}
+#view-accounts>.settings-group[open]>summary { margin-bottom:22px; }
+#view-accounts>.settings-group>.field-hint { margin:0 0 18px; max-width:88ch; }
+.mail-forwarding-panel .access-form { margin:24px 0; gap:20px 24px; }
+.mail-forwarding-panel .access-form>label { gap:11px; }
+.mail-forwarding-panel .access-form>.button { min-height:46px; }
+.invitation-dialog { width:min(940px,calc(100vw - 32px)); }
+.invitation-dialog>.dialog-body { padding:24px 28px 28px; }
+.invitation-dialog .access-section>.field-hint { margin:0 0 22px; max-width:80ch; }
+.invitation-dialog .access-form { gap:22px 24px; margin:0 0 26px; }
+.invitation-dialog .access-form label { gap:10px; }
+.invitation-dialog .invitation-output { margin:0 0 28px; padding:20px; background:var(--surface-soft); }
+.invitation-dialog .invitation-output>.field-hint { margin:0 0 14px; }
+.invitation-dialog .invitation-output textarea { margin:0 0 18px; min-height:90px; }
+.invitation-link-actions { display:flex; align-items:center; flex-wrap:wrap; gap:12px; }
+.invitation-list>h3 { margin:0 0 14px; font-size:15px; font-weight:600; }
+.invitation-list>.table-scroll { margin:0; max-height:320px; overflow:auto; overscroll-behavior:contain; }
+.invitation-list thead { position:sticky; top:0; z-index:1; background:var(--surface-raised); }
+.account-delete-dialog { width:min(560px,calc(100vw - 32px)); }
+.account-delete-dialog .dialog-header { padding:26px 30px; }
+.account-delete-dialog .dialog-body { padding:24px 30px 30px; }
+.account-delete-dialog .dialog-body>p { margin:0 0 20px; line-height:1.85; }
+.account-delete-dialog .account-delete-name {
+  padding:12px 16px;
+  border:1px solid var(--line);
+  border-radius:7px;
+  background:var(--surface-soft);
+}
+.account-delete-dialog .dialog-body>label { display:flex; flex-direction:column; gap:12px; margin:26px 0 0; line-height:1.6; }
+.account-delete-dialog .dialog-body input { margin:0; }
+.account-delete-dialog .dialog-body>.form-error { margin:20px 0 0; }
+.account-delete-dialog .dialog-footer { padding:22px 30px; gap:20px; }
+@media(max-width:700px) {
+  #view-accounts>.settings-group { padding:18px 20px; }
+  .mail-forwarding-panel .access-form { gap:22px; }
+  .invitation-dialog>.dialog-body { padding:22px 20px; }
+  .invitation-dialog .access-form { gap:20px; }
+  .invitation-dialog .invitation-output { padding:16px; }
+  .invitation-list>.table-scroll { max-height:280px; }
+  .account-delete-dialog .dialog-header { padding:22px; }
+  .account-delete-dialog .dialog-body { padding:22px 22px 28px; }
+  .account-delete-dialog .dialog-footer { padding:20px 22px; }
+}
+@media(max-width:420px) {
+  .invitation-link-actions>.button { flex:1 1 auto; }
+  .account-delete-dialog .dialog-footer>.button { flex:1; }
+}

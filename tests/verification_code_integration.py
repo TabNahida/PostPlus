@@ -35,8 +35,9 @@ def run(s):
     assert s.http("web", "GET", ROUTE)[0] == 401
     assert s.http("admin", "GET", ROUTE, headers=administrator)[0] == 404
 
-    def check(headers, expected=None, identifier=None):
-        status, response_headers, result = s.http("web", "GET", ROUTE, headers=headers)
+    def check(headers, expected=None, identifier=None, folder=None):
+        route = ROUTE if folder is None else ROUTE + "?folder=" + folder
+        status, response_headers, result = s.http("web", "GET", route, headers=headers)
         assert status == 200 and result["ok"], (status, result)
         assert response_headers["Cache-Control"] == "no-store", response_headers
         if expected is None:
@@ -67,6 +68,17 @@ def run(s):
     for query in ("username=" + bob, "message_id=" + foreign, "folder=Archive", "max_age_seconds=86400"):
         assert s.http("web", "GET", ROUTE + "?" + query, headers=a)[0] == 400, query
     assert s.http("web", "POST", ROUTE, {}, a)[0] == 404
+    for query in ("folder=Sent", "folder=Drafts", "folder=Junk", "folder=", "folder=Trash&username=" + bob, "folder=INBOX&folder=Trash"):
+        assert s.http("web", "GET", ROUTE + "?" + query, headers=a)[0] == 400, query
+    trash_code = append(message("Verification code: 876543"), folder="Trash")
+    check(a, "876543", trash_code, folder="Trash")
+    check(a, folder="INBOX")
+    check(b, folder="Trash")
+    assert s.rpc("storage", op="verification_candidates", username=alice, folder="Trash")["messages"][0]["id"] == trash_code
+    assert s.http("storage", "POST", "/rpc", {"op":"verification_candidates", "username":alice, "folder":"Sent"},
+                  {"Authorization":"Bearer " + s.token})[0] == 400
+    assert s.rpc("storage", op="delete", username=alice, ids=[trash_code], permanent=True)["ok"]
+    check(a, folder="Trash")
     print("PASS authenticated own-account lookup, empty/ordinary mail, fixed filters and admin portal isolation", flush=True)
 
     clear()
@@ -116,6 +128,11 @@ def run(s):
     key, key_id = issued["key"], issued["api_key"]["id"]
     bearer = {"Authorization": "Bearer " + key}
     check(bearer, "006789", chinese)
+    trash_code = append(message("Verification code: 987654"), folder="Trash")
+    check(bearer, "987654", trash_code, folder="Trash")
+    check(bearer, "006789", chinese, folder="INBOX")
+    assert s.rpc("storage", op="delete", username=alice, ids=[trash_code], permanent=True)["ok"]
+    before = s.rpc("storage", op="list", username=alice)
     for route in ("/api/messages", "/api/folders", "/api/session", "/api/api-keys"):
         assert s.http("web", "GET", route, headers=bearer)[0] == 403, route
     assert s.http("admin", "GET", ROUTE, headers=bearer)[0] == 404

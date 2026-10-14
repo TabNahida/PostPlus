@@ -5,6 +5,7 @@ const descendants=node=>node.children.flatMap(child=>[child,...descendants(child
 class Element {
   constructor(tag="div"){this.tagName=tag.toUpperCase();this.children=[];this.events=new Map();this.attributes={};this.value="";this.hidden=false;this.disabled=false;this.checked=false;this.text="";this.parentNode=null;}
   append(...nodes){for(const node of nodes){if(node.parentNode)node.remove();node.parentNode=this;this.children.push(node);}}
+  insertBefore(node,before){assert.equal(before.parentNode,this);if(node.parentNode)node.remove();node.parentNode=this;this.children.splice(this.children.indexOf(before),0,node);}
   replaceChildren(...nodes){for(const child of this.children)child.parentNode=null;this.children=[];this.text="";this.append(...nodes);}
   set textContent(value){this.replaceChildren();this.text=String(value);}
   get textContent(){return this.text+this.children.map(child=>child.textContent).join("");}
@@ -59,6 +60,8 @@ async function invitationChecks(){
   const pending=form.fire("submit"),request=f.requests.at(-1),response={registration_url:"https://mail.example.com/register#pp_inv_once"};
   assert.equal(request.options.method,"POST");assert.equal(request.options.body.name,"friend");assert.equal(request.options.body.localpart,"member");assert.equal(request.options.body.expires_in_days,7);assert.equal(request.options.body.max_uses,1);
   request.resolve(response);await tick();const output=f.find("Invitation link");assert.equal(response.registration_url,"");assert.match(output.value,/#pp_inv_once$/);f.requests.at(-1).resolve({invitations:[]});await pending;
+  const panel=output.parentNode.parentNode,list=panel.children.find(node=>node.className==="invitation-list");
+  assert.ok(panel.children.indexOf(output.parentNode)<panel.children.indexOf(list),"One-time link and its copy actions appear above invitation history");
   await f.button("Copy invitation link").fire("click");assert.match(f.copies[0],/#pp_inv_once$/);await f.button("Done").fire("click");assert.equal(output.value,"");assert.equal(output.parentNode.hidden,true);
   const late=form.fire("submit"),lateRequest=f.requests.at(-1),lateResponse={registration_url:"https://mail.example.com/register#late_secret"};component.dispose();lateRequest.resolve(lateResponse);await late;
   assert.equal(lateResponse.registration_url,"");assert.equal(output.value,"");assert.equal(f.element.children.length,0);
@@ -91,6 +94,19 @@ async function accountOrganizationChecks(){
   request.resolve({ok:true});await tick();f.requests.at(-1).resolve({rules:[]});await deleting;assert.equal(refreshes.length,1);assert.equal(confirm.value,"");
   component.dispose();assert.equal(actions.children.length,0);assert.equal(f.element.children.length,0);
 }
+async function exactForwardingUiChecks(){
+  const f=fixture("admin-access.js"),policy=f.id("password-policy-panel");f.element.append(policy);f.run();
+  const component=f.sandbox.window.PostPlusAdminAccess.mount(f.element,{api:f.api,notice:f.notice});resolveAccess(f.requests);await tick();
+  const panel=descendants(f.element).find(node=>node.className?.includes("mail-forwarding-panel"));
+  assert.equal(panel.children[0].textContent,"Mail forwarding");
+  assert.ok(f.element.children.indexOf(panel)<f.element.children.indexOf(policy),"Mail forwarding is above password policy");
+  assert.match(panel.textContent,/Wildcards are also supported/);assert.match(panel.textContent,/Exact rules apply to existing accounts/);
+  const pattern=f.find("Mailbox address or pattern"),target=f.find("Destination mailbox"),form=pattern.parentNode.parentNode;
+  pattern.value="  alice@example.com  ";target.value="  owner@example.com  ";
+  const pending=form.fire("submit"),request=f.requests.at(-1);assert.equal(request.url,"/api/admin/forwarding");
+  assert.equal(request.options.body.pattern,"alice@example.com");assert.equal(request.options.body.destination,"owner@example.com");
+  request.resolve({ok:true});await tick();f.requests.at(-1).resolve({rules:[]});await pending;assert.equal(pattern.value,"");component.dispose();
+}
 function accountSearchChecks(){
   const f=fixture("admin-access.js"),source=read("admin.js"),start=source.indexOf("function renderUsers()"),end=source.indexOf('$("users-search").addEventListener',start);
   f.document.createDocumentFragment=()=>new Element();
@@ -118,4 +134,4 @@ async function registrationChecks(){
   for(const invalid of ["",token.toUpperCase(),"pp_inv_"+"a".repeat(63),"pp_inv_<script>"]){const bad=registrationFixture(invalid);await tick();assert.equal(bad.requests.length,0);assert.equal(bad.id("register-form").hidden,true);assert.match(bad.id("register-error").textContent,/invalid, expired/);await bad.id("register-form").fire("submit");assert.equal(bad.requests.length,0);}
   const failed=registrationFixture(token);failed.requests[0].resolve({ok:false,json:async()=>({ok:false,error:"Expired invitation"})});await tick();assert.equal(failed.id("register-form").hidden,true);assert.equal(failed.id("register-status").textContent,"");assert.equal(failed.id("register-error").textContent,"Expired invitation");await failed.id("register-form").fire("submit");assert.equal(failed.requests.length,1);
 }
-(async()=>{let failures=0;for(const [name,check]of Object.entries({keyChecks,invitationChecks,accessListOrderingChecks,invitationClipboardDisposalChecks,accountOrganizationChecks,accountSearchChecks,registrationChecks})){try{await check();console.log(name+" passed");}catch(error){failures++;console.error(name+" failed:",error);}}if(failures)process.exitCode=1;else console.log("Access UI checks passed: exact grants, one-time secret clearing, disposed/stale replies, invitation organization, account search/deletion confirmation and private registration requests.");})();
+(async()=>{let failures=0;for(const [name,check]of Object.entries({keyChecks,invitationChecks,accessListOrderingChecks,invitationClipboardDisposalChecks,accountOrganizationChecks,exactForwardingUiChecks,accountSearchChecks,registrationChecks})){try{await check();console.log(name+" passed");}catch(error){failures++;console.error(name+" failed:",error);}}if(failures)process.exitCode=1;else console.log("Access UI checks passed: exact grants, one-time secret clearing, disposed/stale replies, invitation organization, account search/deletion confirmation, exact forwarding and private registration requests.");})();

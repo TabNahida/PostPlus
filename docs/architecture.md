@@ -109,7 +109,7 @@ HTTP handles one request per connection. Keep-alive, chunked requests, HTTP/2, a
 
 Passwords use salted PBKDF2-HMAC-SHA256 with at least 600,000 iterations and constant-time comparison. Unknown users incur password-hashing work. Auth currently limits verification to 30 attempts per account per minute and 600 globally. Web login additionally limits each IP to 20 attempts per minute and the web process to 120. These in-memory limits reset on restart.
 
-TLS requires version 1.2 or newer. Web sessions use random tokens, HttpOnly/SameSite cookies, CSRF checks, and administrator roles. The mail viewer converts declared character sets for display and sanitizes HTML inside a sandboxed frame with a restrictive content policy; remote images require a user action. Scripts, forms, and embedded pages are excluded. Input sizes, parser depth, forwarded views, inline images, mailbox size, and queue resources are bounded; detailed protocol behavior is documented in [protocols.md](protocols.md).
+TLS requires version 1.2 or newer. Web sessions use random tokens, HttpOnly/SameSite cookies, CSRF checks, and administrator roles. The mail viewer converts declared character sets for display and sanitizes HTML inside a sandboxed frame with a restrictive content policy; remote images load automatically, while sender CSS is reduced to inert allowlisted declarations and bounded media queries. Scripts, forms, and embedded pages are excluded. Input sizes, parser depth, forwarded views, inline images, mailbox size, and queue resources are bounded; detailed protocol behavior is documented in [protocols.md](protocols.md).
 
 ## Capacity and development priorities
 

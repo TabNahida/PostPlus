@@ -41,7 +41,9 @@ jobs:
       - name: Unit tests
         run: xmake test -v
       - name: Release module manifest checks
-        run: python tests/release_manifest_test.py
+        run: |
+          python tests/release_manifest_test.py
+          python tests/release_ci_test.py
       - name: Web language and asset checks
         run: node tests/web_test.js
       - name: HTML mail and forwarded-message reader checks

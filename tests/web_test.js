@@ -152,7 +152,8 @@ class Control {
   replaceChildren(...children) {this.children=[];this.append(...children);}
   setAttribute(key,value) {this.attributes[key]=value;}
   removeAttribute(key) {delete this.attributes[key];}
-  addEventListener(name, callback) {const previous=this.callbacks[name];this.callbacks[name]=previous?(...args)=>{previous(...args);return callback(...args);}:callback;}
+  addEventListener(name, callback) {this.listeners ||= {}; (this.listeners[name] ||= []).push(callback);this.callbacks[name]=(...args)=>{let result;for(const listener of this.listeners[name])result=listener(...args);return result;};}
+  removeEventListener(name,callback) {if(this.listeners?.[name])this.listeners[name]=this.listeners[name].filter(listener=>listener!==callback);}
   closest(tag) {return this.tagName===tag ? this : this.parent?.closest(tag);}
   focus() {this.focused=true;}
   checkValidity() {return this.type!=="number" || (!this.min || Number(this.value)>=Number(this.min)) && (!this.max || Number(this.value)<=Number(this.max));}
@@ -530,7 +531,7 @@ async function checkMaintenanceControls() {
   id("shutdown-form").callbacks.submit({preventDefault(){},currentTarget:id("shutdown-form")});
   for(let index=0;index<12;index++)await Promise.resolve();
   assert.equal(calls.length,0,"Invalid settings prevent the shutdown request");
-  assert.match(id("shutdown-error").textContent,/could not be saved/);
+  assert.match(id("shutdown-error").textContent,/Invalid port/);
   let state="running";
   sandbox.request=async(route)=>{calls.push({route});return route==="/api/admin/backup"?{ok:true,job_id:"test-backup"}:{ok:true,state,download_url:"/api/admin/backup/download?job_id=test-backup"};};
   vm.runInContext('api=request;',sandbox);

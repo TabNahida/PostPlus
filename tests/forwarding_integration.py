@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Local wildcard routing, durable destinations and delivery deduplication."""
+"""Exact and wildcard local routing, durable destinations and delivery deduplication."""
 import argparse
 import contextlib
 from email.parser import BytesParser
@@ -38,6 +38,35 @@ def wait_until(check, timeout=20):
     raise AssertionError("condition did not become true")
 
 
+def run_exact_forwarding(s):
+    for name in ("auth", "storage", "filter", "smtp"):
+        s.start(name)
+    source, target, ordinary = "forward-source@localhost", "forward-owner@localhost", "ordinary@localhost"
+    for user in (source, target, ordinary):
+        assert s.rpc("auth", op="create", username=user, password=PASSWORD)["ok"]
+    rpc = lambda op, **fields: s.rpc("storage", op=op, **fields)
+    for pattern, destination in (("forward-source", target), ("forward-owner", source), ("alias", target), ("*", target)):
+        assert rpc("forwarding_create", pattern=pattern, destination=destination)["ok"]
+    assert rpc("resolve_recipient", recipient=source)["destination"] == target
+    assert rpc("resolve_recipient", recipient=target)["destination"] == source
+    assert rpc("resolve_recipient", recipient="alias@localhost")["destination"] == target
+    assert rpc("resolve_recipient", recipient=ordinary)["destination"] == ordinary
+    raw = f"From: outside@remote.test\r\nTo: {source}, alias@localhost, {target}, {ordinary}\r\nSubject: Direct forwarding\r\n\r\nDeliver once per final inbox.\r\n".encode()
+    with smtplib.SMTP("127.0.0.1", s.ports["smtp"], local_hostname="localhost", timeout=10) as client:
+        assert client.sendmail("outside@remote.test", [source, "alias@localhost", target, ordinary], raw) == {}
+    assert len(jobs(s)) == 3, "Aliases and explicit forwarding share canonical destination deduplication"
+    s.start("delivery")
+    for user in (source, target, ordinary):
+        mailbox = s.wait_mail(user, 1)
+        assert len(mailbox["messages"]) == 1
+        delivered = rpc("get", username=user, id=mailbox["messages"][0]["id"])["raw"]
+        assert BytesParser().parsebytes(delivered)["Subject"] == "Direct forwarding"
+    wait_until(lambda: not jobs(s))
+    for user in (source, target, ordinary):
+        assert len(rpc("list", username=user)["messages"]) == 1
+    print("PASS exact account forwarding, aliases, wildcard account protection, canonical deduplication and terminal delivery with cyclic rules", flush=True)
+
+
 def run(s):
     for name in ("auth", "storage", "filter", "smtp"):
         s.start(name)
@@ -51,13 +80,16 @@ def run(s):
     assert broad["pattern"] == "sales*"
     assert bad(s, op="forwarding_create", pattern="sales*", destination="bob@localhost")["code"] == "duplicate_rule"
     specific = rule("sales-*", "charlie@localhost")
+    assert resolve("sales-vip@localhost")["destination"] == "sales-vip@localhost", "Wildcards cannot redirect registered accounts"
     rule("sales-vip", "bob@localhost")
+    rule("support", "bob@localhost")
     rule("ticket?", "charlie@localhost")
     oldest = rule("*abc", "bob@localhost")
     rule("abc*", "charlie@localhost")
     assert resolve("sales-new@localhost")["destination"] == "charlie@localhost"
     assert resolve("SaLeS12@LOCALHOST")["destination"] == "bob@localhost"
-    assert resolve("sales-vip@localhost")["destination"] == "sales-vip@localhost"
+    assert resolve("sales-vip@localhost")["destination"] == "bob@localhost", "Explicit forwarding applies to registered accounts"
+    assert resolve("support@localhost")["destination"] == "bob@localhost", "Exact aliases need no source account"
     assert resolve("ticket7@localhost")["destination"] == "charlie@localhost"
     assert not resolve("ticket77@localhost")["exists"]
     assert resolve("abcabc@localhost")["rule"]["id"] == oldest["id"]
@@ -66,11 +98,12 @@ def run(s):
         bad(s, op="forwarding_create", pattern=pattern, destination="bob@localhost")
     assert bad(s, op="forwarding_create", pattern="outside*", destination="bob@remote.test")["code"] == "nonlocal_destination"
     assert bad(s, op="forwarding_create", pattern="missing*", destination="absent@localhost")["code"] == "unknown_destination"
+    assert bad(s, op="forwarding_create", pattern="bob", destination="bob@localhost")["code"] == "self_forwarding"
     assert len(rpc("forwarding_list", limit=2, offset=1)["rules"]) == 2
     s.stop("storage")
     s.start("storage")
     assert resolve("sales-new@localhost")["rule"]["id"] == specific["id"]
-    print("PASS forwarding persistence, normalization, bounded globs, specificity and exact mailbox precedence", flush=True)
+    print("PASS forwarding persistence, normalization, bounded globs, specificity, exact-account forwarding and wildcard mailbox protection", flush=True)
 
     # Several original addresses resolving to one mailbox consume one queue slot.
     with smtplib.SMTP("127.0.0.1", s.ports["smtp"], local_hostname="localhost", timeout=10) as client:
@@ -307,10 +340,14 @@ def main():
         suite = Suite(args.bin_dir.resolve(), http_directory.resolve())
         run_http(suite)
         suite.close()
+        exact_directory=directory/"exact-forwarding";exact_directory.mkdir()
+        suite=Suite(args.bin_dir.resolve(),exact_directory.resolve())
+        run_exact_forwarding(suite)
+        suite.close()
         changed_directory=directory/"domain-change";changed_directory.mkdir()
         suite=Suite(args.bin_dir.resolve(),changed_directory.resolve())
         run_domain_change(suite)
-        print("All wildcard forwarding integration tests passed", flush=True)
+        print("All exact and wildcard forwarding integration tests passed", flush=True)
     except BaseException:
         print(f"Logs: {directory}", flush=True)
         raise

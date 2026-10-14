@@ -4,22 +4,27 @@ const t = (...args) => PostPlusI18n.t(...args);
 const $ = (id) => document.getElementById(id);
 const state = { user: null, messages: [], selected: null, previews: new Map(), view: "INBOX", loading: false, readVersion: 0, listVersion: 0, folders: [], usage: null, draftId: null, composeDirty: false, composeSaving: false };
 const folderLabels = {INBOX:"Inbox",Sent:"Sent",Drafts:"Drafts",Trash:"Trash",Junk:"Junk",Archive:"Archive"};
+const folderIcons = {INBOX:"inbox",Sent:"send",Drafts:"file-pencil",Trash:"trash",Junk:"shield-exclamation",Archive:"archive"};
 const messageReader=PostPlusMailReader.create($("message-body"));
 const verificationCodes=PostPlusVerificationCode.create($("verification-code"),{request:api});
 let noticeTimer;
 let mailboxKeys=null;
 let verificationRefresh=null;
+function refreshVerificationCode(){
+  if(state.user && ["INBOX","Trash"].includes(state.view))return verificationCodes.load(state.view);
+  verificationCodes.reset();
+}
 function scheduleVerificationRefresh(){
   clearTimeout(verificationRefresh);verificationRefresh=null;
   if(!state.user)return;
   verificationRefresh=setTimeout(async()=>{
     verificationRefresh=null;
     if(!state.user)return;
-    if(!document.hidden)await verificationCodes.load();
+    if(!document.hidden)await refreshVerificationCode();
     scheduleVerificationRefresh();
   },15000);
 }
-document.addEventListener("visibilitychange",()=>{if(state.user&&!document.hidden)verificationCodes.load();});
+document.addEventListener("visibilitychange",()=>{if(state.user&&!document.hidden)refreshVerificationCode();});
 const loginAddress=PostPlusAddress.create($("login-email"),$("login-domain"));
 const mailDomainReady=api("/api/public/config",{quiet:true}).then(data=>{loginAddress.setDomain(data.domain);return true;}).catch(()=>false);
 
@@ -67,10 +72,19 @@ function element(tag, className, text) {
   if (text !== undefined) result.textContent = text;
   return result;
 }
+function icon(name) {
+  const namespace="http://www.w3.org/2000/svg",svg=document.createElementNS(namespace,"svg"),use=document.createElementNS(namespace,"use");
+  svg.setAttribute("class","ui-icon");svg.setAttribute("aria-hidden","true");svg.setAttribute("focusable","false");use.setAttribute("href",`/icons.svg#${name}`);svg.append(use);return svg;
+}
+function closeMoveMenu(restoreFocus=false){
+  $("message-move-menu").hidden=true;$("message-move").setAttribute("aria-expanded","false");
+  if(restoreFocus)$("message-move").focus();
+}
 
 function signedOut() {
   PostPlusPreferences.closeNavigation();
   verificationCodes.reset();
+  closeMoveMenu();
   clearTimeout(verificationRefresh);verificationRefresh=null;
   mailboxKeys?.dispose();mailboxKeys=null;
   state.user = null;
@@ -156,13 +170,15 @@ function renderFolderState() {
     badge.textContent = String(folderBadgeCount(name,count));
     badge.hidden = !Number(badge.textContent);
   }
-  $("message-delete").textContent = t(state.view === "Trash" ? "Delete permanently" : "Move to Trash");
+  $("message-delete").replaceChildren(icon("trash"),element("span","",t(state.view === "Trash" ? "Delete permanently" : "Move to Trash")));
   $("draft-edit").hidden = state.view !== "Drafts";
   $("message-archive").hidden = state.view === "Archive" || state.view === "Drafts";
-  const select = $("message-move");
-  const placeholder = element("option","",t("Move to…")); placeholder.value = "";
-  select.replaceChildren(placeholder);
-  for (const [name,label] of Object.entries(folderLabels)) if(name !== state.view) {const option=element("option","",t(label));option.value=name;select.append(option);}
+  closeMoveMenu();
+  const menu=$("message-move-menu");menu.replaceChildren();
+  for (const [name,label] of Object.entries(folderLabels)) if(name !== state.view) {
+    const option=element("button");option.type="button";option.setAttribute("role","menuitem");option.tabIndex=-1;option.dataset.moveFolder=name;
+    option.append(icon(folderIcons[name]),element("span","",t(label)));option.addEventListener("click",()=>{closeMoveMenu(true);return moveMessage(name);});menu.append(option);
+  }
   if (state.user) document.title = `${t(folderLabels[state.view])} · ${state.user.username} · PostPlus`;
   $("mailbox-usage").hidden = !state.usage;
   if (state.usage) {
@@ -173,6 +189,7 @@ function renderFolderState() {
 async function switchView(view) {
   if (!Object.hasOwn(folderLabels,view)) return;
   state.view = view;
+  verificationCodes.reset();
   clearReader();
   state.messages = [];
   renderMessages();
@@ -213,6 +230,7 @@ function renderMessages() {
 function clearReader() {
   state.selected = null;
   state.readVersion++;
+  closeMoveMenu();
   messageReader.clear();
   $("message-raw").textContent="";
   $("reader-content").hidden = true;
@@ -222,7 +240,7 @@ function clearReader() {
 
 async function loadInbox() {
   if (!state.user) return;
-  void verificationCodes.load();
+  void refreshVerificationCode();
   const version = ++state.listVersion;
   const folder = state.view;
   state.loading = true;
@@ -352,9 +370,22 @@ async function moveMessage(folder) {
   if (!state.selected || !Object.hasOwn(folderLabels,folder)) return;
   try {await api(`/api/messages/${encodeURIComponent(state.selected)}/move`,{method:"POST",body:{folder}});clearReader();showNotice(t("Message moved to {folder}.",{folder:t(folderLabels[folder])}));await loadInbox();}
   catch(error) {showNotice(error.message,true);}
-  finally {$("message-move").value="";}
 }
-$("message-move").addEventListener("change",()=>moveMessage($("message-move").value));
+function openMoveMenu(last=false){
+  if(!state.selected)return;
+  $("message-move-menu").hidden=false;$("message-move").setAttribute("aria-expanded","true");
+  const items=Array.from($("message-move-menu").querySelectorAll("button"));(last?items.at(-1):items[0])?.focus();
+}
+$("message-move").addEventListener("click",()=>{$("message-move-menu").hidden?openMoveMenu():closeMoveMenu();});
+$("message-move").addEventListener("keydown",event=>{if(event.key==="ArrowDown"||event.key==="ArrowUp"){event.preventDefault();openMoveMenu(event.key==="ArrowUp");}});
+$("message-move-menu").addEventListener("keydown",event=>{
+  if(event.key==="Escape"){event.preventDefault();closeMoveMenu(true);return;}
+  if(event.key==="Tab"){closeMoveMenu(true);return;}
+  const items=Array.from($("message-move-menu").querySelectorAll("button")),index=items.indexOf(document.activeElement);
+  let next;if(event.key==="ArrowDown")next=(index+1)%items.length;else if(event.key==="ArrowUp")next=(index-1+items.length)%items.length;else if(event.key==="Home")next=0;else if(event.key==="End")next=items.length-1;
+  if(next!==undefined){event.preventDefault();items[next]?.focus();}
+});
+document.addEventListener("click",event=>{if(!$("message-move-control").contains(event.target))closeMoveMenu();});
 $("message-archive").addEventListener("click",()=>moveMessage("Archive"));
 $("message-delete").addEventListener("click",()=>{
   if(!state.selected) return;

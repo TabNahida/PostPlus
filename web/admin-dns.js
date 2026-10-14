@@ -11,13 +11,13 @@ window.PostPlusAdminDns = (() => {
     const controls=new Map();
     function node(tag,text,className){const item=document.createElement(tag);if(text){item.dataset.i18n=text;item.textContent=t(text);}if(className)item.className=className;return item;}
     root.replaceChildren();
-    const intro=node("p","DNS uses the saved server settings. Publish these records at your DNS provider, then test them here without saving or restarting PostPlus.","field-hint"),summary=node("p",null,"dns-prerequisite"),edit=node("details",null,"dns-technical"),grid=node("div",null,"settings-grid");
+    const intro=node("p","DNS uses the saved server settings. Publish these records at your DNS provider, then test them here without saving or restarting PostPlus.","field-hint"),summary=node("p",null,"dns-prerequisite"),edit=node("details",null,"dns-technical"),grid=node("div",null,"settings-grid admin-dns-fields");
     edit.append(node("summary","Expected DNS values (optional)"),node("p","Enter your actual public IPs to compare them with DNS and prepare an exact SPF policy. For a relay or an existing policy, enter the values you want to keep. These fields are only used for this check.","field-hint"),grid);
     for(const [name,label] of fields){
-      const wrap=node("div",null,"setting-field"),caption=node("label",label),input=node(name==="dkim_type"?"select":["spf","dkim_value","dmarc"].includes(name)?"textarea":"input");
+      const wrap=node("div",null,"setting-field"+(["spf","dkim_value","dmarc"].includes(name)?" wide":"")),caption=node("label",label),input=node(name==="dkim_type"?"select":["spf","dkim_value","dmarc"].includes(name)?"textarea":"input");
       input.id=`${prefix}-${name}`;caption.htmlFor=input.id;input.autocomplete="off";input.spellcheck=false;input.maxLength=name==="dkim_name"?253:["ipv4","ipv6"].includes(name)?64:4096;
       if(name==="dkim_type"){for(const value of ["TXT","CNAME"]){const option=node("option");option.value=value;option.textContent=value;input.append(option);}input.value="TXT";}
-      else if(input.tagName==="TEXTAREA")input.rows=2;else input.type="text";
+      else if(input.tagName==="TEXTAREA")input.rows=name==="dkim_value"?4:2;else input.type="text";
       input.addEventListener(name==="dkim_type"?"change":"input",()=>{revision++;stale=checked;error=null;if(name==="spf")spfEdited=true;if(["ipv4","ipv6"].includes(name)&&!spfEdited&&report?.outbound_mode==="direct"){const mechanisms=[controls.get("ipv4").value.trim()?"ip4:"+controls.get("ipv4").value.trim():"",controls.get("ipv6").value.trim()?"ip6:"+controls.get("ipv6").value.trim():""].filter(Boolean);controls.get("spf").value="v=spf1 "+(mechanisms.length?mechanisms.join(" "):"mx")+" -all";}render();});
       wrap.append(caption,input);grid.append(wrap);controls.set(name,input);
     }

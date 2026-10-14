@@ -84,26 +84,26 @@ administrator or have its ownership corrected before automatic updates work.
 
 Version 0.3.0 can only read GitHub's `/releases/latest` and download legacy
 per-module assets. Version 0.3.1 supports that old format as well as the new
-archive format, and is the only release that publishes both. It remains the
-GitHub **Latest** bridge so an existing 0.3.0 installation can automatically
-upgrade to 0.3.1 even after 0.3.2 has been published. Check for updates again
-after installing 0.3.1 to reach 0.3.2 (or a newer stable version).
+archive format, and is the only release that publishes both. GitHub **Latest**
+now follows the current stable release again. If an installation is still on
+0.3.0, manually install [0.3.1](https://github.com/TabNahida/PostPlus/releases/tag/v0.3.1)
+while preserving its configuration and data, then check for updates to reach
+the current stable version. The old 0.3.0 updater cannot directly install an
+archive-only release.
 
 Starting with 0.3.1, update checks select the highest stable `vMAJOR.MINOR.PATCH`
 from the latest 20 official release entries, ignoring drafts and prereleases.
-This is independent of GitHub's Latest badge. The 0.3.2 release and subsequent
-releases are normal stable releases published with `--latest=false` while the
-bridge is needed. They publish three complete platform packages, three small
+This is independent of GitHub's Latest badge. Stable releases are published
+with `--latest=true`. Starting with 0.3.2 they publish three complete platform packages, three small
 platform manifests, the combined manifest, and `SHA256SUMS`: eight assets.
-Version 0.3.2 removes legacy module downloads. Do not move GitHub's Latest badge
-off 0.3.1 until support for unupgraded 0.3.0 clients is deliberately retired.
+Version 0.3.2 removes legacy module downloads.
 
 0.3.0 只支持 GitHub `/releases/latest` 和旧模块文件。0.3.1 同时支持旧模块
-及完整包更新，并且仅此版本同时发布两种格式。为保证尚未升级的 0.3.0 仍可
-自动升级，GitHub 的 **Latest** 标记保留给 0.3.1。安装 0.3.1 后再次检查更新，
-即可升级到 0.3.2 或更新正式版。0.3.1 起按最近 20 条官方 Release 中的最高
-正式语义版本检查更新，不依赖 Latest 标记。0.3.2 起仅发布 8 个资源文件，
-并移除旧模块下载支持。停止支持未升级的 0.3.0 前，请保留此桥接标记。
+及完整包更新，并且仅此版本同时发布两种格式。GitHub 的 **Latest** 标记现已
+恢复为当前正式版。仍在使用 0.3.0 的安装需先手动安装 0.3.1，保留原配置与
+数据，再从管理后台检查更新；0.3.0 的旧更新器不能直接安装完整包格式的新版。
+0.3.1 起按最近 20 条官方 Release 中的最高正式语义版本检查更新，不依赖
+Latest 标记。0.3.2 起仅发布 8 个资源文件，并移除旧模块下载支持。
 
 The published 0.2.1 binary has no updater. Install a release containing this
 feature once while keeping the existing configuration and data. Subsequent

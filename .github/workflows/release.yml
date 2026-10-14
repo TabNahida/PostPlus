@@ -13,7 +13,28 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
+  branch-ci:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 48
+    permissions:
+      contents: read
+      actions: read
+    outputs:
+      reused: ${{ steps.ci.outputs.reused }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.13'
+      - name: Verify the exact commit's branch CI or select the full fallback
+        id: ci
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: python scripts/release_ci.py
+
   verify:
+    needs: branch-ci
+    if: needs.branch-ci.outputs.reused != 'true'
     uses: ./.github/workflows/ci.yml
 
   package:
@@ -79,8 +100,12 @@ jobs:
 
   publish:
     # Manual branch runs validate packages without creating a public release.
-    if: startsWith(github.ref, 'refs/tags/v')
-    needs: [verify, package]
+    if: >-
+      always() && !cancelled() && startsWith(github.ref, 'refs/tags/v') &&
+      needs.branch-ci.result == 'success' && needs.package.result == 'success' &&
+      ((needs.branch-ci.outputs.reused == 'true' && needs.verify.result == 'skipped') ||
+       (needs.branch-ci.outputs.reused == 'false' && needs.verify.result == 'success'))
+    needs: [branch-ci, verify, package]
     runs-on: ubuntu-24.04
     permissions:
       contents: write
@@ -102,10 +127,6 @@ jobs:
         shell: bash
         run: |
           version="${GITHUB_REF_NAME#v}"
-          # Keep 0.3.1 as the /latest bridge for immutable 0.3.0 clients.
-          # New clients select the highest stable semantic version themselves.
-          latest=false
-          if [ "$version" = "0.3.1" ]; then latest=true; fi
           gh release create "$GITHUB_REF_NAME" release-assets/* \
-            --verify-tag --latest="$latest" --title "PostPlus $version" \
+            --verify-tag --latest=true --title "PostPlus $version" \
             --notes-file "docs/releases/$version.md"

@@ -13,6 +13,16 @@ async function ready() {
 async function run() {
   const html=fs.readFileSync(path.join(__dirname,"../web/admin.html"),"utf8");
   for(const id of ["restart-open","restart-panel","restart-status","restart-dialog"])assert.match(html,new RegExp(`id="${id}"`));
+  const navigation=await ready();
+  for(const view of ["maintenance","restart","settings"]){
+    assert.match(html,new RegExp(`id="nav-${view}"`));assert.match(html,new RegExp(`id="view-${view}"`));
+    await navigation.run(`switchView("${view}")`);
+    assert.equal(navigation.id(`view-${view}`).hidden,false);assert.equal(navigation.id("admin-refresh").hidden,true);
+    for(const other of ["maintenance","restart","settings"].filter(name=>name!==view))assert.equal(navigation.id(`view-${other}`).hidden,true);
+  }
+  assert.equal(navigation.calls.length,0,"Operation pages reuse loaded settings without discarding unsaved edits");
+  navigation.run("updateSettingsCount(3)");assert.equal(navigation.id("settings-change-count").textContent,"3 settings changed");
+  navigation.run("updateSettingsCount(0)");assert.equal(navigation.id("settings-change-count").textContent,"No unsaved changes");
   const f=await ready();let status=job();
   f.respond((route,options)=>route==="/api/admin/config"?{ok:true,restart_required:false,restart:job(),...urls}:status);
   assert.equal(await f.run("saveSettings()"),true);

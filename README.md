@@ -24,7 +24,7 @@
 - **Connect mail clients.** Send through SMTP and read through POP3 or the supported IMAP commands, with TLS support.
 - **Keep mail on disk.** Accounts, mailboxes, delivery queues, and retries survive restarts. Rejected mail is retained in quarantine.
 - **Choose who has an account.** Administrators create users or issue expiring invitation links for ordinary mailbox registration.
-- **Copy recent verification codes.** Webmail recognizes codes from recent inbox mail without marking it read; integrations can use the owner-bound code API.
+- **Copy recent verification codes.** Webmail recognizes codes from recent Inbox or Trash mail without marking it read; integrations can use the owner-bound code API.
 - **Route mailbox prefixes.** Wildcard forwarding sends matching local addresses to an existing local inbox.
 - **Limit integration access.** Choose API key permissions independently for administration and personal mailbox APIs. See [mailbox features and permissions](docs/access.md).
 
@@ -162,7 +162,7 @@ tests/                 C++ tests, web checks, and integration suites
 ## Current scope
 
 - IMAP implements a [documented command subset](docs/protocols.md), including ENVELOPE, BODYSTRUCTURE, MIME sections, APPEND, COPY and MOVE; full client compatibility and IDLE remain outside the current scope. POP3 does not yet provide an exclusive maildrop lock.
-- Webmail reads plain text, isolated HTML, and attached forwarded messages across six built-in folders, and composes plain text. Remote images stay blocked until requested. Attachment upload/download and custom folder creation are not implemented. A Sent copy records successful submission to the queue, not proof of final delivery.
+- Webmail reads plain text, isolated HTML, and attached forwarded messages across six built-in folders, and composes plain text. Remote images load automatically in the isolated reader; safe sender typography, table layouts, and responsive styles are preserved. Attachment upload/download and custom folder creation are not implemented. A Sent copy records successful submission to the queue, not proof of final delivery.
 - Outbound delivery supports direct MX routing with DKIM signing or an SMTP relay. Incoming SPF/DKIM/DMARC verification, DSN generation, DANE, MTA-STS, multiple domains, and multi-host high availability are not implemented. Permanent delivery failures remain visible in the administration queue.
 - SMTP queues mail transactionally. Local delivery is idempotent; retrying outbound mail after an interrupted acknowledgement can produce a duplicate.
 - Sessions use bounded worker pools, SQLite serializes writes, and delivery uses one worker. Capacity for hundreds or thousands of active users requires representative workload testing and further development.

@@ -22,40 +22,45 @@ class Element {
 const text=value=>({nodeType:3,textContent:value,children:[]});
 const e=(tag,attrs={},...children)=>new Element(tag,attrs,children.map(child=>typeof child==="string"?text(child):child));
 const png=Buffer.from("\x89PNG\r\n\x1a\n","binary").toString("base64");
+const cssStyle=values=>({length:Object.keys(values).length,item:i=>Object.keys(values)[i],getPropertyValue:key=>values[key],getPropertyPriority:key=>key==="font-size"?"important":""});
+const sheetRules=[{type:1,selectorText:".card h2",style:cssStyle({"font-size":"22px",color:"#111","background-image":"url(https://tracker.invalid/css)",position:"fixed"})},{type:4,conditionText:"screen and (max-width: 600px)",cssRules:[{type:1,selectorText:".card",style:cssStyle({width:"100%",padding:"12px"})}]},{type:1,selectorText:"</style><script>",style:cssStyle({color:"red"})},{type:3,cssText:"@import url(https://tracker.invalid/import)"}];
 const fixtures=new Map([
   ["attack",[e("script",{},"parent.stolen=true"),e("style",{},"@import 'https://tracker.invalid'"),e("iframe",{src:"https://tracker.invalid"}),e("form",{action:"https://tracker.invalid"},e("input",{name:"secret"})),e("svg",{},e("script",{},"alert(1)")),e("math",{},"unsafe"),e("object",{data:"https://tracker.invalid"}),e("p",{onclick:"steal()",id:"app-screen",class:"sender",styles:{color:"rgb(12, 34, 56)","font-size":"22px","background-color":"#ffffff","background-image":"url(https://tracker.invalid)",position:"fixed",inset:"0","--secret":"url(https://tracker.invalid)",margin:"8px",padding:"12px","border-radius":"4px","font-family":"Arial",width:"100%","text-align":"center",display:"block","text-indent":"var(--secret)"}},"Readable <验证码>",e("a",{href:"javascript:alert(1)",onclick:"bad()"},"bad link"),e("a",{href:"https://example.com/path?x=1&y=2",target:"_self",ping:"https://tracker.invalid"},"safe link")),e("img",{src:"https://tracker.invalid/pixel",srcset:"https://tracker.invalid/other 2x",onerror:"alert(1)",alt:"tracking"})]],
   ["html-only",[e("h2",{},"验证码 123456"),e("p",{},"Line one",e("br"),"Line two")]],
   ["cid",[e("img",{src:"cid:logo%40example",alt:"logo"}),e("img",{src:"cid:svg",alt:"svg"}),e("img",{src:"data:image/svg+xml;base64,PHN2Zy8+",alt:"raw svg"}),e("img",{src:`data:image/png;base64,${png}`,alt:"safe embedded"})]],
   ["encoded-links",[e("a",{href:"java\nscript:alert(1)"},"newline"),e("a",{href:"https://username:password@example.com"},"credentials"),e("a",{href:"/api/admin/messages"},"relative"),e("a",{href:"data:text/html,<script>alert(1)</script>"},"data"),e("a",{href:"mailto:person@example.com"},"email")]],
-  ["table",[e("table",{},e("tr",{},e("td",{colspan:"2",rowspan:"9999",styles:{width:"600px","border-color":"#333"}},"A"),e("td",{},"B")))]]
+  ["table",[e("table",{width:"600",align:"center",border:"0",cellpadding:"0",cellspacing:"0",bgcolor:"#ffffff",class:"card"},e("tr",{},e("td",{colspan:"2",rowspan:"9999",styles:{width:"600px","border-color":"#333"}},"A"),e("td",{},"B")))]]
+  ,["stylesheet",[e("style",{},"fixture sheet"),e("div",{class:"card",id:"mail-container"},e("h2",{},"Welcome"))]]
 ]);
 function fixture() {
   const callbacks=new Map(),created=[];
   const document={documentElement:{dataset:{theme:"dark",reading:"large"}},
     createElement(tag){const node=new Element(tag);created.push(node);if(tag==="template")Object.defineProperty(node,"innerHTML",{set(value){assert.equal(created.includes(node),true);node.content={childNodes:fixtures.get(value)||[text(value)]};}});return node;},
     addEventListener(name,callback){callbacks.set(name,callback);},removeEventListener(name,callback){if(callbacks.get(name)===callback)callbacks.delete(name);}};
-  const sandbox={window:{},document,URL,location:{href:"https://mail.example.com/"},PostPlusI18n:{language:"en",t:key=>key},atob:value=>Buffer.from(value,"base64").toString("binary"),DOMParser:class{constructor(){throw new Error("Raw HTML must not use a resource-capable DOMParser document");}}};
+  const sandbox={window:{},document,URL,CSSStyleSheet:class{replaceSync(value){this.cssRules=value==="fixture sheet"?sheetRules:[];}},location:{href:"https://mail.example.com/"},PostPlusI18n:{language:"en",t:key=>key},atob:value=>Buffer.from(value,"base64").toString("binary"),DOMParser:class{constructor(){throw new Error("Raw HTML must not use a resource-capable DOMParser document");}}};
   vm.runInNewContext(source,sandbox,{filename:"mail-reader.js"});const api=sandbox.window.PostPlusMailReader,container=new Element();return {api,container,component:api.create(container),callbacks,created,sandbox};
 }
-const f=fixture();const attack=f.api.sanitize("attack");
+const f=fixture();const attack=f.api.sanitize("attack",{loadRemoteImages:false});
 assert.match(attack.html,/Readable &lt;验证码&gt;/);assert.equal(attack.remoteImages,1);
 assert.doesNotMatch(attack.html,/<(?:script|style|iframe|form|input|svg|math|object)\b|onclick=|onerror=|srcset=|ping=|javascript:|position:|background-image:|--secret/);
 assert.match(attack.html,/color:rgb\(12, 34, 56\)/);assert.match(attack.html,/font-size:22px/);assert.match(attack.html,/padding:12px/);assert.match(attack.html,/text-align:center/);
 assert.match(attack.html,/target="_blank" rel="noopener noreferrer" referrerpolicy="no-referrer"/);assert.match(attack.html,/href="https:\/\/example.com\/path\?x=1&amp;y=2"/);
 assert.doesNotMatch(attack.html,/<img[^>]+https:/);assert.match(attack.html,/mail-image-placeholder/);
-assert.match(f.api.sanitize("attack",{loadRemoteImages:true}).html,/<img[^>]+src="https:\/\/tracker.invalid\/pixel"/);
+assert.match(f.api.sanitize("attack").html,/<img[^>]+src="https:\/\/tracker.invalid\/pixel"/);
 const links=f.api.sanitize("encoded-links");assert.equal((links.html.match(/href=/g)||[]).length,1);assert.match(links.html,/href="mailto:person@example.com"/);
 const cid=f.api.sanitize("cid",{inlineImages:[{cid:"<logo@example>",content_type:"image/png",data:png},{cid:"svg",content_type:"image/svg+xml",data:"PHN2Zy8+"}]});
 assert.equal((cid.html.match(/src="data:image\/png/g)||[]).length,2);assert.doesNotMatch(cid.html,/src="[^" ]*svg/);
 assert.doesNotMatch(f.api.sanitize("cid",{inlineImages:[{cid:"logo@example",content_type:"image/png",data:"PHN2Zy8+"}]}).html,/src="data:image\/png[^>]+alt="logo"/,"Raster MIME alone cannot admit SVG bytes");
-assert.match(f.api.sanitize("table").html,/colspan="2"/);assert.doesNotMatch(f.api.sanitize("table").html,/rowspan=/);assert.match(f.api.sanitize("html-only").text,/验证码 123456\n+Line one\nLine two/);
+const formatted=f.api.sanitize("stylesheet");assert.match(formatted.html,/class="card" id="mail-container"/);assert.match(formatted.styles,/\.card h2\{font-size:22px!important;color:#111\}/);assert.match(formatted.styles,/@media screen and \(max-width: 600px\)\{\.card\{width:100%;padding:12px\}/);assert.doesNotMatch(formatted.styles,/<|url|@import|position/);
+const table=f.api.sanitize("table");assert.match(table.html,/width="600" align="center" bgcolor="#ffffff" cellpadding="0" cellspacing="0" border="0"/);assert.match(table.html,/colspan="2"/);assert.doesNotMatch(f.api.sanitize("table").html,/rowspan=/);assert.match(f.api.sanitize("html-only").text,/验证码 123456\n+Line one\nLine two/);
 f.component.show({html:"attack",text:"Plain fallback",forwarded:[{subject:"Nested <subject>",from:"Sender <sender@example.com>",to:"reader@example.com",date:"Today",html:"html-only",text:"",forwarded:[{subject:"Deep forward",text:"Nested plain"}]}]});
 let all=descendants(f.container),frames=all.filter(node=>node.tagName==="IFRAME");assert.equal(frames.length,2);
-for(const frame of frames){assert.equal(frame.attributes.sandbox,"allow-popups allow-popups-to-escape-sandbox");assert.doesNotMatch(frame.attributes.sandbox,/allow-scripts|allow-same-origin/);assert.match(frame.srcdoc,/script-src &#39;none&#39;/);assert.match(frame.srcdoc,/style-src https:\/\/mail.example.com &#39;unsafe-inline&#39;/);assert.match(frame.srcdoc,/img-src data:;/);assert.match(frame.srcdoc,/data-theme="dark" data-reading="large"/);assert.equal(frame.attributes.referrerpolicy,"no-referrer");}
+for(const frame of frames){assert.equal(frame.attributes.sandbox,"allow-popups allow-popups-to-escape-sandbox");assert.doesNotMatch(frame.attributes.sandbox,/allow-scripts|allow-same-origin/);assert.match(frame.srcdoc,/script-src &#39;none&#39;/);assert.match(frame.srcdoc,/style-src https:\/\/mail.example.com &#39;unsafe-inline&#39;/);assert.match(frame.srcdoc,/img-src data: https: http:;/);assert.match(frame.srcdoc,/data-theme="dark" data-reading="large"/);assert.equal(frame.attributes.referrerpolicy,"no-referrer");}
 assert.ok(all.some(node=>node.className==="forwarded-subject"&&node.textContent==="Nested <subject>"));assert.ok(all.some(node=>node.tagName==="DD"&&node.textContent==="Sender <sender@example.com>"));
-all.find(node=>node.tagName==="BUTTON"&&node.textContent==="Show plain text").fire("click");all=descendants(f.container);assert.equal(all.filter(node=>node.tagName==="IFRAME").length,0);assert.ok(all.some(node=>node.tagName==="PRE"&&node.textContent.includes("验证码 123456")),"HTML-only messages have a readable plain-text fallback");
-all.find(node=>node.tagName==="BUTTON"&&node.textContent==="Show formatted message").fire("click");all=descendants(f.container);all.find(node=>node.tagName==="BUTTON"&&node.textContent==="Load remote images").fire("click");frames=descendants(f.container).filter(node=>node.tagName==="IFRAME");assert.match(frames[0].srcdoc,/img-src data: https: http:/);
-f.component.show({html:"attack"});frames=descendants(f.container).filter(node=>node.tagName==="IFRAME");assert.match(frames[0].srcdoc,/img-src data:;/,"A different message resets image consent");assert.doesNotMatch(frames[0].srcdoc,/<img[^>]+https:/);
+assert.equal(all.some(node=>node.tagName==="BUTTON"),false,"Reader does not show format/image toggles");
+f.component.show({html:"attack"});frames=descendants(f.container).filter(node=>node.tagName==="IFRAME");assert.match(frames[0].srcdoc,/<img[^>]+src="https:\/\/tracker.invalid\/pixel"/,"Remote images load by default for each message");
+f.component.show({html:"stylesheet"});frames=descendants(f.container).filter(node=>node.tagName==="IFRAME");assert.match(frames[0].srcdoc,/<style>\.card h2\{font-size:22px!important;color:#111\}/,"Bounded sanitized sender styles stay inside the iframe");
+f.component.show({text:"Plain-only fallback"});assert.equal(descendants(f.container).find(node=>node.tagName==="PRE").textContent,"Plain-only fallback");
 f.component.clear();assert.equal(f.container.children.length,0);f.callbacks.get("postplus:language")();assert.equal(f.container.children.length,0,"Translation cannot restore cleared content");
 const cycle={text:"One"};cycle.forwarded=[cycle];f.component.show(cycle);assert.equal(descendants(f.container).filter(node=>node.className==="mail-reader-message").length,1);f.component.dispose();assert.equal(f.container.children.length,0);assert.equal(f.callbacks.has("postplus:language"),false);
 for(const [portal,app,prefix] of [["index.html","app.js","message"],["admin.html","admin.js","inspect"]]) {
@@ -73,7 +78,7 @@ for(const [portal,app,prefix] of [["index.html","app.js","message"],["admin.html
   const adminPending=admin.run('inspectMessage({id:"late",folder:"INBOX"})');for(let i=0;i<6;i++)await Promise.resolve();admin.run("signedOut()");finishAdmin({ok:true,message:{html:"<p>Stale private mail</p>"},raw:"stale raw"});await adminPending;
   assert.equal(adminShown.length,1,"A stale inspection response cannot redisplay private mail after logout");assert.equal(admin.id("inspect-raw").textContent,"");
   const web=adminFixture();const webShown=[];let webCleared=0;const webSandbox={...web.sandbox,window:{},
-    document:{...web.sandbox.document,querySelector:selector=>web.id(selector)},PostPlusVerificationCode:{create:()=>({load(){},reset(){},translate(){}})},PostPlusMailReader:{create:()=>({show:value=>webShown.push(value),clear:()=>{webCleared++;}})}};
+    document:{...web.sandbox.document,createElementNS:(ns,tag)=>web.sandbox.document.createElement(tag),querySelector:selector=>web.id(selector)},PostPlusVerificationCode:{create:()=>({load(){},reset(){},translate(){}})},PostPlusMailReader:{create:()=>({show:value=>webShown.push(value),clear:()=>{webCleared++;}})}};
   vm.createContext(webSandbox);vm.runInContext(fs.readFileSync(path.join(root,"web/app.js"),"utf8"),webSandbox);for(let i=0;i<12;i++)await Promise.resolve();
   const webRun=code=>vm.runInContext(code,webSandbox);webRun('state.user={username:"reader@example.com",csrf:"test"};');
   webSandbox.fetch=async()=>({ok:true,status:200,json:async()=>({ok:true,message:{subject:"Current",text:"Plain",html:"<p>Private HTML</p>",inline_images:[{cid:"secret",data:png}]},raw:"private raw"})});
@@ -82,5 +87,5 @@ for(const [portal,app,prefix] of [["index.html","app.js","message"],["admin.html
   let finishWeb;webSandbox.fetch=async()=>({ok:true,status:200,json:()=>new Promise(resolve=>{finishWeb=resolve;})});
   const webPending=webRun('openMessage("late")');for(let i=0;i<6;i++)await Promise.resolve();webRun("signedOut()");finishWeb({ok:true,message:{html:"<p>Stale private mail</p>"},raw:"stale raw"});await webPending;
   assert.equal(webShown.length,1,"A stale Webmail response cannot redisplay private mail after logout");assert.equal(web.id("message-raw").textContent,"");
-  console.log("Mail reader checks passed: safe HTML/styles/links, blocked trackers, raster CID signatures, opaque sandbox/CSP, HTML-only fallback, forwarded hierarchy, image-consent reset, portal switching/logout, and stale-response cleanup.");
+  console.log("Mail reader checks passed: safe HTML/styles/links, default remote images, safe sender stylesheet rules, raster CID signatures, opaque sandbox/CSP, plain-only fallback, forwarded hierarchy, format defaults, portal switching/logout, and stale-response cleanup.");
 })().catch(error=>{console.error(error);process.exitCode=1;});

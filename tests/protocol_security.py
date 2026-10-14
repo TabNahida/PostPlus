@@ -173,7 +173,15 @@ def run(s):
 
 
 def data_deadline(s):
-    s.config.update(timeout_seconds=2, smtp_data_timeout_seconds=1)
+    # Hosted Windows runners may schedule Python's select() much later than its
+    # requested interval. A one-second budget with three required loop turns
+    # measured runner scheduling as well as SMTP behavior. Send several lines
+    # together, then keep making progress across a wider, bounded DATA window.
+    # The idle timeout is longer than the whole test, so only the absolute DATA
+    # deadline can close a connection while this client is continuously active.
+    data_seconds = 5
+    watchdog_seconds = 10
+    s.config.update(timeout_seconds=15, smtp_data_timeout_seconds=data_seconds)
     s.save()
     for name in ("auth", "storage", "smtp"):
         s.start(name)
@@ -186,12 +194,13 @@ def data_deadline(s):
         assert client.docmd("DATA")[0] == 354
         started = time.monotonic()
         closed = False
-        lines = 0
-        while time.monotonic() - started < 3:
+        lines = 3
+        client.sock.sendall(b"Subject: slow DATA\r\n\r\nsmall valid line\r\n")
+        while time.monotonic() - started < watchdog_seconds:
             try:
                 client.sock.sendall(b"small valid line\r\n")
                 lines += 1
-                ready, _, _ = select.select([client.sock], [], [], 0.1)
+                ready, _, _ = select.select([client.sock], [], [], 0.25)
                 if ready:
                     assert client.sock.recv(1024) == b"", "DATA expiry must close without accepting mail"
                     closed = True
@@ -199,14 +208,15 @@ def data_deadline(s):
             except (BrokenPipeError, ConnectionResetError, ConnectionAbortedError):
                 closed = True
                 break
-        assert closed and lines >= 3, (closed, lines, time.monotonic() - started)
+        elapsed = time.monotonic() - started
+        assert closed and data_seconds - 0.5 <= elapsed < watchdog_seconds, (closed, lines, elapsed)
         client.close()
     assert s.rpc("storage", op="queue_list", limit=100)["jobs"] == []
     # A complete DATA exchange clears the absolute deadline for subsequent commands.
     with smtplib.SMTP("127.0.0.1", s.ports["smtp"], local_hostname="localhost", timeout=5) as client:
         client.ehlo()
         assert client.sendmail("sender@localhost", [recipient], b"Subject: complete\r\n\r\nbody\r\n") == {}
-        time.sleep(1.2)
+        time.sleep(data_seconds + 0.5)
         assert client.noop()[0] == 250
     assert len(s.rpc("storage", op="queue_list", limit=100)["jobs"]) == 1
     s.stop("smtp")

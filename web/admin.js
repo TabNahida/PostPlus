@@ -2,7 +2,7 @@
 const t = (...args) => PostPlusI18n.t(...args);
 const $ = id => document.getElementById(id);
 const state = {user:null,view:"overview",userMode:"create"};
-const viewLabels = {overview:"Overview",accounts:"User accounts",queue:"Delivery queue",logs:"Service logs","api-keys":"API keys",settings:"Server settings"};
+const viewLabels = {overview:"Overview",accounts:"User accounts",queue:"Delivery queue",logs:"Service logs","api-keys":"API keys",settings:"Server settings",maintenance:"Server maintenance",restart:"Restart and shutdown"};
 const inspectionReader=PostPlusMailReader.create($("inspect-body"));
 let settingsData = null;
 let settingsEditor = null;
@@ -164,10 +164,10 @@ async function switchView(view) {
     if (name === view) $(`nav-${name}`).setAttribute("aria-current","page");
     else $(`nav-${name}`).removeAttribute("aria-current");
   }
-  $("admin-refresh").hidden = view === "settings";
+  $("admin-refresh").hidden = ["settings","maintenance","restart"].includes(view);
   if (view === "logs") await loadLogs();
   else if (view === "api-keys") await loadApiKeys();
-  else if (view === "settings") { if (!settingsData) await loadSettings(); }
+  else if (["settings","maintenance","restart"].includes(view)) { if (!settingsData) await loadSettings(); }
   else {await loadAdmin();if(view==="accounts")await accessControl?.refresh();}
 }
 document.querySelectorAll("[data-view]").forEach(button => button.addEventListener("click", () => switchView(button.dataset.view)));
@@ -485,12 +485,12 @@ async function loadSettings() {
     if (state.user !== user) return;
     settingsData = data;
     if(!updateControl){updateControl=PostPlusUpdate.create($("admin-update"),{prefix:"admin-update",request:(path,options)=>api(path,{...options,quiet:true}),canChange:()=>Boolean(state.user?.admin&&!settingsSaving&&!restartBusy&&!shutdownPending),adminUrl:()=>settingsData?.admin_url||location.href,onBusy:updateControls});updateControl.load();}
-    if (!acmeControl) acmeControl=PostPlusAcme.create($("admin-acme"),{request:(path,options)=>api("/api/admin/acme"+path,options),domain:data.values.domain,prefix:"admin-acme",onCertificate:async paths=>{if($("settings-form").hidden)await loadSettings();if(!settingsEditor || $("settings-form").hidden)throw new Error(t("Load server settings before applying certificate paths."));for(const [key,value] of Object.entries(paths)){const input=$("config-"+key);if(input){input.value=value;input.closest("details").open=true;}}settingsEditor.translate();}});
+    if (!acmeControl) acmeControl=PostPlusAcme.create($("admin-acme"),{request:(path,options)=>api("/api/admin/acme"+path,options),domain:data.values.domain,prefix:"admin-acme",onCertificate:async paths=>{if($("settings-form").hidden)await loadSettings();if(!settingsEditor || $("settings-form").hidden)throw new Error(t("Load server settings before applying certificate paths."));for(const [key,value] of Object.entries(paths)){const input=$("config-"+key);if(input){input.value=value;input.closest("details").open=true;}}settingsEditor.translate();settingsEditor.notify?.();}});
     $("settings-pending").hidden = !data.restart_required;
     $("restart-open").disabled=data.restart_available===false;
     maintenanceStatus("settings-apply-hint",data.restart_available===false ? "This standalone service saves settings without restarting. Restart the affected services manually after saving." : "Saving validates the configuration and restarts only affected services. Other services continue running.");
     settingsEditor?.dispose();
-    settingsEditor = PostPlusSettings.create($("settings-fields"),data.schema,data.values,{prefix:"config",secretStatus:data.secret_status,mailClients:true,dnsRequest:(path,options)=>api('/api/admin/dns'+path,options),generateDkim:body=>api("/api/admin/dkim",{method:"POST",body})});
+    settingsEditor = PostPlusSettings.create($("settings-fields"),data.schema,data.values,{prefix:"config",secretStatus:data.secret_status,mailClients:true,onChange:updateSettingsCount,dnsRequest:(path,options)=>api('/api/admin/dns'+path,options),generateDkim:body=>api("/api/admin/dkim",{method:"POST",body})});
     $("settings-success").hidden = true;
     $("settings-form").hidden = false;
     setLink("open-webmail",data.web_url);
@@ -500,6 +500,10 @@ async function loadSettings() {
   finally { settingsLoading = false; $("settings-loading").hidden = true; }
 }
 $("settings-edit").addEventListener("click",loadSettings);
+function updateSettingsCount(count=settingsEditor?.changedCount?.()||0) {
+  $("settings-change-count").textContent=t(count===0?"No unsaved changes":count===1?"1 setting changed":"{count} settings changed",{count});
+  $("settings-change-count").classList.toggle("has-changes",count>0);
+}
 async function saveSettings({apply=true}={}) {
   if(settingsSaving || restartBusy || updateBusy || !settingsEditor)return false;
   if($("settings-form").hidden)return true;
@@ -627,12 +631,13 @@ $("backup-create").addEventListener("click",async()=>{
   } catch(error){if(version===backupVersion){maintenanceStatus("backup-status","");formError("backup-error",error.message);$("backup-create").disabled=false;}}
 });
 $("shutdown-open").addEventListener("click",()=>{formError("shutdown-error");$("shutdown-dialog").showModal();});
+$("shutdown-settings").addEventListener("click",async()=>{$("shutdown-dialog").close();await switchView("settings");if(!$("settings-error").hidden)$("settings-error").scrollIntoView({block:"center"});});
 $("shutdown-form").addEventListener("submit",event=>{
   event.preventDefault();if(shutdownPending)return;
   busy(event.currentTarget,async()=>{
     shutdownPending=true;formError("shutdown-error");
     try {
-      if(!await saveSettings({apply:false}))throw new Error(t("Server settings could not be saved. Check the highlighted fields before shutting down."));
+      if(!await saveSettings({apply:false}))throw new Error($("settings-error").textContent||t("Server settings could not be saved. Check the highlighted fields before shutting down."));
       await api("/api/admin/shutdown",{method:"POST",body:{}});
       backupVersion++;clearTimeout(backupTimer);
       maintenanceStatus("backup-status","");
@@ -650,6 +655,7 @@ document.addEventListener("postplus:language", () => {
   for (const id of ["login-error","user-error","logs-error","settings-error","api-keys-error","api-key-error","api-key-revoke-error"]) formError(id);
   $("user-dialog-title").textContent = t(state.userMode === "password" ? "Reset password" : "Create user");
   settingsEditor?.translate();
+  updateSettingsCount();
   updateControl?.translate();
   renderPasswordHint();
   acmeControl?.translate();

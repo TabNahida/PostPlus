@@ -40,7 +40,7 @@ Example send body:
 
 Storage and the mail protocols preserve original message bytes. Message views convert declared header/body character sets to UTF-8 for display. In addition to `subject`, `from`, `to`, `date`, and `text`, `message` includes `html`, a `forwarded` array of attached message views, and `inline_images` with `cid`, `content_type`, and Base64 `data` for supported raster CID images. Empty text/HTML parts use empty strings. MIME attachments are excluded from the main body; `message/rfc822` forwards retain their own headers and body. Forwarded views and inline images have depth, count, and size limits; raw source is retained for content outside those limits.
 
-The browser reader sanitizes HTML and renders it in a sandboxed frame with a restrictive content policy. Scripts, forms, embedded pages, external styles, and automatic remote-image requests are blocked; users can explicitly load remote images. Binary attachment download is not implemented. Reading a message updates its Seen flag, so this endpoint should not be treated as a side-effect-free prefetch API.
+The browser reader sanitizes HTML and renders it in a sandboxed frame with a restrictive content policy. Scripts, forms, embedded pages, and external stylesheets are blocked. Safe inline styles, bounded sender stylesheet/media-query rules, and table layout attributes are preserved inside the opaque frame. HTTP(S) remote images load automatically with no-referrer policy; opening a message can therefore contact its sender's image servers. Raw MIME remains available in the collapsed source view. Binary attachment download is not implemented. Reading a message updates its Seen flag, so this endpoint should not be treated as a side-effect-free prefetch API.
 
 ## Administration
 

@@ -4,7 +4,7 @@ Webmail badges show unread counts for Inbox, Junk and Archive, and unsent draft 
 
 ## Latest verification code
 
-`GET /api/verification-code` on the Webmail origin accepts a session cookie or a mailbox key with `codes:read`. It searches up to 30 newest INBOX messages from the past 15 minutes, with a bounded source-byte budget. Drafts are excluded; lookup/copy does not mark messages Seen. Account/message filters are rejected.
+`GET /api/verification-code` on the Webmail origin accepts a session cookie or a mailbox key with `codes:read`. It searches up to 30 newest messages from the past 15 minutes, with a bounded source-byte budget. The optional `folder=INBOX` (default) or `folder=Trash` selects the current folder; all other folders and account/message filters are rejected. Webmail displays this panel only in Inbox and Trash. Drafts are excluded; lookup/copy does not mark messages Seen. Account/message filters are rejected.
 
 Decoded plain text and HTML are checked for confident digit/alphanumeric verification codes. Attachments, forwarded/quoted content, hidden HTML, URLs and ambiguous competing codes are ignored. A match returns:
 
@@ -18,7 +18,7 @@ No match returns `{"ok":true,"found":false}`. Times are Unix seconds. `expires_a
 
 Administration → **User accounts** → **Invite to mailbox** opens invitation creation, metadata and revocation in a dialog beside **Create user**. Closing it clears any one-time registration link, including a late creation reply.
 
-The account table starts expanded, can be collapsed, and filters email addresses as you type. Wildcard forwarding is a separate, initially collapsed table alongside the account password policy.
+The account table starts expanded, can be collapsed, and filters email addresses as you type. Mail forwarding is a separate, initially collapsed table above the account password policy. All three disclosure headers have the same dimensions. Invitation creation and the one-time link/copy actions appear above the independently scrolling invitation history.
 
 ## Account deletion
 
@@ -43,7 +43,7 @@ Invitations register ordinary accounts in the configured domain. An assigned loc
 
 Secure account transport and rate limits apply; loopback development can explicitly enable insecure auth. Live password policy, creation and consumption are checked atomically. Failed registration preserves remaining uses. Invalid/expired/revoked/exhausted tokens return 410; duplicate mailbox returns 409. Only token digests are stored.
 
-## Wildcard local forwarding
+## Local mail forwarding
 
 Administration → **User accounts** manages local inbox routing.
 
@@ -53,7 +53,11 @@ Administration → **User accounts** manages local inbox routing.
 | POST `/api/admin/forwarding` | `{"pattern":"sales-*","destination":"owner@example.com"}`; returns 201. | `forwarding:write` |
 | DELETE `/api/admin/forwarding/{id}` | Removes the rule for future mail. | `forwarding:write` |
 
-Patterns match local mailbox names, optionally suffixed with the configured domain. `*` matches any string; `?` matches one character. Domain wildcards and regular expressions are unsupported. Destinations must be existing local mailboxes. Exact registered mailboxes take priority; overlaps prefer most literal characters, fewest `*`, fewest `?`, then lowest rule ID.
+Use an exact source address or prefix, such as `support@example.com` or `support`, for ordinary forwarding. The source can be an existing account or an alias without an account. An exact rule redirects delivery to its destination inbox; it does not keep an additional copy in the source inbox. Exact self-forwarding is rejected.
+
+Patterns optionally include the configured domain. `*` matches any string; `?` matches one character. Domain wildcards and regular expressions are unsupported. Wildcard rules apply only to unregistered addresses, preserving normal delivery to accounts without an exact forwarding rule. Overlapping patterns prefer most literal characters, fewest `*`, fewest `?`, then lowest rule ID.
+
+Destinations must be existing local mailboxes. Routing is a single hop directly into the destination inbox; destination forwarding rules are not evaluated again. Chained or cyclic rules therefore cannot loop or unexpectedly move the message onward. External mailbox destinations are unsupported.
 
 SMTP and Webmail share routing, preserve original MIME recipients, pin the chosen inbox in the durable queue, and deduplicate equivalent destinations. Rule edits cannot reroute queued mail. Missing targets retry rather than silently dropping mail. An unknown address without a rule remains unknown. Unauthenticated external relay remains blocked.
 

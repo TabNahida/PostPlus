@@ -385,6 +385,8 @@ private:
         const auto destination = address(request, "destination");
         if (!local_address(destination)) return {{"ok", false}, {"code", "nonlocal_destination"}, {"error", "Forwarding destination must be an existing mailbox in the configured local domain."}};
         if (!mailbox_exists(destination)) return {{"ok", false}, {"code", "unknown_destination"}, {"error", "Forwarding destination mailbox does not exist."}};
+        if (pattern.find_first_of("*?") == std::string::npos && pattern + "@" + local_domain() == destination)
+            return {{"ok", false}, {"code", "self_forwarding"}, {"error", "An exact forwarding rule must use a different destination mailbox."}};
         Statement duplicate(db_, "SELECT 1 FROM forwarding_rules WHERE domain=? AND pattern=?"); duplicate.text(1, local_domain()); duplicate.text(2, pattern);
         if (duplicate.row()) return {{"ok", false}, {"code", "duplicate_rule"}, {"error", "A forwarding rule for this pattern already exists."}};
         Statement count(db_, "SELECT COUNT(*) FROM forwarding_rules"); count.row();
@@ -430,8 +432,7 @@ private:
         }
         if (!local_address(recipient)) return resolution(recipient, "");
         Json result = resolution(recipient, "");
-        if (mailbox_exists(recipient)) result = resolution(recipient, recipient);
-        else {
+        {
             Statement query(db_, "SELECT id,pattern,destination,created_at FROM forwarding_rules WHERE domain=? ORDER BY id"); query.text(1, local_domain());
             Json selected = nullptr; std::array<unsigned, 3> best{};
             const auto prefix = recipient.substr(0, recipient.find('@'));
@@ -442,8 +443,14 @@ private:
                 if (selected.is_null() || rank[0] > best[0] || (rank[0] == best[0] && rank[1] < best[1]) ||
                     (rank[0] == best[0] && rank[1] == best[1] && rank[2] < best[2])) { selected = rule_row(query); best = rank; }
             }
-            if (!selected.is_null()) {
+            // Explicit mailbox forwarding overrides ordinary inbox delivery.
+            // Wildcards remain an alias fallback and cannot capture accounts.
+            const auto exact = !selected.is_null() && selected.at("pattern").get<std::string>().find_first_of("*?") == std::string::npos;
+            if (!exact && mailbox_exists(recipient)) result = resolution(recipient, recipient);
+            else if (!selected.is_null()) {
                 const auto destination = selected.at("destination").get<std::string>();
+                // The resolved inbox is terminal: never run the destination
+                // through this resolver again, so chained/cyclic rules cannot loop.
                 result = resolution(recipient, local_address(destination) && mailbox_exists(destination) ? destination : "", selected);
             }
         }
@@ -713,17 +720,20 @@ private:
     }
     Json verification_candidates(const Json& request) {
         const auto username = address(request, "username");
+        const auto selected_folder = folder(request);
+        if (selected_folder != "INBOX" && selected_folder != "Trash")
+            throw std::invalid_argument("Verification codes are available only in Inbox or Trash.");
         const auto max_age = integer_field(request, "max_age_seconds", 900, 1, 86400);
         const auto limit = integer_field(request, "limit", 30, 1, 50);
         const auto current = now();
         const auto budget = std::min<std::int64_t>(10 * 1024 * 1024, max_message_);
-        // Query only recent own-account INBOX mail; never mutate flags. Filter
+        // Query only recent own-account mail in the selected folder; never mutate flags. Filter
         // the size before reading raw so oversized MIME cannot exhaust memory.
         Statement query(db_, "SELECT m.id,m.raw,m.created_at,m.size FROM messages m "
-            "LEFT JOIN message_flags f ON f.id=m.id WHERE m.username=? AND m.folder='INBOX' "
+            "LEFT JOIN message_flags f ON f.id=m.id WHERE m.username=? AND m.folder=? "
             "AND COALESCE(f.draft,0)=0 AND m.created_at>=? AND m.created_at<=? AND m.size<=? "
             "ORDER BY m.created_at DESC,m.uid DESC LIMIT 50");
-        query.text(1, username); query.integer(2, current - max_age); query.integer(3, current); query.integer(4, budget);
+        query.text(1, username); query.text(2, selected_folder); query.integer(3, current - max_age); query.integer(4, current); query.integer(5, budget);
         Json messages = Json::array(); std::int64_t bytes = 0;
         while (query.row() && static_cast<std::int64_t>(messages.size()) < limit) {
             const auto size = query.integer(3);

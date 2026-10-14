@@ -277,10 +277,13 @@ public:
             load_static(root, "/admin-dns.js", "admin-dns.js", "application/javascript; charset=utf-8");
             load_static(root, "/update.js", "update.js", "application/javascript; charset=utf-8");
             load_static(root, "/admin-access.js", "admin-access.js", "application/javascript; charset=utf-8");
+            load_static(root, "/admin-access.css", "admin-access.css", "text/css; charset=utf-8");
+            load_static(root, "/admin-settings.css", "admin-settings.css", "text/css; charset=utf-8");
         } else {
             load_static(root, "/app.js", "app.js", "application/javascript; charset=utf-8");
             load_static(root, "/verification-code.js", "verification-code.js", "application/javascript; charset=utf-8");
             load_static(root, "/verification-code.css", "verification-code.css", "text/css; charset=utf-8");
+            load_static(root, "/webmail.css", "webmail.css", "text/css; charset=utf-8");
             load_static(root, "/register", "register.html", "text/html; charset=utf-8");
             load_static(root, "/register.js", "register.js", "application/javascript; charset=utf-8");
         }
@@ -569,8 +572,10 @@ private:
         auto parameter = [&](const std::string& key, const std::string& fallback = "") { auto found=query.find(key); return found==query.end()?fallback:found->second; };
         if (api_key_management_route(path)) return manage_api_keys(request, session, path);
         if (request.method == "GET" && path == "/api/verification-code") {
-            if (!query.empty()) throw ApiError(400, "Verification code lookup does not accept account or message filters.");
-            const auto candidates = rpc(config_, "storage", {{"op","verification_candidates"},{"username",session.username},{"max_age_seconds",900},{"limit",30}});
+            const auto folder = parameter("folder", "INBOX");
+            if (query.size() > 1 || (!query.empty() && !query.contains("folder")) || (folder != "INBOX" && folder != "Trash"))
+                throw ApiError(400, "Verification code lookup accepts only an Inbox or Trash folder.");
+            const auto candidates = rpc(config_, "storage", {{"op","verification_candidates"},{"username",session.username},{"folder",folder},{"max_age_seconds",900},{"limit",30}});
             require_ok(candidates, "Unable to load verification codes.");
             const auto now = std::chrono::duration_cast<std::chrono::seconds>(std::chrono::system_clock::now().time_since_epoch()).count();
             for (const auto& candidate : candidates.at("messages")) {
