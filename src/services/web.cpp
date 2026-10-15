@@ -9,6 +9,7 @@
 #include "postplus/access.hpp"
 #include "postplus/forwarding.hpp"
 #include "postplus/verification_code.hpp"
+#include "postplus/remote_image.hpp"
 
 #include <algorithm>
 #include <charconv>
@@ -245,12 +246,44 @@ Json message_view(const std::string& raw) {
     try {
         auto part = mime::parse(raw);
         ViewBudget budget;
-        return part_view(part, budget, 0);
+        auto view=part_view(part, budget, 0);
+        std::map<std::string,std::size_t> indexes;
+        std::function<void(Json&)> collect=[&](Json& message) {
+            message["remote_images"]=Json::array();
+            for(const auto& url:extract_remote_image_urls(message.value("html",std::string{}))) {
+                if(!indexes.contains(url) && indexes.size()>=64) continue;
+                const auto [position,added]=indexes.emplace(url,indexes.size());
+                (void)added;
+                message["remote_images"].push_back({{"url",url},{"index",position->second}});
+            }
+            for(auto& forwarded:message["forwarded"])collect(forwarded);
+        };
+        collect(view);
+        return view;
     } catch (const std::exception&) {
         return {{"subject", ""}, {"from", ""}, {"to", ""}, {"date", ""},
                 {"text", "The message could not be decoded. View the original message below."},
                 {"html", ""}, {"forwarded", Json::array()}, {"inline_images", Json::array()}};
     }
+}
+
+HttpResponse message_image(const Json& view,const std::string& value) {
+    std::size_t index=64;
+    const auto [end,error]=std::from_chars(value.data(),value.data()+value.size(),index);
+    if(value.empty() || error!=std::errc{} || end!=value.data()+value.size() || index>=64)
+        throw ApiError(400,"Invalid remote image index.");
+    std::string source;
+    std::function<void(const Json&)> find=[&](const Json& message) {
+        if(message.contains("remote_images"))for(const auto& image:message.at("remote_images"))
+            if(image.at("index").get<std::size_t>()==index)source=image.at("url").get<std::string>();
+        for(const auto& forwarded:message.at("forwarded"))find(forwarded);
+    };
+    find(view);
+    if(source.empty())throw ApiError(404,"Remote image not found in this message.");
+    try {
+        const auto image=fetch_remote_image(source);
+        return json_response({{"ok",true},{"content_type",image.content_type},{"data",base64_encode(image.body)}});
+    } catch(const std::exception&) {throw ApiError(502,"Remote image is unavailable or unsafe.");}
 }
 
 struct WebSession {
@@ -627,6 +660,10 @@ private:
             if (request.method == "GET") {
                 auto result = rpc(config_, "storage", {{"op", "get"}, {"username", session.username}, {"id", id}});
                 require_ok(result, "Message not found.", 404);
+                if(query.contains("image")) {
+                    if(query.size()!=1)throw ApiError(400,"Invalid remote image query.");
+                    return message_image(message_view(result.at("raw").get<std::string>()),parameter("image"));
+                }
                 auto marked = rpc(config_, "storage", {{"op", "flags"}, {"username", session.username}, {"id", id}, {"seen", true},{"uid",result.at("uid")}});
                 require_ok(marked, "Unable to update message flags.");
                 result["message"] = message_view(result.at("raw").get<std::string>());
@@ -798,6 +835,10 @@ private:
                 auto result=rpc(config_,"storage",{{"op","get"},{"username",username},{"id",id}});
                 require_ok(result,"Message not found.",404);
                 result["message"]=message_view(result.at("raw").get<std::string>());
+                if(query.contains("image")) {
+                    if(query.size()!=2)throw ApiError(400,"Invalid remote image query.");
+                    return message_image(result["message"],parameter("image"));
+                }
                 log(service_name,"administrator " + session.username + " inspected message " + id + " in mailbox " + username);
                 return json_response(result);
             }

@@ -18,6 +18,7 @@ from integration import PASSWORD, ROOT, Suite
 
 USER = "reader@localhost"
 ADMIN = "admin@localhost"
+OUTSIDER = "other@localhost"
 DATE = "Tue, 13 Oct 2026 10:20:30 +0000"
 PNG = base64.b64decode(
     "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+jHh8AAAAASUVORK5CYII="
@@ -98,6 +99,14 @@ def fixtures():
     yield "utf8-base64-html", headers(encoded_word("只有 HTML 的邮件")) + text_part(
         "<article><h1>HTML 邮件</h1><p>没有纯文本替代项。</p></article>", "html", cte="base64"), {
             "subject": "只有 HTML 的邮件", "text": "", "html": "没有纯文本替代项。"}
+
+    yield "remote-raster-index", headers("Remote newsletter logo") + text_part(
+        '<style>.logo{width:112px}</style><!-- <img src="https://example.com/comment.png"> -->'
+        '<script>const ignored="<img src=\'https://example.com/script.png\'>";</script>'
+        '<p>Remote image metadata.</p><img class="logo" src="https://example.com/logo.png?a=1&amp;b=2">'
+        '<img src="https://example.com/logo.png?a=1&amp;b=2"><img src="http://127.0.0.1/private.png">', "html"), {
+            "subject": "Remote newsletter logo", "text": "", "html": "Remote image metadata.",
+            "remote_images": [{"url": "https://example.com/logo.png?a=1&b=2", "index": 0}]}
 
     meta_body = '<html><head><meta charset="gb2312"></head><body><p>由网页声明编码的中文。</p></body></html>'
     yield "html-meta-charset", headers("HTML meta charset") + (
@@ -207,15 +216,17 @@ def check_view(view, expected, label):
         assert base64.b64decode(actual["data"], validate=True) == image["data"], (label, "CID image bytes changed")
     else:
         assert view["inline_images"] == [], (label, "forwarded or attached images leaked into parent scope", view)
+    assert view.get("remote_images", []) == expected.get("remote_images", []), (label, "unsafe or unstable remote image index", view.get("remote_images"))
 
 
 def run(suite):
     for service in ("auth", "storage", "filter", "smtp", "imap", "web", "admin", "delivery"):
         suite.start(service)
-    for username in (ADMIN, USER):
+    for username in (ADMIN, USER, OUTSIDER):
         assert suite.rpc("auth", op="create", username=username, password=PASSWORD, admin=username == ADMIN)["ok"]
     administrator = login(suite, "admin", ADMIN)
     reader = login(suite, "web", USER)
+    outsider = login(suite, "web", OUTSIDER)
     samples = list(fixtures())
     for index, (label, raw, expected) in enumerate(samples):
         assert raw.endswith(b"\r\n") and max(map(len, raw.split(b"\r\n"))) <= 998, (label, "invalid SMTP fixture framing")
@@ -236,6 +247,17 @@ def run(suite):
         assert not after_admin["seen"] and after_admin["raw"] == raw, (label, "administrator inspection changed the message")
         status, _, web = suite.http("web", "GET", "/api/messages/" + identifier, headers=reader)
         assert status == 200 and web["message"] == admin["message"], (label, "admin and Webmail display disagree", web, admin)
+        if label == "remote-raster-index":
+            for service, base, auth in (("web", f"/api/messages/{identifier}?", reader),
+                                        ("admin", f"/api/admin/messages/{identifier}?username={USER}&", administrator)):
+                for suffix, expected_status in (("image=-1", 400), ("image=64", 400), ("image=1", 404),
+                                                ("image=0&url=https%3A%2F%2Fexample.com%2Fevil.png", 400)):
+                    status, _, response = suite.http(service, "GET", base + suffix, headers=auth)
+                    assert status == expected_status, (service, suffix, status, response)
+                status, _, response = suite.http(service, "GET", base + "image=0")
+                assert status == 401, (service, "Image proxy must require the mailbox or administrator session", status, response)
+            status, _, response = suite.http("web", "GET", f"/api/messages/{identifier}?image=0", headers=outsider)
+            assert status == 404, ("Another mailbox cannot load this message's remote images", status, response)
         after_web = suite.rpc("storage", op="get", username=USER, id=identifier)
         assert after_web["seen"] and after_web["raw"] == raw, (label, "Webmail view altered original MIME")
         with imaplib.IMAP4("127.0.0.1", suite.ports["imap"], timeout=10) as client:

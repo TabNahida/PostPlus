@@ -34,7 +34,7 @@ function fixture() {
     addEventListener(name,callback){events.set(name,callback);}},
     PostPlusI18n:{language:"en",t:(text,args={})=>text.replace(/\{(\w+)\}/g,(match,name)=>args[name]??match),error:data=>data.error||"Failed"},
     PostPlusAddress:{create:()=>({setDomain(){},setAddress(){},address:()=>"admin@example.com"})},
-    PostPlusPreferences:{closeNavigation(){}},PostPlusSize:{format:()=>"0 B"},PostPlusMailReader:{create:()=>({show(){},clear(){}})},URL,TextEncoder,AbortController,
+    PostPlusPreferences:{closeNavigation(){}},PostPlusSize:{format:()=>"0 B"},PostPlusMailReader:{bodySource:raw=>raw||"",create:()=>({show(){},clear(){}})},URL,TextEncoder,AbortController,
     location:{origin:"http://localhost:8081"},navigator:{clipboard:{writeText:async value=>clipboard.push(value)}},
     localStorage:{getItem(){throw new Error("Keys must not use browser storage");},setItem(){throw new Error("Keys must not use browser storage");}},
     setTimeout:callback=>{const id=++timerId;timers.set(id,callback);return id;},clearTimeout:id=>timers.delete(id),fetch:async route=>({ok:route==="/api/public/config",status:route==="/api/public/config"?200:401,json:async()=>route==="/api/public/config"?{ok:true,domain:"example.com"}:{ok:false}})};

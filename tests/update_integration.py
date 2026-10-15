@@ -257,6 +257,18 @@ class Installation:
                 assert result["state"] == expected, result
                 if "services" in result:
                     assert set(result["services"]) == set(job["services"]), result
+                # update_finished atomically publishes the terminal status,
+                # then removes its reservation. A reader can observe the
+                # published file between those two filesystem operations.
+                # Wait briefly for that final cleanup, while still failing
+                # explicitly if a completed job leaves maintenance locked.
+                cleanup_deadline = min(deadline, time.monotonic() + 5)
+                while (self.state / "reservation").exists():
+                    if running is not None:
+                        assert running.process.poll() is None, "supervisor exited while releasing the update reservation"
+                    assert time.monotonic() < cleanup_deadline, (
+                        "terminal update left its maintenance reservation", result)
+                    time.sleep(0.01)
                 return result
             time.sleep(0.05)
         diagnostics = "".join(line for server in self.servers for line in server.lines[-20:])

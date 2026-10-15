@@ -27,6 +27,7 @@ It returns `ok`, `username`, `admin`, `csrf`, and `expires_in`, and sets the `pp
 | GET `/api/folders` | Six folders with `name`, `messages`, `unseen`, `bytes` (also `total`/`unread` aliases), and the current user's `usage`. |
 | GET `/api/messages?folder=INBOX` | The selected folder (defaults to INBOX). Entries include id, uid, size, seen, and internal_date; up to the newest 100 include optional subject/from/date summaries. |
 | GET `/api/messages/{id}` | `raw` source and decoded `message` headers, text/HTML bodies, forwarded views, and inline images. Marks the message as seen. |
+| GET `/api/messages/{id}?image={index}` | Fetch a remote raster image indexed in this message. Returns `content_type` and Base64 `data`; does not change message flags. |
 | DELETE `/api/messages/{id}` | Moves the current user's message to Trash. Explicit `?permanent=true` permanently deletes a message already in Trash, with a folder/UID guard. |
 | POST `/api/messages/{id}/move` | `{ "folder": "Archive" }`; moves between supported folders. |
 | POST `/api/drafts` | `to` array, `subject`, `text`, and optional existing draft `id`. Empty recipients and content are allowed. Returns id/uid/folder. |
@@ -40,7 +41,11 @@ Example send body:
 
 Storage and the mail protocols preserve original message bytes. Message views convert declared header/body character sets to UTF-8 for display. In addition to `subject`, `from`, `to`, `date`, and `text`, `message` includes `html`, a `forwarded` array of attached message views, and `inline_images` with `cid`, `content_type`, and Base64 `data` for supported raster CID images. Empty text/HTML parts use empty strings. MIME attachments are excluded from the main body; `message/rfc822` forwards retain their own headers and body. Forwarded views and inline images have depth, count, and size limits; raw source is retained for content outside those limits.
 
-The browser reader sanitizes HTML and renders it in a sandboxed frame with a restrictive content policy. Scripts, forms, embedded pages, and external stylesheets are blocked. Safe inline styles, bounded sender stylesheet/media-query rules, and table layout attributes are preserved inside the opaque frame. HTTP(S) remote images load automatically with no-referrer policy; opening a message can therefore contact its sender's image servers. Raw MIME remains available in the collapsed source view. Binary attachment download is not implemented. Reading a message updates its Seen flag, so this endpoint should not be treated as a side-effect-free prefetch API.
+The browser reader sanitizes HTML and renders it in a sandboxed frame with a restrictive content policy. Scripts, forms, embedded pages, and external stylesheets are blocked. Safe inline styles, bounded sender stylesheet/media-query rules, and table layout attributes are preserved inside the opaque frame. Remote images load automatically through authenticated requests to the server and are embedded as validated raster data inside the frame. Opening a message can therefore contact its sender's image servers, without forwarding browser credentials or a referrer.
+
+Each decoded view includes a `remote_images` array of `{url,index}` entries, sharing at most 64 distinct indexes across forwarded messages. The image endpoint accepts only an index belonging to the authorized message, with no caller-supplied URL. It allows public HTTP(S) destinations on their default ports, verifies HTTPS certificates, rejects redirects and private addresses, and limits responses to 2 MiB of PNG, JPEG, GIF or WebP data. It returns 400 for an invalid index, 404 for a missing message or image, and 502 for an unavailable or unsafe remote image. Administration inspection uses `/api/admin/messages/{id}?username={mailbox}&image={index}` with the same administrator authorization as message inspection.
+
+The collapsed body-source view omits top-level transport headers. The API's `raw` field still contains the complete original message. Binary attachment download is not implemented. Reading the ordinary message endpoint updates its Seen flag, so it should not be treated as a side-effect-free prefetch API.
 
 ## Administration
 

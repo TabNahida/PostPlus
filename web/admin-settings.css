@@ -6,7 +6,9 @@
   display:flex;
   align-items:center;
   gap:24px;
-  margin:28px 0 8px;
+  width:calc(100% - 48px);
+  max-width:920px;
+  margin:28px auto 20px;
   padding:20px 24px;
   border:1px solid var(--control-border);
   border-radius:12px;
@@ -39,7 +41,7 @@
 .operation-cards .button { margin:0 8px 8px 0; }
 #restart-panel { margin:28px 0 0; }
 @media(max-width:700px) {
-  #view-settings .settings-save { bottom:10px; padding:18px; gap:16px; align-items:stretch; flex-direction:column; }
+  #view-settings .settings-save { width:calc(100% - 32px); bottom:10px; padding:18px; gap:16px; align-items:stretch; flex-direction:column; }
   #settings-save { width:100%; }
   #view-settings .dns-technical { padding:18px 14px; }
   .admin-dns-fields { grid-template-columns:1fr; gap:20px; }

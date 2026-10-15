@@ -11,6 +11,19 @@ window.PostPlusMailReader = (() => {
   const t=(...args)=>PostPlusI18n.t(...args);
   const string=value=>typeof value==="string"?value:"";
   const escape=value=>string(value).replace(/[&<>"']/g,char=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[char]));
+  function bodySource(value) {
+    const raw=string(value),separator=/\r?\n\r?\n/.exec(raw);
+    if(!separator)return raw;
+    // Strip only a complete top-level RFC 5322 header block. MIME part headers
+    // and the encoded body stay byte-for-byte as received in this text view.
+    const lines=raw.slice(0,separator.index).split(/\r?\n/);let headers=0;
+    for(const line of lines){
+      if(/^[ \t]/.test(line)){if(!headers)return raw;}
+      else if(/^[\x21-\x39\x3b-\x7e]+:/.test(line))headers++;
+      else return raw;
+    }
+    return headers?raw.slice(separator.index+separator[0].length):raw;
+  }
   function safeUrl(value,image=false) {
     const raw=string(value).trim();
     if(!raw || /[\u0000-\u0020\u007f]/.test(raw))return "";
@@ -64,7 +77,7 @@ window.PostPlusMailReader = (() => {
     }
     return rules(sheet.cssRules);
   }
-  function sanitize(html,{inlineImages=[],loadRemoteImages=true}={}) {
+  function sanitize(html,{inlineImages=[],loadRemoteImages=true,remoteData}={}) {
     // Unlike DOMParser's HTML document, detached template content cannot
     // initiate image/iframe requests while the untrusted input is parsed.
     html=string(html);
@@ -89,7 +102,7 @@ window.PostPlusMailReader = (() => {
       const value=raster(image?.content_type,image?.data),name=cid(image?.cid);
       if(value && name && !images.has(name) && imageBytes+value.length<=16*1024*1024){images.set(name,value);imageBytes+=value.length;}
     }
-    let remoteImages=0,nodes=0,styleBytes=0;const text=[],styles=[];
+    let remoteImages=0,nodes=0,styleBytes=0;const text=[],styles=[],remoteSources=new Set();
     function walk(node,depth=0) {
       if(++nodes>30000 || depth>80)return "";
       if(node.nodeType===3){text.push(node.textContent || "");return escape(node.textContent || "");}
@@ -134,7 +147,7 @@ window.PostPlusMailReader = (() => {
         let src="",label="Image unavailable";
         if(/^cid:/i.test(source)){let name=source.slice(4);try{name=decodeURIComponent(name);}catch{}src=images.get(cid(name)) || "";}
         else if(/^data:/i.test(source)){const match=/^data:(image\/[^;,]+);base64,([\s\S]*)$/i.exec(source);if(match)src=raster(match[1],match[2]);}
-        else {const url=safeUrl(source,true);if(url){remoteImages++;label="Remote image blocked";if(loadRemoteImages)src=url;}}
+        else {const url=safeUrl(source,true);if(url){remoteImages++;remoteSources.add(url);label="Image unavailable";src=remoteData?.get(url) || (loadRemoteImages?url:"");}}
         if(!src){text.push(alt?`[${alt}]`:"");return `<span class="mail-image-placeholder">${escape(alt || t(label))}</span>`;}
         attributes+=` src="${escape(src)}" alt="${escape(alt)}" referrerpolicy="no-referrer" decoding="async"`;
       }
@@ -142,7 +155,7 @@ window.PostPlusMailReader = (() => {
       if(blocks.has(tag))text.push("\n");return result;
     }
     const clean=Array.from(parsed.content.childNodes).map(node=>walk(node)).join("");
-    return {html:clean,styles:styles.join("\n"),bodyAttributes,text:text.join("").replace(/\n[\t ]*\n(?:[\t ]*\n)+/g,"\n\n").trim(),remoteImages};
+    return {html:clean,styles:styles.join("\n"),bodyAttributes,text:text.join("").replace(/\n[\t ]*\n(?:[\t ]*\n)+/g,"\n\n").trim(),remoteImages,remoteSources};
   }
   function sourceDocument(body,styles,bodyAttributes) {
     const origin=new URL(location.href).origin;
@@ -154,8 +167,8 @@ window.PostPlusMailReader = (() => {
   }
   function node(tag,className,text) {const element=document.createElement(tag);if(className)element.className=className;if(text!==undefined)element.textContent=text;return element;}
   function create(container) {
-    let current=null,disposed=false;
-    function clear() {current=null;container.replaceChildren();}
+    let current=null,disposed=false,version=0,remoteData=new Map(),proxyImages=false;
+    function clear() {version++;current=null;remoteData=new Map();proxyImages=false;container.replaceChildren();}
     function render() {
       container.replaceChildren();if(!current || disposed)return;
       let count=0;const visited=new Set();
@@ -170,7 +183,7 @@ window.PostPlusMailReader = (() => {
           section.append(headers);
         }
         const body=node("div","mail-reader-body");section.append(body);
-        const html=string(message.html),clean=html?sanitize(html,{inlineImages:message.inline_images}):null;
+        const html=string(message.html),clean=html?sanitize(html,{inlineImages:message.inline_images,loadRemoteImages:!proxyImages,remoteData}):null;
         if(clean?.html) {
           const frame=node("iframe","mail-html-frame");frame.setAttribute("sandbox","allow-popups allow-popups-to-escape-sandbox");
           frame.setAttribute("title",t("Formatted message (scroll to read)"));frame.setAttribute("referrerpolicy","no-referrer");frame.setAttribute("credentialless","");
@@ -185,7 +198,39 @@ window.PostPlusMailReader = (() => {
     const translate=()=>render();document.addEventListener("postplus:language",translate);
     const appearance=typeof MutationObserver!=="undefined"?new MutationObserver(()=>{if(current)render();}):null;
     appearance?.observe(document.documentElement,{attributes:true,attributeFilter:["data-theme","data-reading"]});
-    return {show(message){clear();current=message;render();},clear,dispose(){clear();disposed=true;document.removeEventListener("postplus:language",translate);appearance?.disconnect();}};
+    function show(message,{loadImage}={}) {
+      clear();current=message;proxyImages=typeof loadImage==="function";render();
+      if(!proxyImages)return;
+      const selectedVersion=version,entries=[],seen=new Set();let total=0;
+      function collect(value,depth=0){
+        if(!value || typeof value!=="object" || depth>8)return;
+        const sources=sanitize(string(value.html),{loadRemoteImages:false}).remoteSources;
+        for(const image of (Array.isArray(value.remote_images)?value.remote_images:[])){
+          const url=safeUrl(image?.url,true),index=image?.index;
+          if(entries.length<64 && url && sources.has(url) && Number.isInteger(index) && index>=0 && index<64 && !seen.has(url)){seen.add(url);entries.push({url,index});}
+        }
+        for(const forward of (Array.isArray(value.forwarded)?value.forwarded:[]).slice(0,32))collect(forward,depth+1);
+      }
+      collect(message);let next=0,renderQueued=false;
+      function queueRender(){
+        if(renderQueued)return;
+        renderQueued=true;
+        Promise.resolve().then(()=>{renderQueued=false;if(selectedVersion===version && !disposed)render();});
+      }
+      async function worker(){
+        while(next<entries.length && selectedVersion===version && !disposed){
+          const image=entries[next++];
+          try {
+            const response=await loadImage(image.index);
+            if(selectedVersion!==version || disposed)return;
+            const data=raster(response?.content_type,response?.data);
+            if(data && total+data.length<=16*1024*1024){remoteData.set(image.url,data);total+=data.length;queueRender();}
+          } catch { /* A failed remote image cannot hide an otherwise readable message. */ }
+        }
+      }
+      for(let workerIndex=0;workerIndex<Math.min(4,entries.length);workerIndex++)worker();
+    }
+    return {show,clear,dispose(){clear();disposed=true;document.removeEventListener("postplus:language",translate);appearance?.disconnect();}};
   }
-  return {create,sanitize};
+  return {create,sanitize,bodySource};
 })();

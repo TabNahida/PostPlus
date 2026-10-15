@@ -152,9 +152,7 @@ $("logout").addEventListener("click", async () => {
 });
 
 
-async function switchView(view) {
-  if(restartBusy)return;
-  if (!Object.hasOwn(viewLabels,view)) return;
+function showAdminView(view) {
   state.view = view;
   $("view-title").textContent = t(viewLabels[view]);
   document.title = `${t(viewLabels[view])} · PostPlus`;
@@ -165,6 +163,11 @@ async function switchView(view) {
     else $(`nav-${name}`).removeAttribute("aria-current");
   }
   $("admin-refresh").hidden = ["settings","maintenance","restart"].includes(view);
+}
+async function switchView(view) {
+  if(restartBusy)return;
+  if (!Object.hasOwn(viewLabels,view)) return;
+  showAdminView(view);
   if (view === "logs") await loadLogs();
   else if (view === "api-keys") await loadApiKeys();
   else if (["settings","maintenance","restart"].includes(view)) { if (!settingsData) await loadSettings(); }
@@ -521,7 +524,7 @@ async function saveSettings({apply=true}={}) {
     $("settings-pending").hidden=!data.restart_required;
     setLink("settings-open-admin",data.admin_url);setLink("settings-open-web",data.web_url);
     settingsEditor.clearSecrets();$("settings-form").hidden=true;$("settings-success").hidden=false;
-    maintenanceStatus("settings-success-message",!apply ? "Settings saved without restarting services." : data.restart_error ? "Settings saved, but automatic restart could not be scheduled. Check service logs and restart the services." : data.restart_required ? "Settings saved. This standalone service cannot restart automatically. Restart PostPlus manually using the same configuration, then open the updated addresses." : "Settings saved. Affected services will restart automatically. Follow the progress below.");
+    maintenanceStatus("settings-success-message",!apply ? "Settings saved without restarting services." : data.restart_error ? "Settings saved, but automatic restart could not be scheduled. Check service logs and restart the services." : data.restart_required ? "Settings saved. This standalone service cannot restart automatically. Restart PostPlus manually using the same configuration, then open the updated addresses." : "Settings saved. Follow service progress in Restart and shutdown.");
     if(apply && data.restart)startRestart(data);
     return true;
   } catch(error) {formError("settings-error",error.message);settingsEditor?.highlight(error.field);return false;}
@@ -531,7 +534,7 @@ $("settings-form").addEventListener("submit",async event=>{
   event.preventDefault();
   if(await saveSettings()) {
     if($("settings-success").hidden)showNotice(t("No settings have changed."));
-    else $("settings-success").scrollIntoView({block:"center"});
+    else $(state.view==="restart" ? "restart-panel" : "settings-success").scrollIntoView({block:"center"});
   }
 });
 function maintenanceStatus(id,key) {$(id).dataset.i18n=key;$(id).textContent=t(key);}
@@ -570,6 +573,7 @@ function startRestart(data,{restored=false}={}) {
     restartControls(false);restartText=job.state==="complete" ? "Service restart completed. Your current administration session is available." : restartFailureText();
     if(job.state==="failed")formError("restart-error",t(restartText));renderRestart();return;
   }
+  showAdminView("restart");
   restartControls(true);restartText="Restarting affected services… Existing connections to those services may close.";renderRestart();
   if(restartIncludesAdmin() && new URL($("restart-open-admin").href).origin!==location.origin){restartReconnect();return;}
   async function poll() {
@@ -710,7 +714,8 @@ async function inspectMessage(message) {
     inspectSelected=String(message.id);const preview=data.message || {};
     $("inspect-subject").textContent=preview.subject || t("(No subject)");
     $("inspect-from").textContent=preview.from || "—";$("inspect-to").textContent=preview.to || "—";$("inspect-date").textContent=preview.date || "—";
-    inspectionReader.show(preview);$("inspect-raw").textContent=data.raw || "";
+    const imageBase=`/api/admin/messages/${encodeURIComponent(message.id)}?username=${encodeURIComponent(inspectUsername)}&image=`;
+    inspectionReader.show(preview,{loadImage:index=>api(imageBase+index,{quiet:true})});$("inspect-raw").textContent=PostPlusMailReader.bodySource(data.raw);
     $("inspect-message-folder").textContent=t(mailFolderLabels[message.folder] || message.folder);
     $("inspect-content").hidden=false;$("inspect-placeholder").hidden=true;renderInspection();
   } catch(error) {if(version===inspectReadVersion) formError("inspect-error",error.message);}

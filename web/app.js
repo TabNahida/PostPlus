@@ -290,8 +290,9 @@ async function openMessage(id) {
     $("message-from").textContent = preview.from || "—";
     $("message-to").textContent = preview.to || state.user.username;
     $("message-date").textContent = preview.date || "—";
-    messageReader.show(preview);
-    $("message-raw").textContent = data.raw || "";
+    const imageBase=`/api/messages/${encodeURIComponent(id)}?image=`;
+    messageReader.show(preview,{loadImage:index=>api(imageBase+index,{quiet:true})});
+    $("message-raw").textContent = PostPlusMailReader.bodySource(data.raw);
     document.querySelector(".raw-message").open = false;
     $("reader-placeholder").hidden = true;
     $("reader-content").hidden = false;

@@ -27,6 +27,7 @@ const sheetRules=[{type:1,selectorText:".card h2",style:cssStyle({"font-size":"2
 const fixtures=new Map([
   ["attack",[e("script",{},"parent.stolen=true"),e("style",{},"@import 'https://tracker.invalid'"),e("iframe",{src:"https://tracker.invalid"}),e("form",{action:"https://tracker.invalid"},e("input",{name:"secret"})),e("svg",{},e("script",{},"alert(1)")),e("math",{},"unsafe"),e("object",{data:"https://tracker.invalid"}),e("p",{onclick:"steal()",id:"app-screen",class:"sender",styles:{color:"rgb(12, 34, 56)","font-size":"22px","background-color":"#ffffff","background-image":"url(https://tracker.invalid)",position:"fixed",inset:"0","--secret":"url(https://tracker.invalid)",margin:"8px",padding:"12px","border-radius":"4px","font-family":"Arial",width:"100%","text-align":"center",display:"block","text-indent":"var(--secret)"}},"Readable <验证码>",e("a",{href:"javascript:alert(1)",onclick:"bad()"},"bad link"),e("a",{href:"https://example.com/path?x=1&y=2",target:"_self",ping:"https://tracker.invalid"},"safe link")),e("img",{src:"https://tracker.invalid/pixel",srcset:"https://tracker.invalid/other 2x",onerror:"alert(1)",alt:"tracking"})]],
   ["html-only",[e("h2",{},"验证码 123456"),e("p",{},"Line one",e("br"),"Line two")]],
+  ["proxy-images",[e("img",{src:"https://other.invalid/pending.png",alt:"Slow logo"}),e("img",{src:"https://tracker.invalid/pixel",alt:"Ready logo"})]],
   ["cid",[e("img",{src:"cid:logo%40example",alt:"logo"}),e("img",{src:"cid:svg",alt:"svg"}),e("img",{src:"data:image/svg+xml;base64,PHN2Zy8+",alt:"raw svg"}),e("img",{src:`data:image/png;base64,${png}`,alt:"safe embedded"})]],
   ["encoded-links",[e("a",{href:"java\nscript:alert(1)"},"newline"),e("a",{href:"https://username:password@example.com"},"credentials"),e("a",{href:"/api/admin/messages"},"relative"),e("a",{href:"data:text/html,<script>alert(1)</script>"},"data"),e("a",{href:"mailto:person@example.com"},"email")]],
   ["table",[e("table",{width:"600",align:"center",border:"0",cellpadding:"0",cellspacing:"0",bgcolor:"#ffffff",class:"card"},e("tr",{},e("td",{colspan:"2",rowspan:"9999",styles:{width:"600px","border-color":"#333"}},"A"),e("td",{},"B")))]]
@@ -41,6 +42,15 @@ function fixture() {
   vm.runInNewContext(source,sandbox,{filename:"mail-reader.js"});const api=sandbox.window.PostPlusMailReader,container=new Element();return {api,container,component:api.create(container),callbacks,created,sandbox};
 }
 const f=fixture();const attack=f.api.sanitize("attack",{loadRemoteImages:false});
+for(const [raw,body] of [
+  ["DKIM-Signature: v=1;\r\n folded-signature\r\nFrom: sender@example.com\r\nContent-Type: text/html\r\n\r\n<p>Encoded =3D body</p>\r\n","<p>Encoded =3D body</p>\r\n"],
+  ["From: sender@example.com\nContent-Type: multipart/mixed; boundary=b\n\n--b\nContent-Type: text/plain\n\nPart\n--b--","--b\nContent-Type: text/plain\n\nPart\n--b--"],
+  ["Plain message.\n\nSecond paragraph.","Plain message.\n\nSecond paragraph."],
+  ["<html>\n\n<p>Body only</p></html>","<html>\n\n<p>Body only</p></html>"],
+  ["Content-Type: text/plain\nNo separator","Content-Type: text/plain\nNo separator"],
+  [" orphan continuation\n\nBody"," orphan continuation\n\nBody"],
+  [null,""]
+])assert.equal(f.api.bodySource(raw),body,"Only the top-level transport headers are hidden");
 assert.match(attack.html,/Readable &lt;验证码&gt;/);assert.equal(attack.remoteImages,1);
 assert.doesNotMatch(attack.html,/<(?:script|style|iframe|form|input|svg|math|object)\b|onclick=|onerror=|srcset=|ping=|javascript:|position:|background-image:|--secret/);
 assert.match(attack.html,/color:rgb\(12, 34, 56\)/);assert.match(attack.html,/font-size:22px/);assert.match(attack.html,/padding:12px/);assert.match(attack.html,/text-align:center/);
@@ -65,9 +75,22 @@ f.component.clear();assert.equal(f.container.children.length,0);f.callbacks.get(
 const cycle={text:"One"};cycle.forwarded=[cycle];f.component.show(cycle);assert.equal(descendants(f.container).filter(node=>node.className==="mail-reader-message").length,1);f.component.dispose();assert.equal(f.container.children.length,0);assert.equal(f.callbacks.has("postplus:language"),false);
 for(const [portal,app,prefix] of [["index.html","app.js","message"],["admin.html","admin.js","inspect"]]) {
   const html=fs.readFileSync(path.join(root,"web",portal),"utf8"),script=fs.readFileSync(path.join(root,"web",app),"utf8");
-  assert.equal((html.match(/src="\/mail-reader\.js"/g)||[]).length,1);assert.ok(html.indexOf('/mail-reader.js')<html.indexOf('/'+app));assert.match(html,new RegExp(`<div id="${prefix}-body"`));assert.match(script,/Reader\.show\(preview\)/);assert.match(script,/Reader\.clear\(\)/);
+  assert.equal((html.match(/src="\/mail-reader\.js"/g)||[]).length,1);assert.ok(html.indexOf('/mail-reader.js')<html.indexOf('/'+app));assert.match(html,new RegExp(`<div id="${prefix}-body"`));assert.match(script,/Reader\.show\(preview,/);assert.match(script,/Reader\.clear\(\)/);assert.match(script,/PostPlusMailReader\.bodySource\(data.raw\)/);
 }
 (async()=>{
+  const imageFixture=fixture(),loaded=[];
+  imageFixture.component.show({html:"attack",remote_images:[{url:"https://tracker.invalid/pixel",index:0}]},{loadImage:async index=>{loaded.push(index);return {ok:true,content_type:"image/png",data:png};}});
+  assert.doesNotMatch(descendants(imageFixture.container).find(node=>node.tagName==="IFRAME").srcdoc,/src="https:\/\/tracker/ ,"Authenticated image loading never sends the iframe directly to an external source");
+  for(let i=0;i<12;i++)await Promise.resolve();
+  assert.deepEqual(loaded,[0]);assert.match(descendants(imageFixture.container).find(node=>node.tagName==="IFRAME").srcdoc,/src="data:image\/png;base64,/ ,"CORP-protected raster images are fetched by the parent and embedded in the opaque iframe");
+  let finishSlowImage;const retainedImages=[];
+  imageFixture.component.show({html:"proxy-images",remote_images:[{url:"https://other.invalid/pending.png",index:0},{url:"https://tracker.invalid/pixel",index:1},{url:"https://discarded.invalid/script-image.png",index:2}]},{loadImage:index=>{retainedImages.push(index);return index===0?new Promise(resolve=>{finishSlowImage=resolve;}):Promise.resolve({ok:true,content_type:"image/png",data:png});}});
+  for(let i=0;i<12;i++)await Promise.resolve();assert.deepEqual(retainedImages,[0,1],"Only image sources retained by the sanitizer may be fetched");assert.match(descendants(imageFixture.container).find(node=>node.tagName==="IFRAME").srcdoc,/src="data:image\/png;base64,/ ,"One slow image cannot delay another image that is already available");imageFixture.component.clear();finishSlowImage({});
+  let finishImage;
+  imageFixture.component.show({html:"attack",remote_images:[{url:"https://tracker.invalid/pixel",index:0}]},{loadImage:()=>new Promise(resolve=>{finishImage=resolve;})});
+  imageFixture.component.clear();finishImage({ok:true,content_type:"image/png",data:png});for(let i=0;i<12;i++)await Promise.resolve();assert.equal(imageFixture.container.children.length,0,"A late image response cannot restore a cleared private message");
+  imageFixture.component.show({html:"attack",remote_images:[{url:"https://tracker.invalid/pixel",index:0}]},{loadImage:async()=>({ok:true,content_type:"image/png",data:"PHN2Zy8+"})});
+  for(let i=0;i<12;i++)await Promise.resolve();assert.doesNotMatch(descendants(imageFixture.container).find(node=>node.tagName==="IFRAME").srcdoc,/src="data:/,"A dishonest image MIME cannot embed SVG");
   const {fixture:adminFixture}=require("./api_keys_ui_test.js");
   const admin=adminFixture();await admin.ready();const adminReader=admin.run("inspectionReader"),adminShown=[];let adminCleared=0;
   adminReader.show=value=>adminShown.push(value);adminReader.clear=()=>{adminCleared++;};
@@ -78,7 +101,7 @@ for(const [portal,app,prefix] of [["index.html","app.js","message"],["admin.html
   const adminPending=admin.run('inspectMessage({id:"late",folder:"INBOX"})');for(let i=0;i<6;i++)await Promise.resolve();admin.run("signedOut()");finishAdmin({ok:true,message:{html:"<p>Stale private mail</p>"},raw:"stale raw"});await adminPending;
   assert.equal(adminShown.length,1,"A stale inspection response cannot redisplay private mail after logout");assert.equal(admin.id("inspect-raw").textContent,"");
   const web=adminFixture();const webShown=[];let webCleared=0;const webSandbox={...web.sandbox,window:{},
-    document:{...web.sandbox.document,createElementNS:(ns,tag)=>web.sandbox.document.createElement(tag),querySelector:selector=>web.id(selector)},PostPlusVerificationCode:{create:()=>({load(){},reset(){},translate(){}})},PostPlusMailReader:{create:()=>({show:value=>webShown.push(value),clear:()=>{webCleared++;}})}};
+    document:{...web.sandbox.document,createElementNS:(ns,tag)=>web.sandbox.document.createElement(tag),querySelector:selector=>web.id(selector)},PostPlusVerificationCode:{create:()=>({load(){},reset(){},translate(){}})},PostPlusMailReader:{bodySource:f.api.bodySource,create:()=>({show:value=>webShown.push(value),clear:()=>{webCleared++;}})}};
   vm.createContext(webSandbox);vm.runInContext(fs.readFileSync(path.join(root,"web/app.js"),"utf8"),webSandbox);for(let i=0;i<12;i++)await Promise.resolve();
   const webRun=code=>vm.runInContext(code,webSandbox);webRun('state.user={username:"reader@example.com",csrf:"test"};');
   webSandbox.fetch=async()=>({ok:true,status:200,json:async()=>({ok:true,message:{subject:"Current",text:"Plain",html:"<p>Private HTML</p>",inline_images:[{cid:"secret",data:png}]},raw:"private raw"})});

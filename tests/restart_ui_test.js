@@ -13,6 +13,16 @@ async function ready() {
 async function run() {
   const html=fs.readFileSync(path.join(__dirname,"../web/admin.html"),"utf8");
   for(const id of ["restart-open","restart-panel","restart-status","restart-dialog"])assert.match(html,new RegExp(`id="${id}"`));
+  const sections=[];let restartParent;
+  for(const match of html.matchAll(/<section\b[^>]*>|<\/section>/g)) {
+    if(match[0]==="</section>")sections.pop();
+    else {
+      const id=match[0].match(/\bid="([^"]+)"/)?.[1];
+      if(id==="restart-panel")restartParent=sections.at(-1);
+      sections.push(id);
+    }
+  }
+  assert.equal(restartParent,"view-restart","Restart progress belongs only to the restart page");
   const navigation=await ready();
   for(const view of ["maintenance","restart","settings"]){
     assert.match(html,new RegExp(`id="nav-${view}"`));assert.match(html,new RegExp(`id="view-${view}"`));
@@ -28,12 +38,16 @@ async function run() {
   assert.equal(await f.run("saveSettings()"),true);
   assert.deepEqual(JSON.parse(f.calls[0].options.body),{revision:"revision-1",values:{log_level:"warn"}});
   assert.equal(f.id("settings-form").hidden,true);assert.equal(f.id("restart-panel").hidden,false);
+  assert.equal(f.run("state.view"),"restart","A new restart opens its single progress location");
+  assert.equal(f.id("view-restart").hidden,false);assert.equal(f.id("view-settings").hidden,true);
   assert.equal(f.id("backup-create").disabled,true);assert.equal(f.run("restartBusy"),true);
   assert.match(f.id("restart-status").textContent,/Restarting affected/);
   await f.tick();assert.equal(f.run("restartBusy"),true,"Pending status does not report completion");
   status=job(["smtp","delivery"],"complete");await f.tick();
   assert.equal(f.run("restartBusy"),false);assert.match(f.id("restart-status").textContent,/session remains available/);
   assert.equal(f.run("state.user.username"),"admin@example.com");
+  await f.run('switchView("settings")');
+  assert.equal(f.id("view-restart").hidden,true,"Completed restart progress is hidden when leaving its page");
   const standalone=await ready();standalone.respond(()=>({ok:true,restart_required:true,...urls}));
   assert.equal(await standalone.run("saveSettings()"),true);assert.equal(standalone.timers.size,0);
   assert.match(standalone.id("settings-success-message").textContent,/standalone service cannot restart/);
@@ -66,6 +80,10 @@ async function run() {
   assert.match(rolledBack.id("restart-error").textContent,/previous affected services were restored/);assert.match(rolledBack.id("restart-error").textContent,/Saved changes are still pending/);
   const restored=await ready();restored.sandbox.schedule=job(["admin"],"complete");restored.run("startRestart(schedule,{restored:true})");
   assert.equal(restored.timers.size,0);assert.match(restored.id("restart-status").textContent,/current administration session is available/);
+  assert.equal(restored.run("state.view"),"overview","Historical completion does not redirect the administrator");
+  await restored.run('switchView("accounts")');assert.equal(restored.id("view-restart").hidden,true);
+  const resuming=await ready();resuming.sandbox.schedule=job(["smtp"],"running");resuming.run("startRestart(schedule,{restored:true})");
+  assert.equal(resuming.run("state.view"),"restart","An active restored restart opens its progress location");
   const unscheduled=await ready();unscheduled.respond(()=>({ok:true,restart_required:true,restart_available:true,restart_error:"Cannot schedule",...urls}));
   assert.equal(await unscheduled.run("saveSettings()"),true);assert.match(unscheduled.id("settings-success-message").textContent,/could not be scheduled/);assert.equal(unscheduled.timers.size,0);
   const timeout=await ready();timeout.sandbox.schedule=job();timeout.run("startRestart(schedule);restartStarted=Date.now()-90001;");
