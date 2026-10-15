@@ -6,6 +6,7 @@ from contextlib import closing
 from pathlib import Path
 import poplib
 import secrets
+import socket
 import ssl
 import time
 
@@ -79,6 +80,71 @@ def wait_unlock(client):
     raise AssertionError("Disconnected POP3 transaction retained its maildrop lease")
 
 
+def buffered_tls_commands(suite):
+    """Coalesce TLS 1.3 Finished/application records and split a later record."""
+    with socket.create_connection(("localhost", suite.ports["pop3"]), timeout=5) as wire:
+        # Avoid a buffered file: it could consume ciphertext following STLS.
+        def clear_line():
+            line = bytearray()
+            while not line.endswith(b"\r\n"):
+                value = wire.recv(1)
+                assert value, "POP3 closed before TLS"
+                line.extend(value)
+            return bytes(line)
+        assert clear_line().startswith(b"+OK")
+        wire.sendall(b"STLS\r\n")
+        assert clear_line().startswith(b"+OK")
+        incoming, outgoing = ssl.MemoryBIO(), ssl.MemoryBIO()
+        client = context().wrap_bio(incoming, outgoing, server_hostname="localhost")
+        def flush():
+            while outgoing.pending:
+                wire.sendall(outgoing.read())
+        while True:
+            try:
+                client.do_handshake()
+                break
+            except ssl.SSLWantReadError:
+                flush()
+                data = wire.recv(65536)
+                assert data, "POP3 closed during TLS handshake"
+                incoming.write(data)
+        assert client.version() == "TLSv1.3"
+        # Keep Finished in outgoing until the first application command is
+        # appended, making one server handshake read consume both TLS records.
+        assert outgoing.pending
+        client.write(("AUTH PLAIN " + plain() + "\r\n").encode())
+        flush()
+        pending = bytearray()
+        def reply():
+            while b"\r\n" not in pending:
+                try:
+                    pending.extend(client.read(65536))
+                except ssl.SSLWantReadError:
+                    flush()
+                    data = wire.recv(65536)
+                    assert data, "POP3 TLS connection closed"
+                    incoming.write(data)
+            line, _, remainder = pending.partition(b"\r\n")
+            pending[:] = remainder
+            return bytes(line)
+        assert reply().startswith(b"+OK"), "Buffered TLS authentication was not processed"
+        for _ in range(3):
+            client.write(b"NOOP\r\n")
+        flush()
+        for _ in range(3):
+            assert reply() == b"+OK", "Buffered application record was stranded"
+        client.write(b"NOOP\r\n")
+        fragment = outgoing.read()
+        wire.sendall(fragment[:3])
+        time.sleep(1.3)  # Cross one readiness poll with an incomplete TLS record.
+        wire.sendall(fragment[3:])
+        assert reply() == b"+OK", "Polling cancellation lost a partial TLS record"
+        client.write(b"QUIT\r\n")
+        flush()
+        assert reply().startswith(b"+OK")
+    print("PASS POP3 coalesced TLS handshake/commands, buffered records and partial-record polling", flush=True)
+
+
 def run(suite):
     suite.config.update(tls_certificate=str(ROOT / "tests/fixtures/localhost-test-only.crt"),
                         tls_private_key=str(ROOT / "tests/fixtures/localhost-test-only.key"),
@@ -107,6 +173,7 @@ def run(suite):
         assert client.stat() == (2, sum(map(len, messages)))
         client.quit()
     print("PASS POP3 STLS discovers SASL only after encryption and authenticates a real mailbox", flush=True)
+    buffered_tls_commands(suite)
 
     expected_uidls = None
     for mechanism, initial, implicit in (("PLAIN", True, True), ("PLAIN", False, False), ("LOGIN", True, True),

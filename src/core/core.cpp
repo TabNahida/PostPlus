@@ -328,7 +328,7 @@ std::string Connection::read(std::size_t count) {
 }
 bool Connection::wait_readable(std::chrono::milliseconds timeout) {
     if (impl_->stopping.load()) throw std::runtime_error("service stopping");
-    if (!impl_->buffer.empty() || (impl_->tls && SSL_has_pending(impl_->tls->native_handle()))) return true;
+    if (!impl_->buffer.empty()) return true;
     auto expires = std::chrono::steady_clock::now() + std::max(timeout, std::chrono::milliseconds(0));
     if (impl_->deadline) expires = std::min(expires, *impl_->deadline);
     if (expires <= std::chrono::steady_clock::now()) return false;
@@ -336,15 +336,29 @@ bool Connection::wait_readable(std::chrono::milliseconds timeout) {
     asio::steady_timer timer(impl_->io);
     bool expired = false, finished = false;
     std::error_code result;
+    std::array<char, 4096> decrypted{};
+    std::size_t received = 0;
     timer.expires_at(expires);
     timer.async_wait([&](std::error_code ec) {
         if (!ec && !finished) { expired = true; std::error_code ignored; impl_->socket.cancel(ignored); }
     });
-    impl_->socket.async_wait(tcp::socket::wait_read, [&](std::error_code ec) {
-        finished = true; result = ec; timer.cancel();
-    });
+    if (impl_->tls) {
+        // A handshake/read may retain ciphertext in Asio's SSL input buffer,
+        // outside both the socket and OpenSSL's SSL_pending/SSL_has_pending.
+        // Read through the SSL stream and retain any plaintext for line/read.
+        // Asio supports partial read cancellation; drain its completion before
+        // returning so a later poll or IDLE notification write can proceed.
+        impl_->tls->async_read_some(asio::buffer(decrypted), [&](std::error_code ec, std::size_t count) {
+            finished = true; result = ec; received = count; timer.cancel();
+        });
+    } else {
+        impl_->socket.async_wait(tcp::socket::wait_read, [&](std::error_code ec) {
+            finished = true; result = ec; timer.cancel();
+        });
+    }
     impl_->io.run();
     if (impl_->stopping.load()) throw std::runtime_error("service stopping");
+    if (received) { impl_->buffer.append(decrypted.data(), received); return true; }
     if (expired) return false;
     if (result) throw std::system_error(result);
     return true;
