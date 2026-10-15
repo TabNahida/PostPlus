@@ -95,7 +95,7 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: package-logs-${{ matrix.platform }}-${{ matrix.arch }}
-          path: build/test-runs/
+          path: build/test-runs/**/*.log
           retention-days: 7
 
   publish:

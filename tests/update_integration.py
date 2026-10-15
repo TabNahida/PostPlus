@@ -339,6 +339,59 @@ def service_pids(pid):
     return values
 
 
+def process_identity(pid):
+    """Include process birth time: operating systems can reuse an exited PID."""
+    if os.name == "nt":
+        from ctypes import wintypes as w
+
+        kernel = windows_kernel()
+        kernel.GetProcessTimes.argtypes = [w.HANDLE] + [ctypes.POINTER(w.FILETIME)] * 4
+        kernel.GetProcessTimes.restype = w.BOOL
+        process = kernel.OpenProcess(0x1000, False, pid)
+        assert process, ("cannot query service process", pid, ctypes.get_last_error())
+        try:
+            created, exited, system, user = (w.FILETIME() for _ in range(4))
+            ok = kernel.GetProcessTimes(process, ctypes.byref(created), ctypes.byref(exited),
+                                        ctypes.byref(system), ctypes.byref(user))
+            assert ok, ("cannot query service creation time", pid, ctypes.get_last_error())
+            started = (created.dwHighDateTime << 32) | created.dwLowDateTime
+        finally:
+            kernel.CloseHandle(process)
+    elif sys.platform.startswith("linux"):
+        # The command name can itself contain spaces or parentheses. Field 22
+        # is the start time in ticks since boot, following the final ')'.
+        fields = Path(f"/proc/{pid}/stat").read_text().rsplit(")", 1)[1].split()
+        started = int(fields[19])
+    else:
+        started = subprocess.check_output(["ps", "-p", str(pid), "-o", "lstart="], text=True).strip()
+        assert started, ("cannot query service creation time", pid)
+    return pid, started
+
+
+def service_identities(pid):
+    return {name: process_identity(child) for name, child in service_pids(pid).items()}
+
+
+def verify_restart_identities():
+    # The same numeric PID may pass from delivery to web, or even be reused
+    # by the same service. Both are restarts when the birth time changes.
+    before = {"postplus-delivery": (688, 100), "postplus-web": (404, 200)}
+    restart.assert_changed(before, {"postplus-delivery": (800, 300), "postplus-web": (688, 400)},
+                           {"delivery", "web"})
+    restart.assert_changed(before, {"postplus-delivery": (688, 300), "postplus-web": (404, 400)},
+                           {"delivery", "web"})
+    try:
+        restart.assert_changed(before, {"postplus-delivery": (800, 300), "postplus-web": before["postplus-web"]},
+                               {"delivery", "web"})
+    except AssertionError:
+        pass
+    else:
+        raise AssertionError("restart verification accepted a service that never restarted")
+    identity = process_identity(os.getpid())
+    assert identity[0] == os.getpid() and process_identity(os.getpid()) == identity
+    print("PASS update restart identities accept PID reuse and reject unchanged processes", flush=True)
+
+
 def live_services(installation):
     for service, greeting in (("smtp", b"220 "), ("pop3", b"+OK"), ("imap", b"* OK")):
         with socket.create_connection(("127.0.0.1", installation.ports[service]), timeout=5) as connection:
@@ -391,10 +444,10 @@ def selective_updates(binaries, directory):
         before = installation_hashes(installation.install)
         original = (installation.install / smtp).read_bytes()
         changed = original + b"\nPostPlus offline SMTP update integration overlay\n"
-        pids_before = restart.pids(server)
+        pids_before = service_identities(server.process.pid)
         job, job_directory = installation.stage({smtp: changed}, {"smtp"})
         # Downloaded/staged metadata alone cannot mutate running modules.
-        assert restart.pids(server) == pids_before and (installation.install / smtp).read_bytes() == original
+        assert service_identities(server.process.pid) == pids_before and (installation.install / smtp).read_bytes() == original
         assert http(ports["admin"], "POST", "/api/admin/update/apply", {"job_id": job["job_id"]},
                     {"Cookie": installation.owner["Cookie"]})[0] == 403
         installation.apply(job, headers=installation.owner)
@@ -402,7 +455,7 @@ def selective_updates(binaries, directory):
         assert http(ports["admin"], "POST", "/api/admin/update/apply", {"job_id": job["job_id"]}, installation.external)[0] == 409
         result = installation.wait_job(job, running=server)
         assert result["current_version"] == VERSION, result
-        restart.assert_changed(pids_before, restart.pids(server), {"smtp"})
+        restart.assert_changed(pids_before, service_identities(server.process.pid), {"smtp"})
         assert server.process.pid == original_launcher and server.process.poll() is None
         assert (installation.install / smtp).read_bytes() == changed
         assert (job_directory / "backup" / sha(smtp.encode())).read_bytes() == original
@@ -413,13 +466,13 @@ def selective_updates(binaries, directory):
         print("PASS staged SMTP module update changes only SMTP PID and module, preserving configuration and credentials", flush=True)
 
         before = installation_hashes(installation.install)
-        pids_before = restart.pids(server)
+        pids_before = service_identities(server.process.pid)
         web_path = "web/style.css"
         web_body = (installation.web / "style.css").read_bytes() + b"\n/* offline web update sentinel */\n"
         job, _ = installation.stage({web_path: web_body}, {"web", "admin"})
         installation.apply(job)
         installation.wait_job(job, running=server)
-        restart.assert_changed(pids_before, restart.pids(server), {"web", "admin"})
+        restart.assert_changed(pids_before, service_identities(server.process.pid), {"web", "admin"})
         assert http(ports["web"], "GET", "/style.css")[2] == web_body
         assert http(ports["admin"], "GET", "/style.css")[2] == web_body
         assert http(ports["admin"], "GET", "/api/session", headers=installation.owner)[0] == 401
@@ -429,14 +482,14 @@ def selective_updates(binaries, directory):
         print("PASS copied web asset update refreshes web/admin only and persistent administrator API key reconnects", flush=True)
 
         before = installation_hashes(installation.install)
-        pids_before = restart.pids(server)
+        pids_before = service_identities(server.process.pid)
         original = (installation.install / smtp).read_bytes()
         manifest = (installation.install / "postplus-update.json").read_bytes()
         job, job_directory = installation.stage({smtp: b"invalid service executable for readiness rollback\n"}, {"smtp"})
         installation.apply(job)
         failed = installation.wait_job(job, expected="failed", running=server)
         assert failed["rolled_back"] and failed.get("error"), failed
-        restart.assert_changed(pids_before, restart.pids(server), {"smtp"})
+        restart.assert_changed(pids_before, service_identities(server.process.pid), {"smtp"})
         assert (installation.install / smtp).read_bytes() == original
         assert (installation.install / "postplus-update.json").read_bytes() == manifest
         assert (job_directory / "backup" / sha(smtp.encode())).read_bytes() == original
@@ -456,7 +509,7 @@ def launcher_update(binaries, directory, *, failure=False):
         server = installation.server
         old_pid = server.process.pid
         before = installation_hashes(installation.install)
-        old_children = restart.pids(server)
+        old_children = service_identities(server.process.pid)
         launcher = native_name("")
         original_launcher = (installation.install / launcher).read_bytes()
         replacements = {launcher: original_launcher + b"\nPostPlus offline launcher update integration overlay\n"}
@@ -492,8 +545,8 @@ def launcher_update(binaries, directory, *, failure=False):
             result = installation.wait_job(job, expected="failed" if failure else "complete", running=resumed)
         assert not (installation.updates / "relaunch.json").exists(), "launcher readiness left a durable handoff"
         assert not (installation.state / "reservation").exists(), "launcher update left its maintenance reservation"
-        new_children = service_pids(new_pid)
-        assert set(old_children.values()).isdisjoint(new_children.values()), (old_children, new_children)
+        new_children = service_identities(new_pid)
+        restart.assert_changed(old_children, new_children, SERVICES)
         installation.credentials_preserved()
         live_services(installation)
         if failure:
@@ -524,7 +577,7 @@ def launcher_execution_failure(binaries, directory):
     try:
         server = installation.server
         old_pid = server.process.pid
-        old_children = restart.pids(server)
+        old_children = service_identities(server.process.pid)
         before = installation_hashes(installation.install)
         launcher = native_name("")
         original = (installation.install / launcher).read_bytes()
@@ -546,8 +599,8 @@ def launcher_execution_failure(binaries, directory):
             assert new_pid == old_pid and server.process.poll() is None
             assert "new launcher could not execute; restored previous modules" in "".join(server.lines)
         assert failed["rolled_back"] and failed.get("error"), failed
-        new_children = service_pids(new_pid)
-        assert set(old_children.values()).isdisjoint(new_children.values()), (old_children, new_children)
+        new_children = service_identities(new_pid)
+        restart.assert_changed(old_children, new_children, SERVICES)
         assert (installation.install / launcher).read_bytes() == original
         assert (job_directory / "backup" / sha(launcher.encode())).read_bytes() == original
         assert_install_changes(before, installation.install, set())
@@ -569,6 +622,7 @@ def main():
     parser.add_argument("--bin-dir", type=Path, required=True)
     parser.add_argument("--case", choices=("all", "selective", "launcher-success", "launcher-failure", "launcher-exec-failure"), default="all")
     args = parser.parse_args()
+    verify_restart_identities()
     binaries = args.bin_dir.resolve()
     for name in {"", "update"} | SERVICES:
         assert (binaries / native_name(name)).is_file(), "missing update integration binary: " + native_name(name)
