@@ -88,7 +88,13 @@ Json fields() {
     add("clamav_host","filter","text","","ClamAV host","Leave blank to use baseline filtering only. Install and run clamd separately.");
     add("clamav_port","filter","number",3310,"ClamAV port","",1,65535);
     add("clamav_timeout_seconds","filter","number",15,"ClamAV scan timeout (seconds)","",1,120);
-    add("spam_threshold","filter","number",5,"Spam rejection score","Messages at or above this score are rejected.",1,1000);
+    add("spam_threshold","filter","number",5,"Inbound spam score threshold","Inbound messages at or above this score go to Junk. Malware and blocked terms remain quarantined.",1,1000);
+    add("spam_allow_senders","filter","lines",Json::array(),"Allowed senders or domains","One envelope email address or exact domain per line. Bypasses inbound spam scoring, never malware checks. Addresses can be spoofed; use sparingly.");
+    add("spam_block_senders","filter","lines",Json::array(),"Blocked senders or domains","One envelope email address or exact domain per line. Matching inbound messages go to Junk; block policy takes precedence over allow policy.");
+    add("rspamd_enabled","filter","boolean",false,"Enable local Rspamd","Install Rspamd separately. Inbound scan failures defer delivery for retry; authenticated submissions skip spam scanning.");
+    add("rspamd_host","filter","text","127.0.0.1","Rspamd loopback IP","Only a local loopback IP is accepted; keep the scanner private.");
+    add("rspamd_port","filter","number",11333,"Rspamd worker HTTP port","Uses POST /checkv2, not the controller port.",1,65535);
+    add("rspamd_timeout_seconds","filter","number",5,"Rspamd scan timeout (seconds)","One deadline covers the entire HTTP scan.",1,30);
     add("blocked_terms","filter","lines",Json::array(),"Blocked terms","One term per line; a match rejects the message.");
     add("spam_rules","filter","json",Json::array({{{"term","lottery winner"},{"weight",3}},{{"term","urgent money transfer"},{"weight",3}},{{"term","free money"},{"weight",2}},{{"term","viagra"},{"weight",2}},{{"term","click here"},{"weight",1}}}),"Weighted spam rules","JSON array of objects with term and positive weight.");
     add("log_level","logging","select","info","Minimum log level");
@@ -352,8 +358,17 @@ Config validate_settings(const Config& existing,const Json& patch) {
         } else if(type=="select") {
             if(!value.is_string() || std::find(entry.at("options").begin(),entry.at("options").end(),value)==entry.at("options").end()) throw SettingsError(key,"Choose a supported value for "+key+".");
         } else if(type=="lines") {
-            if(!value.is_array() || value.size()>1000) throw SettingsError(key,"Provide at most 1000 blocked terms.");
-            for(const auto& term:value) {safe_text(key,term,256); if(trim(term.get<std::string>()).empty()) throw SettingsError(key,"Blocked terms cannot be empty.");}
+            if(!value.is_array() || value.size()>1000) throw SettingsError(key,"Provide at most 1000 entries.");
+            for(const auto& term:value) {
+                safe_text(key,term,key=="blocked_terms" ? 256 : 320);
+                auto text=lower(trim(term.get<std::string>()));
+                if(text.empty()) throw SettingsError(key,"Entries cannot be empty.");
+                if(key=="spam_allow_senders" || key=="spam_block_senders") {
+                    if(text.starts_with('@')) text.erase(0,1);
+                    if(!(text.find('@')==std::string::npos ? valid_address("policy@"+text) : valid_address(text)))
+                        throw SettingsError(key,"Enter an email address or exact domain on each line.");
+                }
+            }
         } else if(type=="json") {
             if(!value.is_array() || value.size()>1000) throw SettingsError(key,"Provide at most 1000 spam rules.");
             for(const auto& rule:value) {
@@ -409,6 +424,11 @@ Config validate_settings(const Config& existing,const Json& patch) {
         if(const auto port=result.port(service); port && !ports.insert(port).second) throw SettingsError("ports."+std::string(service),"Every PostPlus listener must use a different nonzero port.");
     if(!ports.insert(result.number("delivery_lock_port",18085)).second) throw SettingsError("delivery_lock_port","Every PostPlus service must use a different port.");
     for(const auto* key:{"smarthost_host","smarthost_username","clamav_host"}) if(result.text(key).size()>253) throw SettingsError(key,"Hostnames and usernames must not exceed 253 bytes.");
+    {
+        std::error_code error;
+        const auto address=asio::ip::make_address(result.text("rspamd_host","127.0.0.1"),error);
+        if(error || !address.is_loopback()) throw SettingsError("rspamd_host","Use a loopback IP address for the local Rspamd worker.");
+    }
     const auto env=result.text("smarthost_password_env");
     if(env.empty() || (env.front()>='0' && env.front()<='9') || env.find_first_not_of("ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789_")!=std::string::npos) throw SettingsError("smarthost_password_env","Use a valid environment variable name for the relay password.");
     if(result.text("smarthost_tls")=="none" && !result.text("smarthost_username").empty()) throw SettingsError("smarthost_tls","An authenticated relay requires TLS.");

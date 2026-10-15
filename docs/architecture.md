@@ -80,7 +80,7 @@ Data, web-root, and log-directory paths are displayed read-only after installati
 1. SMTP validates local recipients. External recipients require authentication and enabled direct or relay delivery.
 2. Storage creates one queue job per recipient in a single transaction. SMTP returns success only after commit.
 3. The delivery worker reads a due job and invokes the filter service.
-4. Explicit rejection persists the job in quarantine. Scanner, RPC, or storage failures trigger retries.
+4. Inbound spam scoring routes ordinary unwanted mail into Junk with its score and reasons. Malware, malformed MIME and explicit blocked terms persist the job in quarantine. Scanner, RPC, or storage failures trigger retries. Authenticated submissions skip inbound spam classification but retain malware checks.
 5. Local delivery is deduplicated by delivery ID and username. The transfer service signs external mail with a configured DKIM key and sends through a relay or directly to recipient MX servers. Temporary failures use exponential retries; permanent failures and jobs older than the configured retry age are retained in quarantine. A final SMTP DATA acceptance immediately completes transfer.
 
 SQLite uses WAL and FULL synchronization. Restarts preserve accounts, messages, UIDs, UIDVALIDITY, queue state, retries, and deduplication records. `delivery_lock_port`, default 18085, is a loopback socket used as an exclusive worker lock and released by the OS when the process exits.

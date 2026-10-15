@@ -1,4 +1,5 @@
 #include "postplus/core.hpp"
+#include "postplus/folders.hpp"
 #include "postplus/mime.hpp"
 #include <algorithm>
 #include <array>
@@ -15,6 +16,7 @@
 using namespace postplus;
 namespace {
 struct Bad : std::runtime_error { using std::runtime_error::runtime_error; };
+struct MailboxGone : std::runtime_error {using std::runtime_error::runtime_error;};
 std::string upper(std::string value) { for (char& c : value) c = static_cast<char>(std::toupper(static_cast<unsigned char>(c))); return value; }
 std::uint64_t integer(std::string_view text, bool zero = false) {
     std::uint64_t n = 0;
@@ -38,11 +40,13 @@ CommandFrame read_command(Connection& c, std::size_t maximum) {
     for (unsigned literals = 0; !command.empty() && command.back() == '}'; ++literals) {
         auto start = command.rfind('{');
         if (start == std::string::npos || literals == 8) throw Bad("Invalid literal framing");
-        auto size = integer(std::string_view(command).substr(start + 1, command.size() - start - 2), true);
+        auto length=std::string_view(command).substr(start + 1, command.size() - start - 2);
+        const bool nonsync=length.ends_with('+');if(nonsync)length.remove_suffix(1);
+        auto size = integer(length, true);
         const auto prefix=tokenize(std::string_view(command).substr(0,start));
         const bool append=prefix.size()>=3 && upper(prefix[1])=="APPEND";
-        if(size>(append?maximum:16384) || (!append && command.size()+size>65536)) throw Bad("Literal too large");
-        c.write("+ Ready for literal data\r\n");
+        if(size>(append?maximum:16384) || (nonsync && size>4096) || (!append && command.size()+size>65536)) throw Bad("Literal too large");
+        if(!nonsync)c.write("+ Ready for literal data\r\n");
         auto literal = c.read(static_cast<std::size_t>(size));
         if(append) {
             if(!c.line(8192).empty()) throw Bad("Unexpected data after APPEND literal");
@@ -109,10 +113,47 @@ struct Sequence {
     }
 };
 std::string key(const Json& message) { return message.at("id").dump() + ":" + message.at("uid").dump(); }
-constexpr std::array<const char*, 6> mailboxes{"INBOX", "Sent", "Trash", "Drafts", "Junk", "Archive"};
-std::string mailbox_name(const std::string& value) {
-    for (const auto* name : mailboxes) if (upper(value) == upper(name)) return name;
-    return {};
+void utf8(std::string& out,std::uint32_t value) {
+    if(value<0x80)out+=static_cast<char>(value);
+    else if(value<0x800){out+=static_cast<char>(0xc0|(value>>6));out+=static_cast<char>(0x80|(value&63));}
+    else if(value<0x10000){out+=static_cast<char>(0xe0|(value>>12));out+=static_cast<char>(0x80|((value>>6)&63));out+=static_cast<char>(0x80|(value&63));}
+    else {out+=static_cast<char>(0xf0|(value>>18));out+=static_cast<char>(0x80|((value>>12)&63));out+=static_cast<char>(0x80|((value>>6)&63));out+=static_cast<char>(0x80|(value&63));}
+}
+std::string mailbox_decode(std::string_view input) {
+    std::string out;
+    for(std::size_t at=0;at<input.size();) {
+        auto ch=static_cast<unsigned char>(input[at++]);
+        if(ch!='&'){if(ch<32 || ch>=127)throw Bad("Mailbox names require modified UTF-7");out+=static_cast<char>(ch);continue;}
+        const auto end=input.find('-',at);if(end==input.npos)throw Bad("Invalid modified UTF-7 mailbox");
+        if(end==at){out+='&';at=end+1;continue;}
+        auto encoded=std::string(input.substr(at,end-at));
+        if(encoded.find_first_not_of("ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+,")!=encoded.npos)throw Bad("Invalid modified UTF-7 mailbox");
+        std::replace(encoded.begin(),encoded.end(),',','/');while(encoded.size()%4)encoded+='=';
+        std::string bytes;try{bytes=base64_decode(encoded);}catch(...){throw Bad("Invalid modified UTF-7 mailbox");}
+        if(bytes.empty() || bytes.size()%2)throw Bad("Invalid modified UTF-7 mailbox");
+        for(std::size_t offset=0;offset<bytes.size();offset+=2){
+            std::uint32_t code=(static_cast<unsigned char>(bytes[offset])<<8)|static_cast<unsigned char>(bytes[offset+1]);
+            if(code>=0xd800 && code<=0xdbff){if(offset+3>=bytes.size())throw Bad("Invalid mailbox surrogate");const auto low=(static_cast<unsigned char>(bytes[offset+2])<<8)|static_cast<unsigned char>(bytes[offset+3]);if(low<0xdc00 || low>0xdfff)throw Bad("Invalid mailbox surrogate");code=0x10000+((code-0xd800)<<10)+(low-0xdc00);offset+=2;}
+            else if(code>=0xdc00 && code<=0xdfff)throw Bad("Invalid mailbox surrogate");
+            if(code<32 || code==127 || (code>=32 && code<=126))throw Bad("Noncanonical modified UTF-7 mailbox");
+            utf8(out,code);
+        }
+        at=end+1;
+    }
+    if(out.size()>1024)throw Bad("Mailbox name too long");return out;
+}
+std::string mailbox_encode(std::string_view input) {
+    std::string out,bytes;
+    auto flush=[&]{if(bytes.empty())return;auto encoded=base64_encode(bytes);while(encoded.ends_with('='))encoded.pop_back();std::replace(encoded.begin(),encoded.end(),'/',',');out+='&'+encoded+'-';bytes.clear();};
+    for(std::size_t at=0;at<input.size();){
+        const auto first=static_cast<unsigned char>(input[at++]);std::uint32_t code=first;unsigned count=0;
+        if(first>=0xc2 && first<=0xdf){code=first&31;count=1;}else if(first>=0xe0 && first<=0xef){code=first&15;count=2;}else if(first>=0xf0 && first<=0xf4){code=first&7;count=3;}else if(first>=128)throw Bad("Invalid UTF-8 mailbox");
+        for(unsigned index=0;index<count;++index){if(at==input.size() || (static_cast<unsigned char>(input[at])&0xc0)!=0x80)throw Bad("Invalid UTF-8 mailbox");code=(code<<6)|(static_cast<unsigned char>(input[at++])&63);}
+        if((count==1 && code<0x80)||(count==2 && code<0x800)||(count==3 && code<0x10000)||code>0x10ffff||(code>=0xd800 && code<=0xdfff))throw Bad("Invalid UTF-8 mailbox");
+        if(code>=32 && code<=126){flush();out+=code=='&'?"&-":std::string(1,static_cast<char>(code));}
+        else {auto unit=[&](std::uint32_t value){bytes+=static_cast<char>(value>>8);bytes+=static_cast<char>(value&255);};if(code>0xffff){code-=0x10000;unit(0xd800+(code>>10));unit(0xdc00+(code&1023));}else unit(code);}
+    }
+    flush();return out;
 }
 std::pair<std::string, std::string> split_body(const std::string& raw) {
     auto end = raw.find("\r\n\r\n"); std::size_t count = 4;
@@ -325,6 +366,23 @@ struct Search {
     std::string operation, a, b;
     std::vector<Search> children;
 };
+std::string keyword(std::string value) {
+    if(value.empty() || value.size()>64 || std::any_of(value.begin(),value.end(),[](unsigned char ch){return ch<=32 || ch>=127 || std::string_view("(){%*\"\\]").find(static_cast<char>(ch))!=std::string_view::npos;}))throw Bad("Invalid message keyword");
+    return value;
+}
+std::int64_t search_date(const std::string& value) {
+    std::tm parsed{};std::istringstream stream(value);stream.imbue(std::locale::classic());
+    if(!(stream>>std::get_time(&parsed,"%d-%b-%Y")))throw Bad("Invalid SEARCH date");
+    stream>>std::ws;if(!stream.eof())throw Bad("Invalid SEARCH date");
+    const std::chrono::year_month_day date{std::chrono::year(parsed.tm_year+1900),std::chrono::month(static_cast<unsigned>(parsed.tm_mon+1)),std::chrono::day(static_cast<unsigned>(parsed.tm_mday))};
+    if(!date.ok())throw Bad("Invalid SEARCH date");
+    return std::chrono::duration_cast<std::chrono::seconds>(std::chrono::sys_days(date).time_since_epoch()).count();
+}
+std::optional<std::int64_t> sent_date(const mime::Part& part) {
+    auto value=mime::header(part,"date");const auto comma=value.find(',');if(comma!=value.npos)value=trim(value.substr(comma+1));
+    std::istringstream input(value);std::string day,month,year;if(!(input>>day>>month>>year))return {};
+    try{return search_date(day+"-"+month+"-"+year);}catch(const Bad&){return {};}
+}
 Search search_key(const std::vector<std::string>& args, std::size_t& pos, unsigned depth = 0) {
     if (pos == args.size() || depth > 16) throw Bad("Invalid SEARCH expression");
     Search result; result.operation = upper(args[pos++]);
@@ -342,15 +400,17 @@ Search search_key(const std::vector<std::string>& args, std::size_t& pos, unsign
     else if (op == "HEADER") { result.a = take(); result.b = lower(take()); }
     else if (op == "FROM" || op == "TO" || op == "CC" || op == "BCC" || op == "SUBJECT" || op == "BODY" || op == "TEXT") result.a = lower(take());
     else if (op == "LARGER" || op == "SMALLER") { result.a = take(); integer(result.a, true); }
+    else if(op=="BEFORE" || op=="ON" || op=="SINCE" || op=="SENTBEFORE" || op=="SENTON" || op=="SENTSINCE") {result.a=take();(void)search_date(result.a);}
+    else if(op=="KEYWORD" || op=="UNKEYWORD")result.a=upper(keyword(take()));
     else if (op == "ALL" || op == "SEEN" || op == "UNSEEN" || op == "DELETED" || op == "UNDELETED" || op == "RECENT" || op == "OLD" || op == "NEW" || op == "ANSWERED" || op == "UNANSWERED" || op == "FLAGGED" || op == "UNFLAGGED" || op == "DRAFT" || op == "UNDRAFT") {}
     else { Sequence validate(op); result.operation = "SEQUENCE"; result.a = op; }
     return result;
 }
 bool wildcard(std::string pattern, const std::string& value) {
-    pattern = upper(pattern); std::vector<bool> before(value.size() + 1), after(value.size() + 1); before[0] = true;
+    std::vector<bool> before(value.size() + 1), after(value.size() + 1); before[0] = true;
     for (char ch : pattern) {
         std::fill(after.begin(), after.end(), false);
-        if (ch == '*' || ch == '%') { after[0] = before[0]; for (std::size_t j = 1; j <= value.size(); ++j) after[j] = before[j] || after[j - 1]; }
+        if (ch == '*' || ch == '%') { after[0] = before[0]; for (std::size_t j = 1; j <= value.size(); ++j) after[j] = before[j] || (after[j - 1] && (ch=='*' || value[j-1]!='/')); }
         else for (std::size_t j = 1; j <= value.size(); ++j) after[j] = before[j - 1] && ch == value[j - 1];
         before.swap(after);
     }
@@ -360,38 +420,52 @@ void imap(Connection& c, const Config& cfg) {
     std::string user, credential_version, selected_folder = "INBOX"; bool selected = false, readonly = false;
     unsigned auth_failures = 0;
     const auto auth_limit = static_cast<unsigned>(std::clamp(cfg.number("max_auth_attempts", 5), 1, 20));
-    std::vector<Json> messages; std::set<std::string> deleted;
+    std::vector<Json> messages; std::set<std::string> deleted,recent;
     auto allowed = [&] { return c.encrypted() || (cfg.flag("allow_insecure_auth") && c.socket().remote_endpoint().address().is_loopback()); };
     auto tls = [&] { return !cfg.text("tls_certificate").empty() && !cfg.text("tls_private_key").empty(); };
     auto capability = [&] {
-        std::string value = "IMAP4rev1 UIDPLUS MOVE";
-        if (user.empty()) { if (allowed()) value += " AUTH=PLAIN SASL-IR"; else value += " LOGINDISABLED"; if (!c.encrypted() && tls()) value += " STARTTLS"; }
+        std::string value = "IMAP4rev1 UIDPLUS MOVE NAMESPACE ID IDLE UNSELECT LITERAL- LIST-EXTENDED SPECIAL-USE";
+        if (user.empty()) { if (allowed()) value += " AUTH=PLAIN AUTH=LOGIN SASL-IR"; else value += " LOGINDISABLED"; if (!c.encrypted() && tls()) value += " STARTTLS"; }
         return value;
     };
-    auto list = [&](const std::string& target) {
-        auto result = rpc(cfg, "storage", {{"op", "list"}, {"username", user}, {"folder", target}});
-        if (!result.value("ok", false)) throw std::runtime_error("Mailbox unavailable");
+    auto list = [&](const std::string& target,bool claim_recent=false) {
+        Json result;
+        try{result=rpc(cfg, "storage", {{"op", "list"}, {"username", user}, {"folder", target},{"claim_recent",claim_recent}});}
+        catch(const std::exception&){if(selected && target==selected_folder)throw MailboxGone("Selected mailbox unavailable; reconnect");throw;}
+        if (!result.value("ok", false)){if(selected && target==selected_folder)throw MailboxGone("Selected mailbox unavailable; reconnect");throw std::runtime_error("Mailbox unavailable");}
         return result;
+    };
+    auto catalog=[&]{auto result=rpc(cfg,"storage",{{"op","folder_catalog"},{"username",user}});if(!result.value("ok",false))throw std::runtime_error("Mailbox catalog unavailable");return result.at("folders");};
+    auto mailbox_name=[&](const std::string& value){
+        const auto decoded=normalize_mail_folder(mailbox_decode(value));
+        for(const auto& folder:catalog()) {const auto name=folder.at("name").get<std::string>();if(folder.value("selectable",true) && (decoded==name || (upper(decoded)=="INBOX" && name=="INBOX")))return name;}
+        return std::string{};
     };
     auto flags = [&](const Json& message) {
         std::string out = "("; if (message.value("seen", false)) out += "\\Seen";
         for(const auto& [key,name]:std::array<std::pair<const char*,const char*>,3>{{{"answered","\\Answered"},{"flagged","\\Flagged"},{"draft","\\Draft"}}})
             if(message.value(key,false)) { if(out.size()>1) out+=' '; out+=name; }
-        if (deleted.contains(key(message))) { if (out.size() > 1) out += ' '; out += "\\Deleted"; }
+        if (deleted.contains(key(message)) || message.value("deleted",false)) { if (out.size() > 1) out += ' '; out += "\\Deleted"; }
+        if(recent.contains(key(message))){if(out.size()>1)out+=' ';out+="\\Recent";}
+        for(const auto& value:message.value("keywords",Json::array())) {if(out.size()>1)out+=' ';out+=keyword(value.get<std::string>());}
         return out + ')';
     };
     auto refresh = [&] {
-        auto current = list(selected_folder).at("messages").get<std::vector<Json>>();
-        auto previous_count = messages.size();
+        auto current = list(selected_folder,!readonly).at("messages").get<std::vector<Json>>();
+        std::map<std::string,std::string> previous_flags;for(const auto& message:messages)previous_flags[key(message)]=flags(message);
+        auto previous_count = messages.size(),previous_recent=recent.size();
         for (std::size_t i = 0; i < messages.size();) {
             auto id = key(messages[i]);
             if (std::none_of(current.begin(), current.end(), [&](const Json& m) { return key(m) == id; })) {
-                c.write("* " + std::to_string(i + 1) + " EXPUNGE\r\n"); deleted.erase(id); messages.erase(messages.begin() + static_cast<std::ptrdiff_t>(i));
+                c.write("* " + std::to_string(i + 1) + " EXPUNGE\r\n"); deleted.erase(id);recent.erase(id);messages.erase(messages.begin() + static_cast<std::ptrdiff_t>(i));
             } else ++i;
         }
         bool changed = previous_count != current.size() || messages.size() != current.size();
-        messages = std::move(current);
+        messages = std::move(current);deleted.clear();for(const auto& message:messages)if(message.value("deleted",false))deleted.insert(key(message));
+        for(const auto& message:messages)if(message.value("recent",false))recent.insert(key(message));
         if (changed) c.write("* " + std::to_string(messages.size()) + " EXISTS\r\n");
+        if(recent.size()!=previous_recent)c.write("* "+std::to_string(recent.size())+" RECENT\r\n");
+        for(std::size_t index=0;index<messages.size();++index){const auto found=previous_flags.find(key(messages[index]));if(found!=previous_flags.end() && found->second!=flags(messages[index]))c.write("* "+std::to_string(index+1)+" FETCH (UID "+std::to_string(messages[index].at("uid").get<std::uint64_t>())+" FLAGS "+flags(messages[index])+")\r\n");}
     };
     auto raw_message = [&](const Json& message) {
         auto result = rpc(cfg, "storage", {{"op", "get"}, {"username", user}, {"id", message.at("id")},
@@ -400,26 +474,31 @@ void imap(Connection& c, const Config& cfg) {
         return result.at("raw").get<std::string>();
     };
     auto expunge = [&](bool announce, const Sequence* sequence = nullptr) {
-        if (readonly || deleted.empty()) return;
+        if (readonly) return;
+        const auto current=list(selected_folder).at("messages");
         Json ids = Json::array(), expected_uids = Json::object();
         std::set<std::string> expunged;
-        for (const auto& message : messages) if (deleted.contains(key(message)) && (!sequence || sequence->includes(message.at("uid").get<std::uint64_t>(),messages.empty()?0:messages.back().at("uid").get<std::uint64_t>()))) {
+        for (const auto& message : current) if (message.value("deleted",false) && (!sequence || sequence->includes(message.at("uid").get<std::uint64_t>(),current.empty()?0:current.back().at("uid").get<std::uint64_t>()))) {
             ids.push_back(message.at("id")); expected_uids[message.at("id").get<std::string>()] = message.at("uid");
             expunged.insert(key(message));
         }
         if(ids.empty()) return;
         auto result = rpc(cfg, "storage", {{"op", "delete"}, {"username", user}, {"ids", ids},
-            {"permanent", true}, {"folder", selected_folder}, {"expected_uids", expected_uids}});
+            {"permanent", true}, {"folder", selected_folder}, {"expected_uids", expected_uids}, {"require_deleted",true}});
         if (!result.value("ok", false)) throw std::runtime_error("Deletion failed");
+        std::set<std::string> removed;for(const auto& id:result.at("deleted_ids"))removed.insert(id.get<std::string>());
         for (std::size_t i = 0; i < messages.size();) {
-            if (expunged.contains(key(messages[i]))) { if (announce) c.write("* " + std::to_string(i + 1) + " EXPUNGE\r\n"); deleted.erase(key(messages[i])); messages.erase(messages.begin() + static_cast<std::ptrdiff_t>(i)); }
+            if (expunged.contains(key(messages[i])) && removed.contains(messages[i].at("id").get<std::string>())) { if (announce) c.write("* " + std::to_string(i + 1) + " EXPUNGE\r\n");deleted.erase(key(messages[i]));recent.erase(key(messages[i]));messages.erase(messages.begin() + static_cast<std::ptrdiff_t>(i)); }
             else ++i;
         }
     };
     c.write("* OK [CAPABILITY " + capability() + "] PostPlus IMAP ready\r\n");
     for (;;) {
         CommandFrame frame;
-        try { frame = read_command(c,static_cast<std::size_t>(cfg.number("max_message_bytes",10485760))); }
+        try {
+            if(!user.empty()) {const auto expires=std::chrono::steady_clock::now()+std::chrono::minutes(30);while(!c.wait_readable(std::chrono::seconds(1))){if(std::chrono::steady_clock::now()>=expires){c.write("* BYE Autologout; idle for 30 minutes\r\n");return;}}}
+            frame = read_command(c,static_cast<std::size_t>(cfg.number("max_message_bytes",10485760)));
+        }
         catch (...) { c.write("* BYE Invalid or oversized command framing\r\n"); return; }
         std::string tag = "*", cmd;
         try {
@@ -437,6 +516,13 @@ void imap(Connection& c, const Config& cfg) {
             if (cmd == "LOGOUT") { require_count(0); c.write("* BYE Goodbye\r\n"); done(); return; }
             if (cmd == "CAPABILITY") { require_count(0); c.write("* CAPABILITY " + capability() + "\r\n"); done(); continue; }
             if (cmd == "NOOP") { require_count(0); if (selected) refresh(); done(); continue; }
+            if(cmd=="ID") {
+                if(args.size()!=1 || upper(args[0])!="NIL") {
+                    if(args.size()<2 || args.front()!="(" || args.back()!=")" || args.size()>62 || args.size()%2)throw Bad("Invalid ID field list");
+                    for(std::size_t at=1;at+1<args.size();at+=2)if(args[at].size()>30 || args[at+1].size()>1024 || args[at]=="(" || args[at+1]==")")throw Bad("Invalid ID field");
+                }
+                c.write("* ID (\"name\" \"PostPlus\")\r\n");done();continue;
+            }
             if (cmd == "STARTTLS") {
                 require_count(0);
                 if (!user.empty() || c.encrypted() || !tls()) { c.write(tag + " NO STARTTLS unavailable\r\n"); continue; }
@@ -450,15 +536,23 @@ void imap(Connection& c, const Config& cfg) {
                 std::string candidate, password;
                 if (cmd == "LOGIN") { require_count(2); candidate = lower(args[0]); password = args[1]; }
                 else {
-                    if (args.empty() || args.size() > 2 || upper(args[0]) != "PLAIN") throw Bad("Unsupported authentication mechanism");
+                    if (args.empty() || args.size() > 2 || (upper(args[0]) != "PLAIN" && upper(args[0])!="LOGIN")) throw Bad("Unsupported authentication mechanism");
+                    const bool login=upper(args[0])=="LOGIN";
                     std::string encoded;
-                    if (args.size() == 2) encoded = args[1]; else { c.write("+ \r\n"); encoded = c.line(8192); }
+                    if (args.size() == 2) encoded = args[1]; else { c.write(login?"+ VXNlcm5hbWU6\r\n":"+ \r\n"); encoded = c.line(8192); }
                     if (encoded == "*") { c.write(tag + " BAD Authentication canceled\r\n"); continue; }
                     std::string decoded; try { decoded = base64_decode(encoded == "=" ? "" : encoded); } catch (...) { throw Bad("Invalid authentication encoding"); }
+                    if(login){
+                        candidate=lower(decoded);c.write("+ UGFzc3dvcmQ6\r\n");encoded=c.line(8192);
+                        if(encoded=="*"){c.write(tag+" BAD Authentication canceled\r\n");continue;}
+                        try{password=base64_decode(encoded=="="?"":encoded);}catch(...){throw Bad("Invalid authentication encoding");}
+                        if(candidate.find_first_of("\r\n\0",0,3)!=candidate.npos || password.find_first_of("\r\n\0",0,3)!=password.npos)throw Bad("Invalid LOGIN authentication");
+                    } else {
                     auto a = decoded.find('\0'), b = a == std::string::npos ? a : decoded.find('\0', a + 1);
                     if (a == std::string::npos || b == std::string::npos || decoded.find('\0', b + 1) != std::string::npos) throw Bad("Invalid PLAIN authentication");
                     candidate = lower(decoded.substr(a + 1, b - a - 1)); password = decoded.substr(b + 1);
                     if (a && lower(decoded.substr(0, a)) != candidate) throw Bad("Authorization identity mismatch");
+                    }
                 }
                 auto result = rpc(cfg, "auth", {{"op", "verify"}, {"username", candidate}, {"password", password}, {"session", true}});
                 if (!result.value("ok", false)) {
@@ -466,23 +560,28 @@ void imap(Connection& c, const Config& cfg) {
                     if (++auth_failures >= auth_limit) { c.write("* BYE Too many failed authentication attempts\r\n"); return; }
                     continue;
                 }
-                user = result.value("username", candidate); credential_version = result.at("credential_version").get<std::string>(); done(); continue;
+                user = result.value("username", candidate); credential_version = result.at("credential_version").get<std::string>();
+                log("imap","Authentication completed for "+user,"debug");c.write(tag+" OK [CAPABILITY "+capability()+"] Authentication completed\r\n");continue;
             }
             if (user.empty()) { c.write(tag + " NO Authenticate first\r\n"); continue; }
+            if(cmd=="NAMESPACE"){require_count(0);c.write("* NAMESPACE ((\"\" \"/\")) NIL NIL\r\n");done();continue;}
             if(cmd=="APPEND") {
                 if(args.empty() || !frame.message) throw Bad("Missing APPEND mailbox or message");
                 const auto target=mailbox_name(args[0]); if(target.empty()) { c.write(tag+" NO [TRYCREATE] No such mailbox\r\n"); continue; }
                 Json request={{"op","append"},{"username",user},{"folder",target},{"raw",*frame.message}};
+                request["keywords"]=Json::array();std::set<std::string> append_keywords;
                 std::size_t at=1;
                 if(at<args.size() && args[at]=="(") {
                     ++at;
                     while(at<args.size() && args[at]!=")") {
-                        const auto flag=upper(args[at++]);
+                        const auto original=args[at++],flag=upper(original);
                         if(flag=="\\SEEN") request["seen"]=true;
                         else if(flag=="\\ANSWERED") request["answered"]=true;
                         else if(flag=="\\FLAGGED") request["flagged"]=true;
                         else if(flag=="\\DRAFT") request["draft"]=true;
-                        else throw Bad("Unsupported APPEND flag");
+                        else if(flag=="\\DELETED") request["deleted"]=true;
+                        else if(flag=="\\RECENT") {}
+                        else if(append_keywords.insert(upper(keyword(original))).second){request["keywords"].push_back(original);if(append_keywords.size()>64)throw Bad("Too many message keywords");}
                     }
                     if(at==args.size()) throw Bad("Unclosed APPEND flags"); ++at;
                 }
@@ -493,35 +592,79 @@ void imap(Connection& c, const Config& cfg) {
                 if(selected && target==selected_folder) refresh();
                 c.write(tag+" OK [APPENDUID "+std::to_string(result.at("uidvalidity").get<std::uint64_t>())+" "+std::to_string(result.at("uid").get<std::uint64_t>())+"] APPEND completed\r\n"); continue;
             }
-            if(cmd=="SUBSCRIBE" || cmd=="UNSUBSCRIBE") { require_count(1); if(mailbox_name(args[0]).empty()) { c.write(tag+" NO No such mailbox\r\n"); continue; } done(); continue; }
+            if(cmd=="CREATE" || cmd=="DELETE" || cmd=="RENAME" || cmd=="SUBSCRIBE" || cmd=="UNSUBSCRIBE") {
+                require_count(cmd=="RENAME"?2:1);
+                const auto folder=normalize_mail_folder(mailbox_decode(args[0]));
+                if(cmd=="DELETE" && selected && folder==selected_folder){c.write(tag+" NO Mailbox is selected; UNSELECT it first\r\n");continue;}
+                Json request={{"op",cmd=="CREATE"?"folder_create":cmd=="DELETE"?"folder_delete":cmd=="RENAME"?"folder_rename":"folder_subscribe"},{"username",user},{"folder",folder}};
+                std::string target;
+                if(cmd=="RENAME"){target=normalize_mail_folder(mailbox_decode(args[1]));request["target"]=target;}
+                if(cmd=="SUBSCRIBE" || cmd=="UNSUBSCRIBE")request["subscribed"]=cmd=="SUBSCRIBE";
+                const auto result=rpc(cfg,"storage",request);
+                if(!result.value("ok",false)){c.write(tag+" NO Mailbox operation failed\r\n");continue;}
+                if(cmd=="RENAME" && selected && (selected_folder==folder || selected_folder.starts_with(folder+"/")))selected_folder=target+selected_folder.substr(folder.size());
+                done();continue;
+            }
             if (cmd == "LIST" || cmd == "LSUB") {
-                require_count(2);
-                if (args[1].empty()) c.write("* " + cmd + " (\\Noselect) \"/\" \"\"\r\n");
-                else for (const auto* name : mailboxes)
-                    if (wildcard(args[0] + args[1], upper(name))) c.write("* " + cmd + " () \"/\" " + quote(name) + "\r\n");
+                std::size_t at=0;bool subscribed_only=cmd=="LSUB",special_only=false,recursive=false;
+                if(at<args.size() && args[at]=="("){
+                    if(cmd=="LSUB")throw Bad("Invalid LSUB selection options");++at;
+                    while(at<args.size() && args[at]!=")") {const auto option=upper(args[at++]);if(option=="SUBSCRIBED")subscribed_only=true;else if(option=="SPECIAL-USE")special_only=true;else if(option=="RECURSIVEMATCH")recursive=true;else throw Bad("Unsupported LIST selection option");}
+                    if(at==args.size())throw Bad("Unclosed LIST selection options");++at;
+                }
+                if(recursive && !subscribed_only && !special_only)throw Bad("RECURSIVEMATCH requires a selection option");
+                if(at+2>args.size())throw Bad("Missing LIST reference or pattern");
+                const auto reference=mailbox_decode(args[at++]);std::vector<std::string> patterns;
+                if(args[at]=="("){++at;while(at<args.size() && args[at]!=")")patterns.push_back(mailbox_decode(args[at++]));if(at==args.size() || patterns.empty())throw Bad("Invalid LIST pattern list");++at;}
+                else patterns.push_back(mailbox_decode(args[at++]));
+                if(at<args.size()){
+                    if(cmd=="LSUB" || upper(args[at++])!="RETURN" || at==args.size() || args[at++]!="(")throw Bad("Invalid LIST return options");
+                    while(at<args.size() && args[at]!=")"){const auto option=upper(args[at++]);if(option!="SPECIAL-USE" && option!="SUBSCRIBED" && option!="CHILDREN")throw Bad("Unsupported LIST return option");}
+                    if(at==args.size())throw Bad("Unclosed LIST return options");++at;
+                }
+                if(at!=args.size())throw Bad("Unexpected LIST arguments");
+                if(patterns.size()==1 && patterns[0].empty())c.write("* "+cmd+" (\\Noselect) \"/\" \"\"\r\n");
+                else {const auto folders=catalog();for(const auto& folder:folders){
+                    const auto name=folder.at("name").get<std::string>();
+                    const auto special=folder.value("special_use",std::string{});
+                    const bool direct=(!subscribed_only || folder.value("subscribed",false)) && (!special_only || !special.empty());
+                    bool children=false,selected_children=false;
+                    for(const auto& other:folders)if(other.at("name").get<std::string>().starts_with(name+"/")){
+                        children=true;if((!subscribed_only || other.value("subscribed",false)) && (!special_only || !other.value("special_use",std::string{}).empty()))selected_children=true;
+                    }
+                    if(!direct && !((recursive || cmd=="LSUB") && selected_children))continue;
+                    bool matched=false;for(const auto& pattern:patterns)if(wildcard(pattern.starts_with('/')?pattern.substr(1):reference+pattern,name) || (name=="INBOX" && upper(reference+pattern)=="INBOX"))matched=true;
+                    if(!matched)continue;
+                    std::string attributes=folder.value("selectable",true) && !(cmd=="LSUB" && !direct)?"":"\\Noselect ";attributes+=children?"\\HasChildren":"\\HasNoChildren";
+                    if(!special.empty())attributes+=' '+special;if(cmd=="LIST" && folder.value("subscribed",false))attributes+=" \\Subscribed";
+                    std::string childinfo;if(recursive && selected_children){childinfo=" (CHILDINFO (";if(subscribed_only)childinfo+="\"SUBSCRIBED\"";if(special_only){if(subscribed_only)childinfo+=' ';childinfo+="\"SPECIAL-USE\"";}childinfo+="))";}
+                    c.write("* "+cmd+" ("+attributes+") \"/\" "+quote(mailbox_encode(name))+childinfo+"\r\n");
+                }}
                 done(); continue;
             }
             if (cmd == "SELECT" || cmd == "EXAMINE") {
-                require_count(1); selected = false; messages.clear(); deleted.clear();
+                require_count(1); selected = false; messages.clear(); deleted.clear();recent.clear();
                 selected_folder = mailbox_name(args[0]);
                 if (selected_folder.empty()) { c.write(tag + " NO No such mailbox\r\n"); continue; }
-                auto mailbox = list(selected_folder); messages = mailbox.at("messages").get<std::vector<Json>>(); selected = true; readonly = cmd == "EXAMINE";
-                c.write("* FLAGS (\\Seen \\Answered \\Flagged \\Draft \\Deleted)\r\n* " + std::to_string(messages.size()) + " EXISTS\r\n* 0 RECENT\r\n");
+                readonly = cmd == "EXAMINE";auto mailbox = list(selected_folder,!readonly);messages = mailbox.at("messages").get<std::vector<Json>>();selected = true;
+                for(const auto& message:messages){if(message.value("deleted",false))deleted.insert(key(message));if(message.value("recent",false))recent.insert(key(message));}
+                c.write("* FLAGS (\\Seen \\Answered \\Flagged \\Draft \\Deleted \\Recent)\r\n* " + std::to_string(messages.size()) + " EXISTS\r\n* "+std::to_string(recent.size())+" RECENT\r\n");
                 c.write("* OK [UIDVALIDITY " + std::to_string(mailbox.at("uidvalidity").get<std::uint64_t>()) + "] Stable mailbox identifier\r\n");
                 c.write("* OK [UIDNEXT " + std::to_string(mailbox.at("uidnext").get<std::uint64_t>()) + "] Next UID\r\n");
-                c.write(std::string("* OK [PERMANENTFLAGS ") + (readonly ? "()" : "(\\Seen \\Answered \\Flagged \\Draft)") + "] Supported persistent flags\r\n");
+                c.write(std::string("* OK [PERMANENTFLAGS ") + (readonly ? "()" : "(\\Seen \\Answered \\Flagged \\Draft \\Deleted \\*)") + "] Supported persistent flags\r\n");
                 for (std::size_t i = 0; i < messages.size(); ++i) if (!messages[i].value("seen", false)) { c.write("* OK [UNSEEN " + std::to_string(i + 1) + "] First unseen\r\n"); break; }
+                log("imap",cmd+" completed for "+user+": "+std::to_string(messages.size())+" messages","debug");
                 c.write(tag + " OK [" + (readonly ? "READ-ONLY" : "READ-WRITE") + "] " + cmd + " completed\r\n"); continue;
             }
             if (cmd == "STATUS") {
                 if (args.size() < 4 || args[1] != "(" || args.back() != ")") throw Bad("Invalid STATUS arguments");
                 const auto target = mailbox_name(args[0]);
                 if (target.empty()) { c.write(tag + " NO No such mailbox\r\n"); continue; }
-                auto mailbox = list(target); auto records = mailbox.at("messages"); std::string response = "* STATUS " + quote(target) + " (";
+                auto mailbox = list(target); auto records = mailbox.at("messages"); std::string response = "* STATUS " + quote(mailbox_encode(target)) + " (";
                 for (std::size_t i = 2; i + 1 < args.size(); ++i) {
                     auto item = upper(args[i]); std::uint64_t value = 0;
                     if (item == "MESSAGES") value = records.size();
-                    else if (item == "RECENT") value = 0;
+                    else if (item == "RECENT") {for(const auto& message:records)if(message.value("recent",false) || (selected && target==selected_folder && recent.contains(key(message))))++value;}
                     else if (item == "UIDNEXT") value = mailbox.at("uidnext").get<std::uint64_t>();
                     else if (item == "UIDVALIDITY") value = mailbox.at("uidvalidity").get<std::uint64_t>();
                     else if (item == "UNSEEN") { for (const auto& message : records) if (!message.value("seen", false)) ++value; }
@@ -530,16 +673,28 @@ void imap(Connection& c, const Config& cfg) {
                 }
                 c.write(response + ")\r\n"); done(); continue;
             }
+            if(cmd=="IDLE") {
+                require_count(0);if(selected)refresh();c.write("+ idling\r\n");
+                const auto expires=std::chrono::steady_clock::now()+std::chrono::minutes(29);
+                for(;;){
+                    if(c.wait_readable(std::chrono::seconds(1))){if(upper(c.line(8192))!="DONE")throw Bad("Expected DONE during IDLE");break;}
+                    if(std::chrono::steady_clock::now()>=expires){c.write("* BYE IDLE timeout; reconnect\r\n");return;}
+                    const auto valid=rpc(cfg,"auth",{{"op","session_check"},{"username",user},{"credential_version",credential_version}});
+                    if(!valid.value("ok",false) || !valid.value("valid",false)){c.write("* BYE Account credentials changed\r\n");return;}
+                    if(selected)refresh();
+                }
+                done();continue;
+            }
             if (!selected) { c.write(tag + " NO Select a mailbox first\r\n"); continue; }
             if (cmd == "CHECK") { require_count(0); done(); continue; }
-            if(cmd=="UNSELECT") { require_count(0); selected=false; messages.clear(); deleted.clear(); done(); continue; }
-            if (cmd == "CLOSE") { require_count(0); expunge(false); selected = false; messages.clear(); deleted.clear(); done(); continue; }
-            if (cmd == "EXPUNGE") { require_count(0); if (readonly) { c.write(tag + " NO Mailbox is read-only\r\n"); continue; } expunge(true); done(); continue; }
+            if(cmd=="UNSELECT") { require_count(0); selected=false; messages.clear(); deleted.clear();recent.clear();done(); continue; }
+            if (cmd == "CLOSE") { require_count(0); expunge(false); selected = false; messages.clear(); deleted.clear();recent.clear();done(); continue; }
+            if (cmd == "EXPUNGE") { require_count(0); if (readonly) { c.write(tag + " NO Mailbox is read-only\r\n"); continue; } refresh();expunge(true);refresh();done(); continue; }
             bool uid_mode = cmd == "UID";
             if (uid_mode) { if (args.empty()) throw Bad("Missing UID command"); cmd = upper(args.front()); args.erase(args.begin()); }
             // Sequence numbers remain fixed during FETCH/STORE/SEARCH as required by IMAP.
             auto max_uid = messages.empty() ? 0 : messages.back().at("uid").get<std::uint64_t>();
-            if(uid_mode && cmd=="EXPUNGE") { require_count(1); if(readonly) { c.write(tag+" NO Mailbox is read-only\r\n"); continue; } const Sequence sequence(args[0]); expunge(true,&sequence); done(); continue; }
+            if(uid_mode && cmd=="EXPUNGE") { require_count(1); if(readonly) { c.write(tag+" NO Mailbox is read-only\r\n"); continue; } const Sequence sequence(args[0]);refresh();expunge(true,&sequence);refresh();done(); continue; }
             if(cmd=="COPY" || cmd=="MOVE") {
                 require_count(2); if(cmd=="MOVE" && readonly) { c.write(tag+" NO Mailbox is read-only\r\n"); continue; }
                 const auto target=mailbox_name(args[1]); if(target.empty()) { c.write(tag+" NO [TRYCREATE] No such mailbox\r\n"); continue; }
@@ -627,21 +782,22 @@ void imap(Connection& c, const Config& cfg) {
                 std::vector<std::string> flag_names(args.begin() + 2, args.end());
                 if (flag_names.front() == "(") { if (flag_names.back() != ")") throw Bad("Unclosed STORE flags"); flag_names.erase(flag_names.begin()); flag_names.pop_back(); }
                 else if (flag_names.size() != 1) throw Bad("Invalid STORE flags");
-                std::set<std::string> requested;
-                for (auto flag : flag_names) { flag = upper(flag); if (flag != "\\SEEN" && flag != "\\DELETED" && flag != "\\ANSWERED" && flag != "\\FLAGGED" && flag != "\\DRAFT") throw Bad("Unsupported message flag"); requested.insert(flag); }
-                const bool erased=requested.contains("\\DELETED");
+                std::set<std::string> requested;Json requested_keywords=Json::array();
+                for (auto flag : flag_names) {const auto original=flag;flag = upper(flag);if(flag!="\\SEEN" && flag!="\\DELETED" && flag!="\\ANSWERED" && flag!="\\FLAGGED" && flag!="\\DRAFT")keyword(original);if(requested.insert(flag).second && original.front()!='\\')requested_keywords.push_back(original);}
+                if(requested_keywords.size()>64)throw Bad("Too many message keywords");
                 for (std::size_t i = 0; i < messages.size(); ++i) {
                     auto& message = messages[i]; auto uid = message.at("uid").get<std::uint64_t>();
                     if (!sequence.includes(uid_mode ? uid : i + 1, uid_mode ? max_uid : messages.size())) continue;
-                    auto id = key(message); bool old_deleted = deleted.contains(id);
-                    bool new_deleted = operation == "FLAGS" ? erased : operation == "+FLAGS" ? old_deleted || erased : old_deleted && !erased;
+                    auto id = key(message);
                     Json update={{"op","flags"},{"username",user},{"id",message.at("id")},{"uid",message.at("uid")}};
-                    for(const auto& [name,flag]:std::array<std::pair<const char*,const char*>,4>{{{"seen","\\SEEN"},{"answered","\\ANSWERED"},{"flagged","\\FLAGGED"},{"draft","\\DRAFT"}}}) {
-                        const bool old=message.value(name,false),set=requested.contains(flag); update[name]=operation=="FLAGS"?set:operation=="+FLAGS"?old||set:old&&!set;
+                    update["keywords"]=requested_keywords;
+                    if(operation!="FLAGS")update["flags_operation"]=operation=="+FLAGS"?"add":"remove";
+                    for(const auto& [name,flag]:std::array<std::pair<const char*,const char*>,5>{{{"seen","\\SEEN"},{"answered","\\ANSWERED"},{"flagged","\\FLAGGED"},{"draft","\\DRAFT"},{"deleted","\\DELETED"}}}) {
+                        if(operation=="FLAGS" || requested.contains(flag))update[name]=requested.contains(flag);
                     }
                     const auto result=rpc(cfg,"storage",update); if(!result.value("ok",false)) throw std::runtime_error("Flag update failed");
-                    for(const auto* name:{"seen","answered","flagged","draft"}) message[name]=update[name];
-                    if (new_deleted) deleted.insert(id); else deleted.erase(id);
+                    for(const auto* name:{"seen","answered","flagged","draft","deleted","keywords"}) message[name]=result.at("flags").at(name);
+                    if (message.value("deleted",false)) deleted.insert(id); else deleted.erase(id);
                     if (!silent) c.write("* " + std::to_string(i + 1) + " FETCH (" + (uid_mode ? "UID " + std::to_string(uid) + " " : "") + "FLAGS " + flags(message) + ")\r\n");
                 }
                 done(); continue;
@@ -674,18 +830,24 @@ void imap(Connection& c, const Config& cfg) {
                         if (op == "AND") return std::all_of(query.children.begin(), query.children.end(), match);
                         if (op == "OR") return match(query.children[0]) || match(query.children[1]);
                         if (op == "NOT") return !match(query.children[0]);
-                        if (op == "ALL" || op == "OLD") return true;
-                        if (op == "RECENT" || op == "NEW") return false;
+                        if (op == "ALL") return true;
+                        if(op=="OLD" || op=="RECENT" || op=="NEW"){const auto is_recent=recent.contains(key(message));return op=="OLD"?!is_recent:is_recent && (op!="NEW" || !message.value("seen",false));}
                         if (op == "SEEN" || op == "UNSEEN") return message.value("seen", false) == (op == "SEEN");
                         if(op=="ANSWERED" || op=="UNANSWERED") return message.value("answered",false)==(op=="ANSWERED");
                         if(op=="FLAGGED" || op=="UNFLAGGED") return message.value("flagged",false)==(op=="FLAGGED");
                         if(op=="DRAFT" || op=="UNDRAFT") return message.value("draft",false)==(op=="DRAFT");
                         if (op == "DELETED" || op == "UNDELETED") return deleted.contains(key(message)) == (op == "DELETED");
+                        if(op=="KEYWORD" || op=="UNKEYWORD"){bool found=false;for(const auto& value:message.value("keywords",Json::array()))if(upper(value.get<std::string>())==query.a)found=true;return found==(op=="KEYWORD");}
                         if (op == "UID") return Sequence(query.a).includes(uid, max_uid);
                         if (op == "SEQUENCE") return Sequence(query.a).includes(i + 1, messages.size());
                         if (op == "LARGER") return message.at("size").get<std::uint64_t>() > integer(query.a, true);
                         if (op == "SMALLER") return message.at("size").get<std::uint64_t>() < integer(query.a, true);
                         if (op == "BODY") return body_contains(get_mime(), query.a);
+                        if(op=="BEFORE" || op=="ON" || op=="SINCE" || op=="SENTBEFORE" || op=="SENTON" || op=="SENTSINCE"){
+                            const auto target=search_date(query.a);std::optional<std::int64_t> date;
+                            if(op.starts_with("SENT"))date=sent_date(get_mime());else {const auto epoch=message.at("internal_date").get<std::int64_t>();date=epoch-(epoch%86400+86400)%86400;}
+                            if(!date)return false;return op.ends_with("BEFORE")?*date<target:op.ends_with("SINCE")?*date>=target:*date==target;
+                        }
                         if (op == "TEXT") {
                             if (body_contains(get_mime(), query.a)) return true;
                             for (const auto& [name, value] : get_mime().headers) if (lower(name + ": " + mime::decode_header(value)).find(query.a) != std::string::npos) return true;
@@ -700,8 +862,9 @@ void imap(Connection& c, const Config& cfg) {
                 c.write(response + "\r\n"); done(); continue;
             }
             throw Bad("Command not implemented");
-        } catch (const Bad& error) { c.write(tag + " BAD " + error.what() + "\r\n"); }
-        catch (const std::exception&) { c.write(tag + " NO Temporary service failure\r\n"); }
+        } catch(const MailboxGone& error){log("imap",error.what(),"debug");c.write(std::string("* BYE ")+error.what()+"\r\n");return;}
+        catch (const Bad& error) {log("imap","Command "+(cmd.size()<=24 && std::all_of(cmd.begin(),cmd.end(),[](unsigned char ch){return std::isalnum(ch);})?cmd:"invalid")+": "+error.what(),"debug");c.write(tag + " BAD " + error.what() + "\r\n"); }
+        catch (const std::exception& error) {log("imap","Command "+(cmd.size()<=24 && std::all_of(cmd.begin(),cmd.end(),[](unsigned char ch){return std::isalnum(ch);})?cmd:"invalid")+": "+error.what(),"error");c.write(tag + " NO Temporary service failure\r\n"); }
     }
 }
 }

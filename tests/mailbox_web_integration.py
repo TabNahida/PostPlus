@@ -28,6 +28,7 @@ def run(s):
     assert s.http("web","GET","/api/admin/messages?username="+user,headers=u)[0] == 404
     assert s.http("admin","POST","/api/login",{"username":user,"password":PASSWORD})[0] == 403
     assert s.http("admin","GET","/api/admin/messages?username="+user)[0] == 401
+    assert s.http("admin","GET","/api/admin/folders?username="+user)[0] == 401
 
     def mailbox(folder, who=user):
         result=s.http("admin","GET","/api/admin/messages?"+urlencode({"username":who,"folder":folder}),headers=a)
@@ -63,6 +64,20 @@ def run(s):
     for folder in ("Archive","Junk","INBOX"):
         assert s.http("web","POST",f"/api/messages/{sent_id}/move",{"folder":folder},u)[0]==200
         assert any(m["id"]==sent_id for m in s.http("web","GET","/api/messages?"+urlencode({"folder":folder}),headers=u)[2]["messages"])
+    custom = "Projects/客户"
+    assert s.rpc("storage", op="folder_create", username=user, folder=custom)["ok"]
+    assert s.http("web","POST",f"/api/messages/{sent_id}/move",{"folder":custom},u)[0]==200
+    assert any(f["name"]==custom for f in s.http("web","GET","/api/folders",headers=u)[2]["folders"])
+    admin_folders=s.http("admin","GET","/api/admin/folders?"+urlencode({"username":user}),headers=a)
+    assert admin_folders[0]==200 and custom in {f["name"] for f in admin_folders[2]["folders"]},admin_folders
+    for permissions,expected in ((["mail:read"],200),(["users:read"],403)):
+        key=s.rpc("auth",op="api_key_create",username=admin,name="Folder scope",audience="admin",permissions=permissions)
+        assert key["ok"],key
+        assert s.http("admin","GET","/api/admin/folders?"+urlencode({"username":user}),headers={"Authorization":"Bearer "+key["key"]})[0]==expected
+    assert s.http("admin","POST","/api/admin/folders",{"username":user},a)[0]==405
+    assert [m["id"] for m in s.http("web","GET","/api/messages?"+urlencode({"folder":custom}),headers=u)[2]["messages"]]==[sent_id]
+    assert [m["id"] for m in mailbox(custom)]==[sent_id]
+    assert s.http("web","POST",f"/api/messages/{sent_id}/move",{"folder":"INBOX"},u)[0]==200
     assert s.http("web","POST",f"/api/messages/{sent_id}/move",{"folder":"invalid"},u)[0]==400
     assert s.http("web","DELETE",f"/api/messages/{sent_id}?permanent=true",headers=u)[0]==409
     assert s.http("web","DELETE",f"/api/messages/{sent_id}",headers=u)[0]==200

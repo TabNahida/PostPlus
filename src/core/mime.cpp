@@ -520,14 +520,90 @@ std::string decode_header(std::string_view value) {
     }
     return out;
 }
-std::string compose(const std::string& from, const std::vector<std::string>& to, const std::string& subject, const std::string& text, bool draft) {
-    if (!valid_address(from) || (!draft && to.empty()) || to.size() > 100) invalid("Invalid message addresses");
+std::string safe_filename(std::string_view value) {
+    auto name = decode_header(value);
+    const auto slash = name.find_last_of("/\\");
+    if (slash != std::string::npos) name.erase(0, slash + 1);
+    std::string out;
+    for (unsigned char ch : name) if (ch >= 32 && ch != 127 && ch != ':' && ch != '"') out += static_cast<char>(ch);
+    out = trim(out);
+    while (!out.empty() && (out.back() == '.' || out.back() == ' ')) out.pop_back();
+    if (out.size() > 180) {
+        auto count = std::size_t{180};
+        while (count && (static_cast<unsigned char>(out[count]) & 0xc0) == 0x80) --count;
+        out.resize(count);
+    }
+    return out.empty() || out == "." || out == ".." ? "attachment" : out;
+}
+
+std::string attachment_filename(const Part& part) {
+    auto extended = [](std::string_view input, std::string_view key) {
+        auto value = parameter(input, std::string(key) + "*");
+        if (value.empty()) {
+            for (std::size_t i = 0; i < 16; ++i) {
+                auto chunk = parameter(input, std::string(key) + "*" + std::to_string(i) + "*");
+                if (chunk.empty()) break;
+                value += chunk;
+            }
+        }
+        if (value.empty()) return std::string{};
+        const auto first = value.find('\''), second = first == std::string::npos ? first : value.find('\'', first + 1);
+        if (second == std::string::npos) return std::string{};
+        const auto charset = value.substr(0, first); std::string bytes;
+        for (std::size_t i = second + 1; i < value.size(); ++i) {
+            if (value[i] == '%' && i + 2 < value.size() && hex(value[i+1]) >= 0 && hex(value[i+2]) >= 0) {
+                bytes += static_cast<char>(hex(value[i+1]) * 16 + hex(value[i+2])); i += 2;
+            } else bytes += value[i];
+        }
+        return convert_text(bytes, charset);
+    };
+    for (const auto& [field, key] : {std::pair{"content-disposition", "filename"}, std::pair{"content-type", "name"}}) {
+        const auto value = header(part, field);
+        auto name = extended(value, key);
+        if (name.empty()) name = parameter(value, key);
+        if (!name.empty()) return safe_filename(name);
+    }
+    return {};
+}
+
+std::vector<Attachment> attachments(const Part& part) {
+    std::vector<Attachment> result;
+    const auto visit = [&](const auto& self, const Part& item) -> void {
+        auto filename = attachment_filename(item);
+        const auto disposition = lower(trim(header(item, "content-disposition")));
+        const bool file = !filename.empty() || disposition.starts_with("attachment") ||
+            (item.parts.empty() && item.content_type != "text/plain" && item.content_type != "text/html" && !item.body.empty());
+        if (file && !item.content_type.starts_with("multipart/")) {
+            if (filename.empty()) filename = item.content_type == "message/rfc822" ? "forwarded-message.eml" : "attachment";
+            result.push_back({std::move(filename), item.content_type, item.content_type == "message/rfc822" ? item.embedded_message : item.body});
+            return;
+        }
+        for (const auto& child : item.parts) self(self, child);
+    };
+    visit(visit, part);
+    return result;
+}
+
+std::string compose(const Composition& message, bool draft) {
+    const auto& from = message.from; const auto& to = message.to; const auto& subject = message.subject;
+    if (!valid_address(from) || (!draft && to.empty() && message.cc.empty() && message.bcc.empty()) ||
+        to.size() + message.cc.size() + message.bcc.size() > 100 || message.attachments.size() > 64) invalid("Invalid message addresses");
     if (subject.size() > 998 || subject.find_first_of("\r\n\0", 0, 3) != std::string::npos) invalid("Invalid message subject");
-    std::string raw = "From: " + from + "\r\nTo: ";
-    for (std::size_t i = 0; i < to.size(); ++i) {
-        if (!valid_address(to[i])) invalid("Invalid recipient");
-        if (i) raw += ",\r\n ";
-        raw += to[i];
+    std::string raw = "From: " + from + "\r\n";
+    auto addresses = [&](std::string_view name, const std::vector<std::string>& values) {
+        if (values.empty()) return;
+        raw += std::string(name) + ": ";
+        for (std::size_t i = 0; i < values.size(); ++i) {
+            if (!valid_address(values[i])) invalid("Invalid recipient");
+            if (i) raw += ",\r\n "; raw += values[i];
+        }
+        raw += "\r\n";
+    };
+    addresses("To", to); addresses("Cc", message.cc); if (draft) addresses("Bcc", message.bcc);
+    for (const auto& [name, value] : {std::pair{"In-Reply-To", message.in_reply_to}, std::pair{"References", message.references}}) {
+        if (value.empty()) continue;
+        if (value.size() > 998 || value.find_first_of("\r\n\0", 0, 3) != std::string::npos || value.front() != '<' || value.back() != '>') invalid("Invalid reply reference");
+        raw += std::string(name) + ": " + value + "\r\n";
     }
     std::time_t now = std::time(nullptr); std::tm utc{};
 #ifdef _WIN32
@@ -536,7 +612,7 @@ std::string compose(const std::string& from, const std::vector<std::string>& to,
     gmtime_r(&now, &utc);
 #endif
     std::ostringstream date; date.imbue(std::locale::classic()); date << std::put_time(&utc, "%a, %d %b %Y %H:%M:%S +0000");
-    raw += "\r\nDate: " + date.str() + "\r\nMessage-ID: <" + random_hex() + "@" + from.substr(from.find('@') + 1) + ">\r\nSubject: ";
+    raw += "Date: " + date.str() + "\r\nMessage-ID: <" + random_hex() + "@" + from.substr(from.find('@') + 1) + ">\r\nSubject: ";
     for (std::size_t offset = 0; offset < subject.size();) {
         auto count = std::min<std::size_t>(42, subject.size() - offset);
         while (count > 0 && offset + count < subject.size() && (static_cast<unsigned char>(subject[offset + count]) & 0xc0) == 0x80) --count;
@@ -544,9 +620,41 @@ std::string compose(const std::string& from, const std::vector<std::string>& to,
         if (offset) raw += "\r\n ";
         raw += "=?UTF-8?B?" + base64_encode(std::string_view(subject).substr(offset, count)) + "?="; offset += count;
     }
-    raw += "\r\nMIME-Version: 1.0\r\nContent-Type: text/plain; charset=UTF-8\r\nContent-Transfer-Encoding: base64\r\n\r\n";
-    auto encoded = base64_encode(text);
-    for (std::size_t offset = 0; offset < encoded.size(); offset += 76) raw += encoded.substr(offset, 76) + "\r\n";
+    raw += "\r\nMIME-Version: 1.0\r\n";
+    auto encoded_body = [](std::string_view bytes) {
+        auto encoded = base64_encode(bytes); std::string out;
+        for (std::size_t offset = 0; offset < encoded.size(); offset += 76) out += encoded.substr(offset, 76) + "\r\n";
+        return out;
+    };
+    auto text_part = [&](std::string_view type, std::string_view text) {return "Content-Type: " + std::string(type) + "; charset=UTF-8\r\nContent-Transfer-Encoding: base64\r\n\r\n" + encoded_body(text);};
+    std::string body;
+    if (message.html.empty()) body = text_part("text/plain", message.text);
+    else {
+        const auto alternative = "postplus-alt-" + random_hex();
+        body = "Content-Type: multipart/alternative; boundary=\"" + alternative + "\"\r\n\r\n--" + alternative + "\r\n" + text_part("text/plain", message.text) +
+            "\r\n--" + alternative + "\r\n" + text_part("text/html", message.html) + "\r\n--" + alternative + "--\r\n";
+    }
+    if (message.attachments.empty()) return raw + body;
+    const auto boundary = "postplus-mixed-" + random_hex();
+    raw += "Content-Type: multipart/mixed; boundary=\"" + boundary + "\"\r\n\r\n--" + boundary + "\r\n" + body;
+    for (const auto& file : message.attachments) {
+        auto type = lower(file.content_type);
+        const auto slash = type.find('/');
+        if (slash == std::string::npos || slash == 0 || slash + 1 == type.size() || type.size() > 100 ||
+            type.starts_with("multipart/") || std::any_of(type.begin(), type.end(), [](unsigned char ch) {return !std::isalnum(ch) && std::string_view("!#$&^_.+-/").find(ch) == std::string_view::npos;})) invalid("Invalid attachment content type");
+        const auto name = safe_filename(file.filename); std::string escaped;
+        constexpr char digits[] = "0123456789ABCDEF";
+        for (unsigned char ch : name) {
+            if ((std::isalnum(ch) && ch < 128) || std::string_view("!#$&+-.^_`|~").find(ch) != std::string_view::npos) escaped += static_cast<char>(ch);
+            else {escaped += '%'; escaped += digits[ch >> 4]; escaped += digits[ch & 15];}
+        }
+        raw += "\r\n--" + boundary + "\r\nContent-Type: " + type + "\r\nContent-Disposition: attachment;\r\n filename*=UTF-8''" + escaped + "\r\nContent-Transfer-Encoding: base64\r\n\r\n" + encoded_body(file.data);
+    }
+    raw += "\r\n--" + boundary + "--\r\n";
     return raw;
+}
+std::string compose(const std::string& from, const std::vector<std::string>& to, const std::string& subject, const std::string& text, bool draft) {
+    Composition message; message.from = from; message.to = to; message.subject = subject; message.text = text;
+    return compose(message, draft);
 }
 }

@@ -56,6 +56,13 @@ int main() {
         check(legacy.outbound_mode()=="disabled","explicit outbound disable ignored");
         legacy.values.erase("outbound_mode");legacy.values["allow_insecure_auth"]=true;
         check(validate_settings(legacy,{{"log_level","debug"}}).outbound_mode()=="relay","partial settings save disabled legacy relay");
+        const auto spam_settings=validate_settings(legacy,{{"spam_allow_senders",Json::array({"Trusted@Example.net","@trusted.example"})},
+            {"spam_block_senders",Json::array({"blocked.example"})},{"rspamd_enabled",true},{"rspamd_host","::1"}});
+        check(spam_settings.flag("rspamd_enabled") && spam_settings.text("rspamd_host")=="::1","inbound spam settings rejected");
+        rejects([&] { validate_settings(legacy,{{"spam_allow_senders",Json::array({"not a domain"})}}); });
+        rejects([&] { validate_settings(legacy,{{"spam_block_senders",Json::array({"person@@example.net"})}}); });
+        rejects([&] { validate_settings(legacy,{{"rspamd_host","0.0.0.0"}}); });
+        rejects([&] { validate_settings(legacy,{{"rspamd_host","scanner.example.net"}}); });
         // Exercise real TCP framing, buffered command boundaries and exact byte reads.
         asio::io_context io;
         tcp::acceptor acceptor(io,{tcp::v4(),0});
@@ -66,6 +73,7 @@ int main() {
                 Connection peer;
                 acceptor.accept(peer.socket());
                 check(peer.line() == "one","line one");
+                check(peer.wait_readable(std::chrono::milliseconds(20)),"buffered input readiness");
                 check(peer.line() == "two","line two");
                 check(peer.read(3) == std::string("\0x\xff",3),"binary bytes");
                 peer.write("OK\r\n");
@@ -78,6 +86,27 @@ int main() {
             check(client.line() == "OK","reply");
         } catch (...) { server.join(); throw; }
         server.join();
+        if (failure) std::rethrow_exception(failure);
+        // IDLE polling must time out without cancelling subsequent reads or writes.
+        std::thread polling_server([&] {
+            try {
+                Connection peer;
+                acceptor.accept(peer.socket());
+                check(!peer.wait_readable(std::chrono::milliseconds(30)),"idle input should time out");
+                peer.write("READY\r\n");
+                check(peer.wait_readable(std::chrono::seconds(2)),"new input readiness");
+                check(peer.line() == "DONE","polling retained input");
+                peer.write("OK\r\n");
+            } catch (...) { failure = std::current_exception(); }
+        });
+        try {
+            Connection client;
+            client.connect("127.0.0.1",port);
+            check(client.line() == "READY","polling timeout leaves connection open");
+            client.write("DONE\r\n");
+            check(client.line() == "OK","read after polling timeout");
+        } catch (...) { polling_server.join(); throw; }
+        polling_server.join();
         if (failure) std::rethrow_exception(failure);
         std::cout << "Core tests passed\n";
         return 0;

@@ -235,7 +235,13 @@ Outbound TLS checks certificate trust and hostname. `SSL_CERT_FILE` or `SSL_CERT
 | `clamav_host` | Empty | Host of a separately running ClamAV `clamd`; empty disables ClamAV scanning. |
 | `clamav_port` | `3310` | Integer 1–65535; clamd INSTREAM listener. |
 | `clamav_timeout_seconds` | `15` | Integer 1–120; scan deadline shared by the message's MIME parts. |
-| `spam_threshold` | `5` | Integer 1–1000; a score at or above this value rejects the message. |
+| `spam_threshold` | `5` | Integer 1–1000; inbound mail at or above this score is delivered to Junk. |
+| `spam_allow_senders` | `[]` | Up to 1000 envelope email addresses or exact domains (an initial `@` is optional). Bypasses inbound spam scoring, but never malware or blocked-term checks. |
+| `spam_block_senders` | `[]` | Same address/domain format. Matching inbound mail goes to Junk. Block rules override allow rules; domains do not implicitly match subdomains. |
+| `rspamd_enabled` | `false` | Enable a separately installed local Rspamd worker for inbound mail. |
+| `rspamd_host` | `127.0.0.1` | A literal loopback IPv4/IPv6 address; remote scanner hosts are not accepted. |
+| `rspamd_port` | `11333` | Rspamd HTTP worker port, using `POST /checkv2`; this is not its controller port. |
+| `rspamd_timeout_seconds` | `5` | Integer 1–30; one deadline covers connection, request and bounded response. |
 | `blocked_terms` | `[]` | Up to 1000 nonempty strings, each at most 256 bytes. A match rejects the message. In the browser, enter one term per line. |
 | `spam_rules` | Built-in weighted rules below | Up to 1000 objects with `term` and positive `weight` no greater than 1000. Supplying an array replaces the built-in rules. |
 
@@ -251,7 +257,13 @@ Default rules:
 ]
 ```
 
-Rules examine decoded text and headers; each matching weighted rule contributes once. Baseline EICAR test-signature detection is always present. It is not a full antivirus engine. ClamAV installation, daemon access control, and signature updates are separate operational tasks. Scanner errors defer delivery; explicit rejections are retained in quarantine. There is no quarantine-release interface yet.
+Rules examine decoded MIME text and headers; each matching weighted rule contributes once. Inbound heuristics also add 2 points for HTML forms/inputs, 1 for a known shortened HTML link, and 3 for an executable attachment filename. An attachment filename alone does not establish that its content is malware. Ordinary spam remains readable in Junk with its score and reasons. Malformed MIME, configured blocked terms and detected malware remain in quarantine. Filtering preserves the original signed message bytes.
+
+Only unauthenticated SMTP mail receives inbound spam scoring; TLS by itself is not sender authentication. Authenticated SMTP and Webmail submissions still receive MIME, blocked-term and malware checks. Sender policies use the SMTP envelope sender, never the display From header. Envelope addresses can be spoofed: an allow rule is an explicit administrator override, not an SPF/DKIM guarantee. Do not broadly allow trusted-looking domains.
+
+PostPlus does not implement native SPF, DKIM or DMARC verification. Sender-supplied `Authentication-Results`, `ARC-Authentication-Results`, `X-Spam-*`, `Received` and DKIM-signature headers cannot bypass or add local spam scores. With Rspamd enabled, PostPlus sends the original message plus separately captured peer IP, HELO and envelope addresses to the local worker. Rspamd's configured DNS/authentication and other checks provide its verdict; its score is added to the local score. Rspamd reject/add-header/rewrite-subject/discard/quarantine verdicts go to Junk, while soft-reject/greylist requests are deferred. Unknown or incomplete verdicts also defer. Secure the worker listener and configure its policies/signature data separately.
+
+Baseline EICAR test-signature detection is always present. It is not a full antivirus engine. ClamAV installation, daemon access control, and signature updates are separate operational tasks. Configured scanner failures, invalid responses and deadlines defer delivery for retry; they never report a clean scan or permanently quarantine a message solely because a scanner is unavailable. There is no quarantine-release interface yet.
 
 ## Logging
 

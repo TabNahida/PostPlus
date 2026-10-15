@@ -8,7 +8,7 @@ With TLS and no explicit Web port, Webmail uses 443. [Mail client discovery](mai
 
 ## Sessions
 
-`GET /api/public/config` is available without a session on both web services. It returns only `{"ok":true,"domain":"example.com"}` for the fixed-domain address inputs. API login and account creation still accept complete addresses.
+`GET /api/public/config` is available without a session on both web services. It returns `{"ok":true,"domain":"example.com","max_message_bytes":10485760}` for address inputs and the attachment size hint. API login and account creation still accept complete addresses.
 
 `POST /api/login` accepts:
 
@@ -24,14 +24,17 @@ It returns `ok`, `username`, `admin`, `csrf`, and `expires_in`, and sets the `pp
 
 | Method and path | Request or response |
 | --- | --- |
-| GET `/api/folders` | Six folders with `name`, `messages`, `unseen`, `bytes` (also `total`/`unread` aliases), and the current user's `usage`. |
+| GET `/api/folders` | Built-in and selectable client-created folders with `name`, `messages`, `unseen`, `bytes` (also `total`/`unread` aliases), and the current user's `usage`. |
 | GET `/api/messages?folder=INBOX` | The selected folder (defaults to INBOX). Entries include id, uid, size, seen, and internal_date; up to the newest 100 include optional subject/from/date summaries. |
+| GET `/api/messages/search` | Owner-bound decoded search with filters and newest-first pagination. Requires `mailbox:read`. See below. |
+| GET `/api/messages/{id}/delivery-status` | Durable per-recipient delivery progress for an authenticated submission's Sent message. Requires `mailbox:read`; other owners and unavailable legacy histories return 404. |
 | GET `/api/messages/{id}` | `raw` source and decoded `message` headers, text/HTML bodies, forwarded views, and inline images. Marks the message as seen. |
 | GET `/api/messages/{id}?image={index}` | Fetch a remote raster image indexed in this message. Returns `content_type` and Base64 `data`; does not change message flags. |
+| GET `/api/messages/{id}?attachment={index}` | Download exact decoded attachment bytes. Requires `mailbox:read`; does not change message flags. |
 | DELETE `/api/messages/{id}` | Moves the current user's message to Trash. Explicit `?permanent=true` permanently deletes a message already in Trash, with a folder/UID guard. |
 | POST `/api/messages/{id}/move` | `{ "folder": "Archive" }`; moves between supported folders. |
-| POST `/api/drafts` | `to` array, `subject`, `text`, and optional existing draft `id`. Empty recipients and content are allowed. Returns id/uid/folder. |
-| POST `/api/send` | `to` address array, `subject`, `text`, optional `draft_id`. Returns 202 after atomically queueing, storing a Sent copy and consuming the draft. |
+| POST `/api/drafts` | `to` array, `subject`, `text`, optional `cc`/`bcc` arrays, `html`, `attachments` and existing draft `id`. Empty recipients and content are allowed. Returns id/uid/folder. |
+| POST `/api/send` | The same composition fields, with optional `draft_id`. At least one recipient across To/Cc/Bcc is required. Returns 202 after atomically queueing, storing a Sent copy and consuming the draft. |
 
 Example send body:
 
@@ -39,13 +42,23 @@ Example send body:
 {"to":["friend@localhost"],"subject":"Hello","text":"A message from PostPlus."}
 ```
 
+Composition supports up to 100 recipients across To/Cc/Bcc and 64 attachments. `html` creates a multipart/alternative body alongside `text`; attachments wrap that body in multipart/mixed. Add an uploaded file as `{"filename":"report.pdf","content_type":"application/pdf","data_base64":"..."}` or retain an existing owned file as `{"message_id":"...","index":0}`. The aggregate decoded content and final encoded MIME must fit `max_message_bytes`; uploads are bounded before parsing. Attachment references are resolved only in the authenticated owner's mailbox, including API-key requests. Drafts retain HTML, Cc, Bcc, attachments and reply references; sent wire messages omit Bcc while the envelope includes its recipients. `reply_to_id` uses an owned source to set In-Reply-To/References. Clients may alternatively supply validated `in_reply_to` and `references` strings when restoring a draft. Webmail provides rich-text formatting, reply/reply-all/forward, file selection/removal, and draft attachment restoration.
+
+API keys using an attachment `message_id` reference or `reply_to_id` must also have `mailbox:read`, in addition to `mailbox:send` or `mailbox:write` for the composition route. Upload-only sends and drafts require only their respective send/write scope. Browser sessions retain the account's normal mailbox access.
+
+Decoded `message.attachments` contains `{index,filename,content_type,size}` metadata; indexes are scoped to that message version. Downloads use `application/octet-stream`, `Content-Disposition: attachment` and a safe UTF-8 filename. Binary data is preserved without character conversion, including attached `.eml` files. Administration uses `/api/admin/messages/{id}?username={mailbox}&attachment={index}` with `mail:read`; downloads are audited and do not mark the message Seen.
+
+Search accepts `q` (decoded subject, sender, recipients, body and attachment names), separate `from`, `to`, and `subject` substrings, `folder` (a selectable folder name or `all`, the default), `seen` and `has_attachment` (`true`/`false`), `after`/`before`, `limit` (1–100, default 50), and `offset` (0–100000). Recipient matching includes decoded To/Cc and Bcc where present in private draft source; submitted Bcc is absent from the Sent wire source. Results display the actual To header. Text filters are at most 256 UTF-8 bytes. Substrings are literal, including `%` and `_`; ASCII matching ignores case and decoded Unicode is preserved. Dates are UTC `YYYY-MM-DD` or Unix seconds, applied to the internal received/saved date, with inclusive `after` and exclusive `before`. Responses contain `messages` with envelope fields, folder, flags, attachment presence and a text snippet, plus `total`, `offset`, `limit`, and `has_more`. Search never marks mail read. Upgraded legacy mail is indexed in durable bounded batches: while `indexing:true`, results/counts are provisional and clients should repeat the request until it is false; `indexing_remaining` reports outstanding messages. Malformed MIME falls back to decoded headers and up to 16 MiB of wire text.
+
+Delivery status contains `submission_id`, `recipients`, and a `notice`. Each recipient has `state` (`queued`, `retrying`, `delivered`, `rejected`, or `failed`), `attempts`, `error`, `created_at`, `updated_at`, `next_attempt`, `delivery_scope`, and a chronological `history` of state/attempt/error/`at` entries. `local_mailbox` confirms local storage; `remote_mta` confirms the receiving SMTP server accepted the message, without claiming Inbox placement or that it was read. Transient failures retry; permanent SMTP/policy rejections and age-expired failures remain durable. Histories survive queue removal and restarts; they are available for new authenticated submissions and queued legacy submissions, not already completed pre-upgrade mail. Responses bound history to the newest 100 events per recipient and a shared byte budget, setting `history_truncated` when necessary. Original mail bytes remain unchanged.
+
 Storage and the mail protocols preserve original message bytes. Message views convert declared header/body character sets to UTF-8 for display. In addition to `subject`, `from`, `to`, `date`, and `text`, `message` includes `html`, a `forwarded` array of attached message views, and `inline_images` with `cid`, `content_type`, and Base64 `data` for supported raster CID images. Empty text/HTML parts use empty strings. MIME attachments are excluded from the main body; `message/rfc822` forwards retain their own headers and body. Forwarded views and inline images have depth, count, and size limits; raw source is retained for content outside those limits.
 
 The browser reader sanitizes HTML and renders it in a sandboxed frame with a restrictive content policy. Scripts, forms, embedded pages, and external stylesheets are blocked. Safe inline styles, bounded sender stylesheet/media-query rules, and table layout attributes are preserved inside the opaque frame. Remote images load automatically through authenticated requests to the server and are embedded as validated raster data inside the frame. Opening a message can therefore contact its sender's image servers, without forwarding browser credentials or a referrer.
 
 Each decoded view includes a `remote_images` array of `{url,index}` entries, sharing at most 64 distinct indexes across forwarded messages. The image endpoint accepts only an index belonging to the authorized message, with no caller-supplied URL. It allows public HTTP(S) destinations on their default ports, verifies HTTPS certificates, rejects redirects and private addresses, and limits responses to 2 MiB of PNG, JPEG, GIF or WebP data. It returns 400 for an invalid index, 404 for a missing message or image, and 502 for an unavailable or unsafe remote image. Administration inspection uses `/api/admin/messages/{id}?username={mailbox}&image={index}` with the same administrator authorization as message inspection.
 
-The collapsed body-source view omits top-level transport headers. The API's `raw` field still contains the complete original message. Binary attachment download is not implemented. Reading the ordinary message endpoint updates its Seen flag, so it should not be treated as a side-effect-free prefetch API.
+The collapsed body-source view omits top-level transport headers. The API's `raw` field still contains the complete original message. Reading the ordinary message endpoint updates its Seen flag, so it should not be treated as a side-effect-free prefetch API.
 
 ## Administration
 
@@ -61,6 +74,9 @@ DKIM preparation returns `ok`, `domain`, `selector`, `name`, `type: "TXT"`, `val
 | PATCH `/api/admin/api-keys/{id}` | `{ "permissions": ["stats:read"] }`; changes permissions immediately without rotating the key. Cookie and CSRF required. |
 | DELETE `/api/admin/api-keys/{id}` | Immediately revokes the key; idempotent. Cookie and CSRF required. |
 | GET `/api/admin/messages?username=user%40example.com&folder=Sent` | Read-only view of a selected user's folder. |
+| GET `/api/admin/messages/search?username=user%40example.com` | The same decoded search and filters for a selected account. Requires `mail:read`; access is audited without storing query text or mail content. |
+| GET `/api/admin/messages/{id}/delivery-status?username=user%40example.com` | Read-only, audited delivery history for the selected account's outgoing message. Requires `mail:read`. |
+| GET `/api/admin/folders?username=user%40example.com` | Built-in and selectable client-created folders for a selected user. Requires `mail:read`. |
 | GET `/api/admin/messages/{id}?username=user%40example.com` | Original and decoded message. Does not mark Seen. Inspection is audited without logging message contents. |
 | GET `/api/admin/quota?username=user%40example.com` | `bytes`, `messages`, effective `max_bytes`/`max_messages`, nullable override `quota_bytes`/`quota_messages`. |
 | POST `/api/admin/quota` | `username`, `quota_bytes` (null to inherit, integer 1..2^50 to override); applies immediately. |
@@ -81,7 +97,7 @@ DKIM preparation returns `ok`, `domain`, `selector`, `name`, `type: "TXT"`, `val
 | POST `/api/admin/restart` | `{ "mode": "all" }` for a full restart, or `{ "mode": "changed" }` to apply saved file changes. Returns 202 with a restart job. |
 | GET `/api/admin/restart?job_id=...` | Restart job state, affected services, and updated URLs. |
 
-Folder names are `INBOX`, `Sent`, `Trash`, `Drafts`, `Junk`, and `Archive`. URL-encode query values, especially a username containing `+`. Administrator inspection is read-only; mailbox mutation routes remain exclusive to Webmail and its current user.
+Built-in folder names are `INBOX`, `Sent`, `Drafts`, `Trash`, `Junk`, and `Archive`; client-created folders use UTF-8 names with `/` hierarchy separators. Discover selectable names through the folder endpoints. URL-encode query values, especially a username containing `+` or a folder name containing non-ASCII characters. Administrator inspection is read-only; mailbox mutation routes remain exclusive to Webmail and its current user.
 
 Backup and shutdown mutations require administrator authentication, with CSRF for cookie requests. The backup download also requires administrator authentication; its random job ID is not an authentication credential. A new backup replaces the previous completed job, returns 409 while another backup/download is active, and is discarded on a normal administration-service shutdown. Configuration saving and web shutdown return 409 during backup. Shutdown returns 503 if administration was started without the native supervisor. The web UI saves and validates its Server settings form through `/api/admin/config` with `apply: false` before calling `/api/admin/shutdown`, avoiding a competing automatic restart. See [maintenance.md](maintenance.md) for backup contents and restoration.
 

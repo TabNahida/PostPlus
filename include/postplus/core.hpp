@@ -59,6 +59,8 @@ public:
     void connect(const tcp::endpoint& endpoint);
     std::string line(std::size_t limit = 8192); // strips CRLF; requires CRLF
     std::string read(std::size_t count);
+    // Wait without consuming input; polling timeout leaves the connection usable.
+    bool wait_readable(std::chrono::milliseconds timeout);
     void write(std::string_view bytes);
     void start_tls_server(const Config& config);
     void start_tls_client(const std::string& hostname);

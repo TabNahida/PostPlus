@@ -332,11 +332,19 @@ def main():
                         "--bin-dir", str(binaries)], check=True)
         subprocess.run([os.sys.executable, str(ROOT / "tests/folders_integration.py"),
                         "--bin-dir", str(binaries)], check=True)
+        subprocess.run([os.sys.executable, str(ROOT / "tests/storage_folders_integration.py"),
+                        "--bin-dir", str(binaries)], check=True)
         subprocess.run([os.sys.executable, str(ROOT / "tests/clean_data_integration.py"),
                         "--bin-dir", str(binaries)], check=True)
         subprocess.run([os.sys.executable, str(ROOT / "tests/mailbox_web_integration.py"),
                         "--bin-dir", str(binaries)], check=True)
         subprocess.run([os.sys.executable, str(ROOT / "tests/mail_rendering_integration.py"),
+                        "--bin-dir", str(binaries)], check=True)
+        subprocess.run([os.sys.executable, str(ROOT / "tests/attachments_integration.py"),
+                        "--bin-dir", str(binaries)], check=True)
+        subprocess.run([os.sys.executable, str(ROOT / "tests/search_delivery_integration.py"),
+                        "--bin-dir", str(binaries)], check=True)
+        subprocess.run([os.sys.executable, str(ROOT / "tests/antispam_integration.py"),
                         "--bin-dir", str(binaries)], check=True)
         subprocess.run([os.sys.executable, str(ROOT / "tests/password_policy_integration.py"),
                         "--bin-dir", str(binaries)], check=True)
@@ -355,6 +363,12 @@ def main():
         subprocess.run([os.sys.executable, str(ROOT / "tests/protocol_security.py"),
                         "--bin-dir", str(binaries)], check=True)
         subprocess.run([os.sys.executable, str(ROOT / "tests/mail_clients_integration.py"),
+                        "--bin-dir", str(binaries)], check=True)
+        subprocess.run([os.sys.executable, str(ROOT / "tests/imap_clients_integration.py"),
+                        "--bin-dir", str(binaries)], check=True)
+        subprocess.run([os.sys.executable, str(ROOT / "tests/pop3_clients_integration.py"),
+                        "--bin-dir", str(binaries)], check=True)
+        subprocess.run([os.sys.executable, str(ROOT / "tests/libcurl_clients_integration.py"),
                         "--bin-dir", str(binaries)], check=True)
         subprocess.run([os.sys.executable, str(ROOT / "tests/inbound_smtp_integration.py"),
                         "--bin-dir", str(binaries)], check=True)

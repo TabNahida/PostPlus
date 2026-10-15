@@ -10,6 +10,7 @@
 #include "postplus/forwarding.hpp"
 #include "postplus/verification_code.hpp"
 #include "postplus/remote_image.hpp"
+#include "postplus/folders.hpp"
 
 #include <algorithm>
 #include <charconv>
@@ -116,10 +117,48 @@ std::string message_id(const std::string& id) {
     return id;
 }
 
-std::string folder_name(const std::string& name) {
-    static const std::set<std::string> names{"INBOX","Sent","Trash","Drafts","Junk","Archive"};
-    if(!names.contains(name)) throw ApiError(400,"Unknown mail folder.");
-    return name;
+std::string folder_name(const Config& config, const std::string& username, const std::string& name) {
+    std::string normalized;
+    try { normalized = normalize_mail_folder(name); }
+    catch (const std::invalid_argument&) { throw ApiError(400,"Invalid mail folder."); }
+    if (!is_system_mail_folder(normalized)) {
+        const auto catalog = rpc(config,"storage",{{"op","folder_catalog"},{"username",username}});
+        require_ok(catalog,"Unable to load mail folders.");
+        const auto& folders = catalog.at("folders");
+        if (std::none_of(folders.begin(),folders.end(),[&](const Json& item) {
+                return item.at("name")==normalized && item.value("selectable",true);
+            })) throw ApiError(400,"Unknown mail folder.");
+    }
+    return normalized;
+}
+
+Json search_query(const Config& config,const std::string& username,const std::map<std::string,std::string>& query,bool admin=false) {
+    Json command{{"op","search"},{"username",username}};
+    auto integer=[](const std::string& input,std::int64_t minimum,std::int64_t maximum) {
+        std::int64_t number=0; const auto [end,error]=std::from_chars(input.data(),input.data()+input.size(),number);
+        if(error!=std::errc{} || end!=input.data()+input.size() || number<minimum || number>maximum) throw ApiError(400,"Invalid search number.");
+        return number;
+    };
+    for(const auto& [key,value]:query) {
+        if(key=="username" && admin) continue;
+        if(key=="q" || key=="from" || key=="to" || key=="subject") {
+            if(value.size()>256) throw ApiError(400,"Search text is too long."); command[key]=value;
+        } else if(key=="folder") command[key]=value=="all"?value:folder_name(config,username,value);
+        else if(key=="seen" || key=="has_attachment") {
+            if(value!="true" && value!="false") throw ApiError(400,"Search flags must be true or false."); command[key]=value=="true";
+        } else if(key=="limit") command[key]=integer(value,1,100);
+        else if(key=="offset") command[key]=integer(value,0,100000);
+        else if(key=="after" || key=="before") {
+            if(value.size()==10 && value[4]=='-' && value[7]=='-') {
+                const auto year=integer(value.substr(0,4),1900,9999),month=integer(value.substr(5,2),1,12),day=integer(value.substr(8,2),1,31);
+                const std::chrono::year_month_day date{std::chrono::year(static_cast<int>(year)),std::chrono::month(static_cast<unsigned>(month)),std::chrono::day(static_cast<unsigned>(day))};
+                if(!date.ok()) throw ApiError(400,"Invalid search date.");
+                command[key]=std::chrono::duration_cast<std::chrono::seconds>(std::chrono::sys_days(date).time_since_epoch()).count();
+            } else command[key]=integer(value,-2208988800LL,253402300799LL);
+        } else throw ApiError(400,"Unknown search parameter.");
+    }
+    if(command.value("after",INT64_C(-2208988800))>=command.value("before",INT64_C(253402300799))) throw ApiError(400,"Search after must precede before.");
+    return command;
 }
 
 bool forbidden_portal_route(const HttpRequest& request) {
@@ -167,8 +206,7 @@ std::string content_id(const mime::Part& part) {
 bool attachment(const mime::Part& part) {
     const auto disposition = mime::header(part, "content-disposition");
     return lower(trim(disposition.substr(0, disposition.find(';')))) == "attachment" ||
-        !mime::parameter(disposition, "filename").empty() ||
-        !mime::parameter(mime::header(part, "content-type"), "name").empty();
+        !mime::attachment_filename(part).empty();
 }
 
 void inline_images(const mime::Part& part, ViewBody& out, ViewBudget& budget) {
@@ -237,6 +275,10 @@ Json part_view(const mime::Part& part, ViewBudget& budget, std::size_t depth) {
     return {{"subject", mime::decode_header(mime::header(part, "subject"))},
             {"from", mime::decode_header(mime::header(part, "from"))},
             {"to", mime::decode_header(mime::header(part, "to"))},
+            {"cc", mime::decode_header(mime::header(part, "cc"))},
+            {"bcc", mime::decode_header(mime::header(part, "bcc"))},
+            {"reply_to", mime::decode_header(mime::header(part, "reply-to"))},
+            {"in_reply_to", mime::header(part,"in-reply-to")}, {"references",mime::header(part,"references")},
             {"date", mime::header(part, "date")},
             {"text", std::move(body.text)}, {"html", std::move(body.html)},
             {"forwarded", std::move(body.forwarded)}, {"inline_images", std::move(body.inline_images)}};
@@ -244,7 +286,7 @@ Json part_view(const mime::Part& part, ViewBudget& budget, std::size_t depth) {
 
 Json message_view(const std::string& raw) {
     try {
-        auto part = mime::parse(raw);
+        auto part = mime::parse(raw, {.max_bytes=raw.size()});
         ViewBudget budget;
         auto view=part_view(part, budget, 0);
         std::map<std::string,std::size_t> indexes;
@@ -259,12 +301,36 @@ Json message_view(const std::string& raw) {
             for(auto& forwarded:message["forwarded"])collect(forwarded);
         };
         collect(view);
+        view["attachments"]=Json::array();
+        const auto files=mime::attachments(part);
+        for(std::size_t index=0;index<files.size();++index)
+            view["attachments"].push_back({{"index",index},{"filename",files[index].filename},{"content_type",files[index].content_type},{"size",files[index].data.size()}});
         return view;
     } catch (const std::exception&) {
         return {{"subject", ""}, {"from", ""}, {"to", ""}, {"date", ""},
                 {"text", "The message could not be decoded. View the original message below."},
-                {"html", ""}, {"forwarded", Json::array()}, {"inline_images", Json::array()}};
+                {"html", ""}, {"forwarded", Json::array()}, {"inline_images", Json::array()}, {"attachments",Json::array()}};
     }
+}
+
+HttpResponse message_attachment(const std::string& raw,const std::string& value) {
+    std::size_t index=256;
+    const auto [end,error]=std::from_chars(value.data(),value.data()+value.size(),index);
+    if(value.empty() || error!=std::errc{} || end!=value.data()+value.size() || index>=256) throw ApiError(400,"Invalid attachment index.");
+    std::vector<mime::Attachment> files;
+    try { files=mime::attachments(mime::parse(raw,{.max_bytes=raw.size()})); }
+    catch(const std::exception&) {throw ApiError(422,"The message attachments could not be decoded.");}
+    if(index>=files.size())throw ApiError(404,"Attachment not found in this message.");
+    auto& file=files[index];
+    std::string fallback,encoded; constexpr char digits[]="0123456789ABCDEF";
+    for(unsigned char ch:file.filename) {
+        fallback+=ch>=32 && ch<127 && ch!='"' && ch!='\\'?static_cast<char>(ch):'_';
+        if((ch>='a'&&ch<='z') || (ch>='A'&&ch<='Z') || (ch>='0'&&ch<='9') || ch=='-' || ch=='_' || ch=='.')encoded+=static_cast<char>(ch);
+        else {encoded+='%';encoded+=digits[ch>>4];encoded+=digits[ch&15];}
+    }
+    HttpResponse response; response.content_type="application/octet-stream";response.body=std::move(file.data);
+    response.headers["Content-Disposition"]="attachment; filename=\""+fallback+"\"; filename*=UTF-8''"+encoded;
+    return response;
 }
 
 HttpResponse message_image(const Json& view,const std::string& value) {
@@ -291,6 +357,7 @@ struct WebSession {
     bool admin = false;
     Clock::time_point expires;
     std::string api_key_id;
+    std::vector<std::string> api_permissions;
 };
 
 class Web {
@@ -317,6 +384,8 @@ public:
             load_static(root, "/verification-code.js", "verification-code.js", "application/javascript; charset=utf-8");
             load_static(root, "/verification-code.css", "verification-code.css", "text/css; charset=utf-8");
             load_static(root, "/webmail.css", "webmail.css", "text/css; charset=utf-8");
+            load_static(root, "/mail-tools.js", "mail-tools.js", "application/javascript; charset=utf-8");
+            load_static(root, "/mail-tools.css", "mail-tools.css", "text/css; charset=utf-8");
             load_static(root, "/register", "register.html", "text/html; charset=utf-8");
             load_static(root, "/register.js", "register.js", "application/javascript; charset=utf-8");
         }
@@ -458,6 +527,7 @@ private:
             session.username = account.at("username").get<std::string>();
             session.admin = account.value("admin", false);
             session.api_key_id = account.at("id").get<std::string>();
+            session.api_permissions = account.at("permissions").get<std::vector<std::string>>();
             return session;
         }
         require_transport(request);
@@ -565,7 +635,7 @@ private:
         if (request.method == "GET" && request.path == "/health")
             return json_response({{"ok", true}, {"service", service_name}});
         if (request.method == "GET" && request.path == "/api/public/config")
-            return json_response({{"ok", true}, {"domain", config_.text("domain", "localhost")}});
+            return json_response({{"ok", true}, {"domain", config_.text("domain", "localhost")},{"max_message_bytes",config_.number("max_message_bytes",10485760)}});
         if (!admin_only)
             if (auto discovered = mail_client_discovery(config_, request)) return *discovered;
         if (request.method == "GET") {
@@ -642,8 +712,18 @@ private:
             return json_response(result);
         }
         if (request.method == "POST" && path == "/api/drafts") return save_draft(request,session);
+        if (request.method == "GET" && path == "/api/messages/search") {
+            auto result=rpc(config_,"storage",search_query(config_,session.username,query));
+            require_ok(result,"Unable to search messages."); return json_response(result);
+        }
+        if (request.method == "GET" && path.starts_with("/api/messages/") && path.ends_with("/delivery-status")) {
+            if(!query.empty()) throw ApiError(400,"Delivery status does not accept query parameters.");
+            const auto id=message_id(path.substr(14,path.size()-14-16));
+            auto result=rpc(config_,"storage",{{"op","delivery_status"},{"username",session.username},{"id",id}});
+            require_ok(result,"No delivery history is available for this message.",404); return json_response(result);
+        }
         if (request.method == "GET" && path == "/api/messages") {
-            auto result = rpc(config_, "storage", {{"op", "list"}, {"username", session.username}, {"folder",folder_name(parameter("folder","INBOX"))}, {"include_envelope", true}});
+            auto result = rpc(config_, "storage", {{"op", "list"}, {"username", session.username}, {"folder",folder_name(config_,session.username,parameter("folder","INBOX"))}, {"include_envelope", true}});
             require_ok(result, "Unable to load messages.");
             return json_response(result);
         }
@@ -652,7 +732,7 @@ private:
             auto id = message_id(path.substr(14,path.size()-14-(moving?5:0)));
             if(moving && request.method=="POST") {
                 auto input=request_json(request);
-                auto result=rpc(config_,"storage",{{"op","move"},{"username",session.username},{"ids",Json::array({id})},{"folder",folder_name(field(input,"folder",32))}});
+                auto result=rpc(config_,"storage",{{"op","move"},{"username",session.username},{"ids",Json::array({id})},{"folder",folder_name(config_,session.username,field(input,"folder",255))}});
                 require_ok(result,"Unable to move message.",400);
                 return json_response(result);
             }
@@ -660,6 +740,10 @@ private:
             if (request.method == "GET") {
                 auto result = rpc(config_, "storage", {{"op", "get"}, {"username", session.username}, {"id", id}});
                 require_ok(result, "Message not found.", 404);
+                if(query.contains("attachment")) {
+                    if(query.size()!=1)throw ApiError(400,"Invalid attachment query.");
+                    return message_attachment(result.at("raw").get<std::string>(),parameter("attachment"));
+                }
                 if(query.contains("image")) {
                     if(query.size()!=1)throw ApiError(400,"Invalid remote image query.");
                     return message_image(message_view(result.at("raw").get<std::string>()),parameter("image"));
@@ -801,13 +885,18 @@ private:
                 if(request.method=="POST" && path=="/api/admin/acme/cancel") return json_response(acme_->cancel(field(request_json(request),"job_id",128)));
                 throw ApiError(404,"API route not found.");
             }
-            if(path=="/api/admin/messages" || path.starts_with("/api/admin/messages/") || path=="/api/admin/quota") {
+            if(path=="/api/admin/folders" || path=="/api/admin/messages" || path.starts_with("/api/admin/messages/") || path=="/api/admin/quota") {
                 if(path!="/api/admin/quota" && request.method!="GET") throw ApiError(405,"Administrator mail inspection is read-only.");
                 auto input=request.method=="GET" ? Json{{"username",parameter("username")}} : request_json(request);
                 const auto username=username_field(input);
                 auto exists=rpc(config_,"auth",{{"op","exists"},{"username",username}});
                 require_ok(exists,"Unable to load accounts.");
                 if(!exists.value("exists",false)) throw ApiError(404,"Account not found.");
+                if(path=="/api/admin/folders") {
+                    auto result=rpc(config_,"storage",{{"op","folders"},{"username",username}});
+                    require_ok(result,"Unable to load mail folders.");
+                    return json_response(result);
+                }
                 if(path=="/api/admin/quota") {
                     Json command{{"op",request.method=="GET"?"quota_get":"quota_set"},{"username",username}};
                     if(request.method=="POST") {
@@ -825,8 +914,20 @@ private:
                     return json_response(result);
                 }
                 if(request.method!="GET") throw ApiError(405,"Administrator mail inspection is read-only.");
+                if(path=="/api/admin/messages/search") {
+                    auto result=rpc(config_,"storage",search_query(config_,username,query,true));
+                    require_ok(result,"Unable to search messages.");
+                    log(service_name,"administrator " + session.username + " searched mailbox " + username); return json_response(result);
+                }
+                if(path.starts_with("/api/admin/messages/") && path.ends_with("/delivery-status")) {
+                    if(query.size()!=1 || !query.contains("username")) throw ApiError(400,"An account is required for delivery status.");
+                    const auto prefix=std::string("/api/admin/messages/"); const auto id=message_id(path.substr(prefix.size(),path.size()-prefix.size()-16));
+                    auto result=rpc(config_,"storage",{{"op","delivery_status"},{"username",username},{"id",id}});
+                    require_ok(result,"No delivery history is available for this message.",404);
+                    log(service_name,"administrator " + session.username + " inspected delivery status " + id + " in mailbox " + username); return json_response(result);
+                }
                 if(path=="/api/admin/messages") {
-                    auto result=rpc(config_,"storage",{{"op","list"},{"username",username},{"folder",folder_name(parameter("folder","INBOX"))},{"include_envelope",true}});
+                    auto result=rpc(config_,"storage",{{"op","list"},{"username",username},{"folder",folder_name(config_,username,parameter("folder","INBOX"))},{"include_envelope",true}});
                     require_ok(result,"Unable to load messages.");
                     log(service_name,"administrator " + session.username + " inspected mailbox " + username);
                     return json_response(result);
@@ -834,6 +935,11 @@ private:
                 const auto id=message_id(path.substr(std::string("/api/admin/messages/").size()));
                 auto result=rpc(config_,"storage",{{"op","get"},{"username",username},{"id",id}});
                 require_ok(result,"Message not found.",404);
+                if(query.contains("attachment")) {
+                    if(query.size()!=2)throw ApiError(400,"Invalid attachment query.");
+                    log(service_name,"administrator " + session.username + " downloaded attachment from message " + id + " in mailbox " + username);
+                    return message_attachment(result.at("raw").get<std::string>(),parameter("attachment"));
+                }
                 result["message"]=message_view(result.at("raw").get<std::string>());
                 if(query.contains("image")) {
                     if(query.size()!=2)throw ApiError(400,"Invalid remote image query.");
@@ -988,21 +1094,89 @@ private:
     }
 };
 
+mime::Composition composition_input(const Config& config,const WebSession& session,const Json& input,std::size_t maximum) {
+    const auto require_read=[&] {
+        if(!session.api_key_id.empty() && std::find(session.api_permissions.begin(),session.api_permissions.end(),"mailbox:read")==session.api_permissions.end())
+            throw ApiError(403,"This API key does not have permission for this operation.");
+    };
+    mime::Composition message;message.from=session.username;message.subject=field(input,"subject",512);message.text=field(input,"text",maximum);
+    if(input.contains("html"))message.html=field(input,"html",maximum);
+    if(input.contains("in_reply_to"))message.in_reply_to=field(input,"in_reply_to",998);
+    if(input.contains("references"))message.references=field(input,"references",998);
+    std::size_t address_count=0;
+    auto addresses=[&](const char* name,std::vector<std::string>& target,bool required=false) {
+        if(!input.contains(name)) {if(required)throw ApiError(400,"Invalid recipient address.");return;}
+        if(!input[name].is_array() || input[name].size()>100-address_count)throw ApiError(400,"Provide at most 100 recipient addresses.");
+        address_count+=input[name].size();
+        for(const auto& value:input[name]) {
+            if(!value.is_string())throw ApiError(400,"Recipient addresses must be strings.");
+            auto address=lower(trim(value.get<std::string>()));
+            if(!valid_address(address))throw ApiError(400,"Invalid recipient address.");
+            target.push_back(std::move(address));
+        }
+    };
+    addresses("to",message.to,true);addresses("cc",message.cc);addresses("bcc",message.bcc);
+    if(input.contains("reply_to_id")) {
+        require_read();
+        auto source=rpc(config,"storage",{{"op","get"},{"username",session.username},{"id",message_id(field(input,"reply_to_id",128))}});
+        require_ok(source,"Original message not found.",404);
+        try {
+            auto part=mime::parse(source.at("raw").get<std::string>(),{.max_bytes=maximum});
+            const auto id=mime::header(part,"message-id");
+            if(!id.empty() && id.size()<=512 && id.front()=='<' && id.back()=='>') {
+                message.in_reply_to=id; const auto refs=mime::header(part,"references");
+                message.references=refs.empty() || refs.size()+id.size()+1>998?id:refs+" "+id;
+            }
+        } catch(const std::invalid_argument&) { /* An undecodable source can still be answered. */ }
+    }
+    std::size_t bytes=message.text.size()+message.html.size();
+    if(bytes>maximum)throw ApiError(413,"The message exceeds the server size limit.");
+    if(input.contains("attachments")) {
+        if(!input["attachments"].is_array() || input["attachments"].size()>64)throw ApiError(400,"Provide at most 64 attachments.");
+        // Keep at most one decoded source in memory; a request cannot retain
+        // 64 maximum-sized source messages while selecting only tiny files.
+        std::string source_id;std::vector<mime::Attachment> source_files;
+        for(const auto& item:input["attachments"]) {
+            if(!item.is_object())throw ApiError(400,"Invalid attachment.");
+            mime::Attachment file;
+            if(item.contains("message_id")) {
+                require_read();
+                if(item.contains("data_base64") || !item.contains("index") || !item["index"].is_number_unsigned())throw ApiError(400,"Invalid attachment reference.");
+                const auto id=message_id(field(item,"message_id",128));
+                if(source_id!=id) {
+                    const auto source=rpc(config,"storage",{{"op","get"},{"username",session.username},{"id",id}});
+                    require_ok(source,"Attachment source message not found.",404);
+                    try {source_files=mime::attachments(mime::parse(source.at("raw").get<std::string>(),{.max_bytes=maximum}));source_id=id;}
+                    catch(const std::exception&) {throw ApiError(422,"The message attachments could not be decoded.");}
+                }
+                const auto index=item["index"].get<std::size_t>();
+                if(index>=source_files.size())throw ApiError(404,"Attachment not found in this message.");
+                file=source_files[index];
+            } else {
+                file.filename=mime::safe_filename(field(item,"filename",512));file.content_type=field(item,"content_type",100);
+                const auto data=field(item,"data_base64",(maximum+2)/3*4);
+                try {file.data=base64_decode(data);}
+                catch(const std::exception&) {throw ApiError(400,"Invalid attachment base64 data.");}
+            }
+            if(file.data.size()>maximum-bytes)throw ApiError(413,"The attachments exceed the server size limit.");
+            bytes+=file.data.size();message.attachments.push_back(std::move(file));
+        }
+    }
+    return message;
+}
+
 HttpResponse Web::send_mail(const HttpRequest& request, const WebSession& session) {
     const auto input = request_json(request);
     const auto max_bytes = static_cast<std::size_t>(std::clamp(config_.number("max_message_bytes", 10485760), 1024, 104857600));
-    const auto subject = field(input, "subject", 512);
-    const auto text = field(input, "text", max_bytes);
-    if (!input.contains("to") || !input["to"].is_array() || input["to"].empty() || input["to"].size() > 100)
-        throw ApiError(400, "Provide between 1 and 100 recipient addresses.");
+    const auto message=composition_input(config_,session,input,max_bytes);
+    if(message.to.empty() && message.cc.empty() && message.bcc.empty())throw ApiError(400,"Provide between 1 and 100 recipient addresses.");
     std::set<std::string> unique;
     std::vector<std::string> recipients;
     Json routes=Json::object();
     const auto domain = lower(config_.text("domain", "localhost"));
-    for (const auto& address : input["to"]) {
-        if (!address.is_string()) throw ApiError(400, "Recipient addresses must be strings.");
-        auto recipient = lower(trim(address.get<std::string>()));
-        if (!valid_address(recipient)) throw ApiError(400, "Invalid recipient address.");
+    auto envelope=message.to;envelope.insert(envelope.end(),message.cc.begin(),message.cc.end());envelope.insert(envelope.end(),message.bcc.begin(),message.bcc.end());
+    for (const auto& address : envelope) {
+        auto recipient = address;
         if (!unique.insert(recipient).second) continue;
         if (recipient.substr(recipient.find('@') + 1) == domain) {
             const auto route=resolve_local_recipient(config_,recipient);
@@ -1015,10 +1189,11 @@ HttpResponse Web::send_mail(const HttpRequest& request, const WebSession& sessio
         recipients.push_back(std::move(recipient));
     }
     std::string raw;
-    try { raw = mime::compose(session.username, recipients, subject, text); }
+    try { raw = mime::compose(message); }
     catch (const std::exception&) { throw ApiError(400, "The message contains invalid headers or content."); }
     if (raw.size() > max_bytes) throw ApiError(413, "The encoded message exceeds the server size limit.");
-    const auto scanned = rpc(config_, "filter", {{"op", "scan"}, {"raw", raw}});
+    const auto scanned = rpc(config_, "filter", {{"op", "scan"}, {"raw", raw},
+        {"inbound", false}, {"sender", session.username}});
     require_ok(scanned, "The message scanning service is unavailable.");
     if (scanned.value("action", "reject") != "accept") throw ApiError(422, "The message was rejected by the server mail filter.");
     Json submission={{"op", "enqueue"}, {"sender", session.username}, {"recipients", recipients}, {"raw", raw},{"sent_username",session.username},{"recipient_routes",routes}};
@@ -1031,15 +1206,9 @@ HttpResponse Web::send_mail(const HttpRequest& request, const WebSession& sessio
 HttpResponse Web::save_draft(const HttpRequest& request, const WebSession& session) {
     const auto input=request_json(request);
     const auto maximum=static_cast<std::size_t>(config_.number("max_message_bytes",10485760));
-    const auto subject=field(input,"subject",512), text=field(input,"text",maximum);
-    if(!input.contains("to") || !input["to"].is_array() || input["to"].size()>100) throw ApiError(400,"Invalid recipient address.");
-    std::vector<std::string> recipients;
-    for(const auto& address:input["to"]) {
-        if(!address.is_string() || !valid_address(address.get<std::string>())) throw ApiError(400,"Invalid recipient address.");
-        recipients.push_back(address.get<std::string>());
-    }
+    const auto message=composition_input(config_,session,input,maximum);
     std::string raw;
-    try {raw=mime::compose(session.username,recipients,subject,text,true);}
+    try {raw=mime::compose(message,true);}
     catch(const std::exception&) {throw ApiError(400,"The message contains invalid headers or content.");}
     if(raw.size()>maximum) throw ApiError(413,"The encoded message exceeds the server size limit.");
     Json command={{"op","draft_save"},{"username",session.username},{"raw",raw}};

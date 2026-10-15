@@ -159,6 +159,9 @@ int main() {
         base.values = {{"domain", "example.test"}};
         check(restart_plan(base, base).empty(), "no-op config restarted services");
         plan(base, "blocked_terms", Json::array({"blocked"}), {"filter"});
+        plan(base, "spam_allow_senders", Json::array({"trusted@example.net"}), {"filter"});
+        plan(base, "spam_block_senders", Json::array({"example.org"}), {"filter"});
+        plan(base, "rspamd_enabled", true, {"filter"});
         plan(base, "smarthost_port", 2525, {"transfer"});
         plan(base, "smarthost_timeout_seconds", 40, {"transfer", "delivery"});
         plan(base, "direct_timeout_seconds", 150, {"transfer", "delivery"});

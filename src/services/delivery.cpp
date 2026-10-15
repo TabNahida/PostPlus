@@ -20,24 +20,30 @@ void process(const Config& config, const Json& job) {
     const auto raw = job.at("raw").get<std::string>();
     const auto now=std::chrono::system_clock::to_time_t(std::chrono::system_clock::now());
     if(job.contains("created_at") && now-job.at("created_at").get<std::int64_t>()>=config.number("delivery_max_age_seconds",432000)) {
-        require_ok(rpc(config,"storage",{{"op","queue_reject"},{"id",id},{"error","delivery retry age exceeded"}}));
+        require_ok(rpc(config,"storage",{{"op","queue_reject"},{"id",id},{"status","failed"},{"error","delivery retry age exceeded"}}));
         log("delivery","delivery expired for queue item "+id,"warn");
         return;
     }
-    const auto scan = require_ok(rpc(config,"filter",{{"op","scan"},{"raw",raw}}));
-    if (scan.value("action", "reject") != "accept") {
+    const auto scan = require_ok(rpc(config,"filter",{{"op","scan"},{"raw",raw},{"inbound",job.value("inbound",job.value("sent_username",std::string{}).empty())},
+        {"sender",job.at("sender")},{"recipient",recipient},{"peer_ip",job.value("peer_ip",std::string{})},{"helo",job.value("helo",std::string{})}}));
+    const auto action=scan.value("action",std::string("reject"));
+    if (action != "accept" && action != "spam") {
         // Keep rejected mail durable and visible to administrators; never auto-release it.
         require_ok(rpc(config,"storage",{{"op","queue_reject"},{"id",id},{"error",scan.value("reason","policy rejection")}}));
         log("delivery", "quarantined queue item " + id, "warn");
         return;
     }
     const auto local_domain = lower(config.text("domain","localhost"));
+    std::string delivery_scope="remote_mta";
     if (job.value("local_route",false) || recipient.substr(recipient.find('@') + 1) == local_domain) {
         const auto route = resolve_local_recipient(config,recipient,id);
         if (!route.value("exists",false)) throw std::runtime_error("local destination mailbox no longer exists");
         Json request{{"op","deliver"},{"username",route.at("destination")},{"raw",raw},{"delivery_id",id}};
+        request["folder"]=action=="spam"?"Junk":"INBOX";
+        request["filter_action"]=action; request["spam_score"]=scan.value("spam_score",Json(0)); request["spam_reasons"]=scan.value("spam_reasons",Json::array());
         if (job.contains("submission_id")) request["submission_id"] = job.at("submission_id");
         require_ok(rpc(config,"storage",request));
+        delivery_scope="local_mailbox";
     } else {
         const auto sent=rpc(config,"transfer",{{"op","send"},{"sender",job.at("sender")},{"recipient",recipient},{"raw",raw}});
         if(!sent.value("ok",false) && sent.value("permanent",false)) {
@@ -47,7 +53,7 @@ void process(const Config& config, const Json& job) {
         }
         require_ok(sent);
     }
-    require_ok(rpc(config,"storage",{{"op","queue_finish"},{"id",id}}));
+    require_ok(rpc(config,"storage",{{"op","queue_finish"},{"id",id},{"delivery_scope",delivery_scope}}));
     log("delivery", "delivered queue item " + id);
 }
 }

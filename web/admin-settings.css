@@ -48,3 +48,4 @@
   #view-settings .dns-check-actions .button { width:100%; }
   .operation-cards>div,#view-maintenance .update-panel { padding:22px 18px; }
 }
+#inspect-attachments{display:grid;gap:9px;margin-top:24px;padding-top:18px;border-top:1px solid var(--line)}#inspect-attachments:empty{display:none}#inspect-attachments .attachment-card{display:flex;padding:12px;border:1px solid var(--line);border-radius:8px;background:var(--surface,#fff);color:var(--ink);text-decoration:none}#inspect-attachments .attachment-copy{display:flex;min-width:0;flex-direction:column;gap:5px}#inspect-attachments strong{font-size:12px;overflow-wrap:anywhere}#inspect-attachments small{font-size:11px}

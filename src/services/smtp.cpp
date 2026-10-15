@@ -31,7 +31,8 @@ void smtp(Connection& c, const Config& cfg, std::chrono::seconds data_timeout, b
     unsigned auth_failures = 0;
     const auto auth_limit = static_cast<unsigned>(std::clamp(cfg.number("max_auth_attempts", 5), 1, 20));
     const auto recipient_limit = static_cast<std::size_t>(std::clamp(cfg.number("max_recipients", 100), 1, 100));
-    std::string username, credential_version, sender;
+    std::string username, credential_version, sender, helo;
+    const auto peer_ip = c.socket().remote_endpoint().address().to_string();
     std::vector<std::string> recipients;
     Json recipient_routes = Json::object();
     auto reset = [&] { have_sender = false; sender.clear(); recipients.clear(); recipient_routes.clear(); };
@@ -57,8 +58,10 @@ void smtp(Connection& c, const Config& cfg, std::chrono::seconds data_timeout, b
             if (verb == "noop") { reply("250 2.0.0 OK\r\n"); continue; }
             if (verb == "rset") { reset(); reply("250 2.0.0 Reset\r\n"); continue; }
             if (verb == "ehlo" || verb == "helo") {
-                if (arg.empty()) { reply("501 5.5.2 Greeting requires a hostname\r\n"); continue; }
-                reset(); greeted = true; extended = verb == "ehlo";
+                if (arg.empty() || arg.size() > 255 || std::any_of(arg.begin(), arg.end(), [](unsigned char ch) { return ch <= 32 || ch == 127; })) {
+                    reply("501 5.5.2 Greeting requires a hostname\r\n"); continue;
+                }
+                reset(); greeted = true; extended = verb == "ehlo"; helo = arg;
                 if (!extended) { reply("250 " + cfg.mail_hostname() + "\r\n"); continue; }
                 reply("250-" + cfg.mail_hostname() + "\r\n250-SIZE " + std::to_string(maximum) + "\r\n250-8BITMIME\r\n");
                 if (!c.encrypted() && tls_available(cfg)) reply("250-STARTTLS\r\n");
@@ -73,7 +76,7 @@ void smtp(Connection& c, const Config& cfg, std::chrono::seconds data_timeout, b
                 reply("220 2.0.0 Begin TLS negotiation\r\n");
                 // A failed TLS handshake is fatal; never resume plaintext command parsing.
                 try { c.start_tls_server(cfg); } catch (...) { return; }
-                reset(); username.clear(); greeted = false; extended = false; continue;
+                reset(); username.clear(); helo.clear(); greeted = false; extended = false; continue;
             }
             if (verb == "auth") {
                 if (!extended || have_sender || !username.empty()) { reply("503 5.5.1 AUTH unavailable in this state\r\n"); continue; }
@@ -168,7 +171,10 @@ void smtp(Connection& c, const Config& cfg, std::chrono::seconds data_timeout, b
                 }
                 c.set_deadline(std::nullopt);
                 if (too_large) { reset(); reply("552 5.3.4 Message exceeds size limit\r\n"); continue; }
-                Json queued = {{"op", "enqueue"}, {"sender", sender}, {"recipients", recipients}, {"recipient_routes", recipient_routes}, {"raw", raw}};
+                // Persist connection facts outside the sender-controlled message.
+                // TLS alone does not authenticate an Internet sender.
+                Json queued = {{"op", "enqueue"}, {"sender", sender}, {"recipients", recipients}, {"recipient_routes", recipient_routes}, {"raw", raw},
+                    {"inbound", username.empty()}, {"peer_ip", peer_ip}, {"helo", helo}};
                 if (!username.empty()) queued["sent_username"] = username;
                 auto result = rpc(cfg, "storage", queued);
                 reset();

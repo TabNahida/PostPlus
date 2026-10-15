@@ -19,6 +19,8 @@
 - **Start in your browser.** Run PostPlus, open the setup address printed in the terminal, and create your first administrator.
 - **Keep administration separate.** Manage accounts, inspect a user’s mail without changing its read status, set individual storage quotas, and review queues and logs. Webmail runs on its own port.
 - **Give every message a place.** Use Inbox, Sent, Drafts, Trash, Junk, and Archive. Save a draft, resume writing later, and move messages between folders.
+- **Write and find mail.** Compose formatted messages with attachments, CC and BCC, reply or forward, and search decoded mail across folders with date, sender and attachment filters.
+- **Follow delivery.** View per-recipient delivery history and retry details from Sent mail. Incoming spam goes to Junk with a visible score and reasons; optional local Rspamd adds a maintained spam engine.
 - **Set up encrypted connections.** Request a Let’s Encrypt certificate through the browser, or use certificates you already have.
 - **Make it comfortable.** Switch between English and Simplified Chinese, choose light or dark mode, or follow your device's appearance. Adjust reading preferences and use the same tools on your phone.
 - **Connect mail clients.** Send through SMTP and read through POP3 or the supported IMAP commands, with TLS support.
@@ -161,8 +163,9 @@ tests/                 C++ tests, web checks, and integration suites
 
 ## Current scope
 
-- IMAP implements a [documented command subset](docs/protocols.md), including ENVELOPE, BODYSTRUCTURE, MIME sections, APPEND, COPY and MOVE; full client compatibility and IDLE remain outside the current scope. POP3 does not yet provide an exclusive maildrop lock.
-- Webmail reads plain text, isolated HTML, and attached forwarded messages across six built-in folders, and composes plain text. Remote images load automatically in the isolated reader; safe sender typography, table layouts, and responsive styles are preserved. Attachment upload/download and custom folder creation are not implemented. A Sent copy records successful submission to the queue, not proof of final delivery.
+- IMAP supports [documented mailbox workflows](docs/protocols.md), including persistent custom folders, subscriptions and flags, IDLE synchronization, ENVELOPE, BODYSTRUCTURE, MIME sections, APPEND, COPY and MOVE. IMAP/POP3 accept TLS password authentication with PLAIN/LOGIN; POP3 download transactions hold an exclusive maildrop lease.
+- Webmail reads plain text, isolated HTML, and attached forwarded messages across built-in and client-created folders. It composes plain or formatted messages, supports attachments, CC/BCC, replies, forwarding, saved drafts, search and per-recipient delivery history. Remote images load automatically in the isolated reader. Custom folder creation remains available through IMAP. A Sent copy records queue submission; remote server acceptance does not confirm inbox placement or reading.
+- Incoming spam is scored locally and placed in Junk; optional loopback Rspamd can supply additional verdicts. Sender allow/block rules use the SMTP envelope and do not authenticate sender identity. Full antivirus scanning requires ClamAV; neither engine is bundled.
 - Outbound delivery supports direct MX routing with DKIM signing or an SMTP relay. Incoming SPF/DKIM/DMARC verification, DSN generation, DANE, MTA-STS, multiple domains, and multi-host high availability are not implemented. Permanent delivery failures remain visible in the administration queue.
 - SMTP queues mail transactionally. Local delivery is idempotent; retrying outbound mail after an interrupted acknowledgement can produce a duplicate.
 - Sessions use bounded worker pools, SQLite serializes writes, and delivery uses one worker. Capacity for hundreds or thousands of active users requires representative workload testing and further development.

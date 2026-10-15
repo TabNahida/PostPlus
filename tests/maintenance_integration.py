@@ -46,7 +46,8 @@ def run(s):
     ordinary = login(s, "web", user)
     cookie = {"Cookie": authorized["Cookie"]}
     for service in ("web", "admin"):
-        assert s.http(service, "GET", "/api/public/config")[2] == {"ok": True, "domain": "localhost"}
+        assert s.http(service, "GET", "/api/public/config")[2] == {
+            "ok": True, "domain": "localhost", "max_message_bytes": s.config["max_message_bytes"]}
     for route in ("/api/admin/backup", "/api/admin/shutdown"):
         assert s.http("admin", "POST", route, {})[0] == 401
         assert s.http("admin", "POST", route, {}, cookie)[0] == 403

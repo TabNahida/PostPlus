@@ -21,6 +21,14 @@ In Thunderbird, Apple Mail, or an IMAP-capable client, choose a manual IMAP acco
 
 在 Thunderbird、Apple Mail 或支持 IMAP 的客户端中，如果自动配置未完成，请选择手动配置 IMAP 账号，分别填写收信和发信服务器。两者用户名都包含 `@example.com`。587、143 端口选择 **STARTTLS**；465、993 端口选择 **SSL/TLS**。首次配置密码和管理 API 密钥不能作为邮箱密码。
 
+For Outlook, add an **IMAP** account in advanced/manual setup. Use password authentication, leave the root folder path empty, and disable Secure Password Authentication (SPA). PostPlus accepts LOGIN and SASL PLAIN/LOGIN over TLS. The mailbox domain in the username may differ from the server hostname: keep the account's actual full email address. POP3 supports USER/PASS and SASL PLAIN/LOGIN over TLS; only one POP3 download transaction can open the same mailbox at a time.
+
+Outlook 请在高级／手动配置中选择 **IMAP**，使用密码验证，将根文件夹路径留空，并关闭安全密码验证（SPA）。PostPlus 支持 TLS 下的 LOGIN 和 SASL PLAIN/LOGIN。用户名的邮箱域名可能与服务器主机名不同，请保留账号实际的完整邮箱地址。POP3 支持 TLS 下的 USER/PASS 和 SASL PLAIN/LOGIN；同一邮箱同时仅允许一个 POP3 下载事务。
+
+After connecting, IMAP discovers the Inbox and special folders, synchronizes existing messages and changes, and receives new-mail notifications through IDLE. Folders and subscriptions created in a client are stored persistently. Client-created folders also appear in Webmail. If an account connects but stays empty, temporarily enable debug logging and inspect the `imap` log for mailbox selection and FETCH failures, confirm the full account address, and check the same account in Webmail. A successful TLS handshake alone does not establish that the client selected the correct mailbox.
+
+连接后，IMAP 会发现收件箱及特殊文件夹、同步已有邮件及变更，并通过 IDLE 接收新邮件通知。客户端创建的文件夹和订阅会持久保存，自定义文件夹也可在 Webmail 中查看。若能连接但列表为空，请临时启用调试日志，检查 `imap` 日志中的邮箱选择及 FETCH 错误，核对完整邮箱账号，并查看同一账号的 Webmail。TLS 握手成功本身不能确认客户端已选中正确的邮箱。
+
 SMTP port **25** receives messages from other mail servers. Authenticated mail clients normally send through **587** or **465**. IMAP synchronizes folders and messages; POP3 is intended for downloading messages. Submission requires authentication and TLS even when the general configuration allows insecure local authentication. Ports 465, 587, 993, and 995 only start when both TLS certificate and private-key files are configured. Set any of those dedicated ports to `0` to disable its listener.
 
 SMTP **25** 端口接收其他邮件服务器的投递，邮箱客户端通常通过 **587** 或 **465** 端口登录发信。IMAP 同步文件夹和邮件，POP3 用于下载邮件。客户端发信专用服务始终要求身份验证和 TLS。465、587、993、995 端口仅在同时配置 TLS 证书和私钥时启动；将任一专用端口设为 `0` 可禁用它。

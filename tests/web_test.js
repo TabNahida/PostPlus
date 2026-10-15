@@ -133,7 +133,7 @@ for (const file of ["index.html", "admin.html", "setup.html"]) {
   }
   for (const match of html.matchAll(/data-i18n-(?:aria-label|title|placeholder)="([^"]+)"/g)) translated(match[1], file);
 }
-for (const file of ["app.js", "admin.js", "setup.js", "settings.js", "size.js", "acme.js", "dns.js", "preferences.js", "address.js", "mail-reader.js", "mail-clients.js", "update.js"]) {
+for (const file of ["app.js", "admin.js", "setup.js", "settings.js", "size.js", "acme.js", "dns.js", "preferences.js", "address.js", "mail-reader.js", "mail-clients.js", "update.js", "mail-tools.js"]) {
   const script = fs.readFileSync(path.join(root, "web", file), "utf8");
   new vm.Script(script, {filename:file});
   for (const match of script.matchAll(/\bt\("([^"]+)"/g)) translated(match[1], file);
@@ -509,7 +509,7 @@ async function checkMaintenanceControls() {
     scrollIntoView(){}
   }
   function id(name){if(!controls.has(name))controls.set(name,new AdminControl());return controls.get(name);}
-  const sandbox={window:{},document:{getElementById:id,querySelectorAll:()=>[],addEventListener(){},title:""},
+  const sandbox={window:{},document:{getElementById:id,querySelectorAll:()=>[],addEventListener(){},createElement:tag=>new AdminControl(tag),createDocumentFragment:()=>new AdminControl("fragment"),title:""},
     PostPlusI18n:fresh.i18n,PostPlusAddress:addressSandbox.window.PostPlusAddress,PostPlusPreferences:{closeNavigation(){}},
     PostPlusMailReader:{create:()=>({show(){},clear(){},dispose(){}})},
     URL,URLSearchParams,TextEncoder,location:{origin:"http://localhost:8081"},
@@ -556,4 +556,15 @@ async function checkMaintenanceControls() {
   for(let index=0;index<8;index++)await Promise.resolve();
   assert.equal(calls.length,0,"Administrator login rejects a different domain before requesting authentication");
   assert.match(id("login-error").textContent,/displayed domain/);
+  calls.length=0;
+  const customFolder="Projects/客户",literalFolder="<img src=x>";
+  sandbox.request=async route=>{calls.push({route});return route.startsWith("/api/admin/folders?") ? {folders:[{name:"INBOX"},{name:customFolder},{name:literalFolder}]} : {messages:[]};};
+  vm.runInContext('api=request;inspectUsername="user+tag@localhost";',sandbox);
+  id("inspect-folder").value="all";
+  await vm.runInContext('loadInspection()',sandbox);
+  assert.equal(calls.length,4,"All folders inspects every discovered selectable folder");
+  assert.ok(calls.some(call=>call.route.includes("folder="+encodeURIComponent(customFolder))));
+  assert.ok(calls.every(call=>call.route.includes("username=user%2Btag%40localhost")));
+  assert.deepEqual(id("inspect-folder").children.map(option=>option.value),["all","INBOX",customFolder,literalFolder]);
+  assert.equal(id("inspect-folder").children.at(-1).textContent,literalFolder,"Custom folder labels remain literal text");
 }

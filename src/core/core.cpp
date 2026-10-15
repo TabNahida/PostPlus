@@ -326,6 +326,29 @@ std::string Connection::read(std::size_t count) {
     while (result.size() < count) result += impl_->receive(std::min<std::size_t>(65536, count - result.size()));
     return result;
 }
+bool Connection::wait_readable(std::chrono::milliseconds timeout) {
+    if (impl_->stopping.load()) throw std::runtime_error("service stopping");
+    if (!impl_->buffer.empty() || (impl_->tls && SSL_has_pending(impl_->tls->native_handle()))) return true;
+    auto expires = std::chrono::steady_clock::now() + std::max(timeout, std::chrono::milliseconds(0));
+    if (impl_->deadline) expires = std::min(expires, *impl_->deadline);
+    if (expires <= std::chrono::steady_clock::now()) return false;
+    impl_->io.restart();
+    asio::steady_timer timer(impl_->io);
+    bool expired = false, finished = false;
+    std::error_code result;
+    timer.expires_at(expires);
+    timer.async_wait([&](std::error_code ec) {
+        if (!ec && !finished) { expired = true; std::error_code ignored; impl_->socket.cancel(ignored); }
+    });
+    impl_->socket.async_wait(tcp::socket::wait_read, [&](std::error_code ec) {
+        finished = true; result = ec; timer.cancel();
+    });
+    impl_->io.run();
+    if (impl_->stopping.load()) throw std::runtime_error("service stopping");
+    if (expired) return false;
+    if (result) throw std::system_error(result);
+    return true;
+}
 void Connection::write(std::string_view bytes) {
     impl_->wait([&](auto done) {
         auto handler = [done](std::error_code ec, std::size_t) { done(ec); };
@@ -592,7 +615,8 @@ void serve_rpc(const Config& config, const std::string& service, std::function<J
     });
 }
 Json rpc(const Config& config, const std::string& service, const Json& request) {
-    const int timeout = service == "transfer" ? (config.outbound_mode()=="direct" ? config.number("direct_timeout_seconds",120) : config.number("smarthost_timeout_seconds",30)) + 10 : config.number("timeout_seconds",30);
+    int timeout = service == "transfer" ? (config.outbound_mode()=="direct" ? config.number("direct_timeout_seconds",120) : config.number("smarthost_timeout_seconds",30)) + 10 : config.number("timeout_seconds",30);
+    if(service=="filter") timeout=std::max(timeout,(!config.text("clamav_host").empty()?config.number("clamav_timeout_seconds",15):0)+(config.flag("rspamd_enabled")?config.number("rspamd_timeout_seconds",5):0)+5);
     Connection connection{std::chrono::seconds(timeout)};
     connection.connect("127.0.0.1", config.port(service));
     const auto body = wire_encode(request).dump();

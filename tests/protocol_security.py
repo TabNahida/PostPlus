@@ -96,7 +96,7 @@ def run(s):
         assert client.fetch("1", "(BODY.PEEK[HEADER.FIELDS (SUBJECT)] BODY.PEEK[TEXT]<0.5>)")[0] == "OK"
         assert not s.rpc("storage", op="list", username=bob)["messages"][0]["seen"]
         status, fetch = client.fetch("1", "(BODY[])")
-        assert status == "OK" and any(b"FLAGS (\\Seen)" in item for item in fetch if isinstance(item, bytes)), fetch
+        assert status == "OK" and any(b"\\Seen" in imaplib.ParseFlags(item) for item in fetch if isinstance(item, bytes)), fetch
         assert client.select("INBOX", readonly=True)[0] == "OK"
         rejected_imap(client, client.store, "2", "+FLAGS", "(\\Seen)")
         assert client.fetch("2", "(BODY[])")[0] == "OK"

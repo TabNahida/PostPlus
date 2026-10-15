@@ -54,7 +54,8 @@ std::vector<std::string> restart_plan(const Config& running, const Config& saved
                  key == "max_queue_bytes" || key == "max_queue_messages") add({"storage"});
         else if (key == "delivery_lock_port" || key == "delivery_max_age_seconds") add({"delivery"});
         else if (key == "clamav_host" || key == "clamav_port" || key == "clamav_timeout_seconds" ||
-                 key == "spam_threshold" || key == "blocked_terms" || key == "spam_rules") add({"filter"});
+                 key == "spam_threshold" || key == "blocked_terms" || key == "spam_rules" ||
+                 key == "spam_allow_senders" || key == "spam_block_senders" || key.rfind("rspamd_", 0) == 0) add({"filter"});
         else if (key == "outbound_mode") add({"transfer", "delivery", "smtp", "web"});
         else if (key == "direct_timeout_seconds" || key == "smarthost_timeout_seconds") add({"transfer", "delivery"});
         else if (key == "mail_hostname") add({"transfer", "web", "admin"});

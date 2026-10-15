@@ -48,6 +48,10 @@ jobs:
         run: node tests/web_test.js
       - name: HTML mail and forwarded-message reader checks
         run: node tests/mail_reader_test.js
+      - name: Search and delivery status controls
+        run: node tests/mail_tools_ui_test.js
+      - name: Attachment and composer controls
+        run: node tests/composer_ui_test.js
       - name: DNS guide and DKIM controls
         run: node tests/dns_ui_test.js
       - name: Display settings and preference checks

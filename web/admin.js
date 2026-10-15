@@ -670,11 +670,13 @@ document.addEventListener("postplus:language", () => {
 });
 
 const mailFolderLabels={INBOX:"Inbox",Sent:"Sent",Drafts:"Drafts",Trash:"Trash",Junk:"Junk",Archive:"Archive"};
+function inspectionFolderLabel(name){return Object.hasOwn(mailFolderLabels,name) ? t(mailFolderLabels[name]) : name;}
 let inspectUsername="",inspectVersion=0,inspectReadVersion=0,inspectMessages=[],inspectSelected=null;
 let quotaUsername="",quotaControl=null;
 function clearInspection() {
   inspectUsername="";inspectVersion++;inspectReadVersion++;inspectMessages=[];inspectSelected=null;
   $("inspect-messages").replaceChildren();inspectionReader.clear();$("inspect-raw").textContent="";
+  $("inspect-attachments").replaceChildren();
   $("inspect-content").hidden=true;$("inspect-placeholder").hidden=false;
 }
 function renderInspection() {
@@ -683,7 +685,7 @@ function renderInspection() {
     const row=element("button","message-row");row.type="button";
     row.classList.toggle("selected",String(message.id)===inspectSelected);
     const copy=element("span","message-row-copy");
-    copy.append(element("span","message-row-title",message.subject || t("(No subject)")),element("span","message-row-subtitle",t(mailFolderLabels[message.folder] || message.folder)+" · "+(message.from || "")),element("span","message-row-subtitle",message.to || ""));
+    copy.append(element("span","message-row-title",message.subject || t("(No subject)")),element("span","message-row-subtitle",inspectionFolderLabel(message.folder)+" · "+(message.from || "")),element("span","message-row-subtitle",message.to || ""));
     row.append(copy);row.addEventListener("click",()=>inspectMessage(message));rows.append(row);
   });
   $("inspect-messages").replaceChildren(rows);$("inspect-empty").hidden=inspectMessages.length>0;
@@ -695,9 +697,20 @@ async function loadInspection() {
   $("inspect-content").hidden=true;$("inspect-placeholder").hidden=false;
   formError("inspect-error");$("inspect-messages").setAttribute("aria-busy","true");
   try {
-    const selectedFolder=$("inspect-folder").value;
-    const folders=selectedFolder === "all" ? Object.keys(mailFolderLabels) : [selectedFolder];
-    const results=await Promise.all(folders.map(folder=>api(`/api/admin/messages?username=${encodeURIComponent(inspectUsername)}&folder=${encodeURIComponent(folder)}`)));
+    const username=inspectUsername,selectedFolder=$("inspect-folder").value;
+    const catalog=await api(`/api/admin/folders?username=${encodeURIComponent(username)}`);
+    if(version!==inspectVersion) return;
+    const names=(catalog.folders || []).filter(folder=>folder.selectable!==false).map(folder=>folder.name);
+    const options=[element("option","",t("All folders"))];options[0].value="all";
+    for(const name of names){const option=element("option","",inspectionFolderLabel(name));option.value=name;options.push(option);}
+    $("inspect-folder").replaceChildren(...options);
+    $("inspect-folder").value=selectedFolder==="all" || names.includes(selectedFolder) ? selectedFolder : "all";
+    const folders=$("inspect-folder").value === "all" ? names : [$("inspect-folder").value];
+    const results=[];
+    for(let offset=0;offset<folders.length;offset+=8){
+      results.push(...await Promise.all(folders.slice(offset,offset+8).map(folder=>api(`/api/admin/messages?username=${encodeURIComponent(username)}&folder=${encodeURIComponent(folder)}`))));
+      if(version!==inspectVersion) return;
+    }
     const data={messages:results.flatMap(result=>result.messages || []).sort((a,b)=>String(b.internal_date).localeCompare(String(a.internal_date)))};
     if(version!==inspectVersion) return;
     inspectMessages=data.messages || [];renderInspection();
@@ -707,7 +720,7 @@ async function loadInspection() {
 function openInspection(username) {clearInspection();inspectUsername=username;$("inspect-user").textContent=username;$("inspect-folder").value="all";$("inspect-dialog").showModal();loadInspection();}
 async function inspectMessage(message) {
   const version=++inspectReadVersion;formError("inspect-error");
-  inspectionReader.clear();$("inspect-raw").textContent="";$("inspect-content").hidden=true;$("inspect-placeholder").hidden=false;
+  inspectionReader.clear();$("inspect-raw").textContent="";$("inspect-attachments").replaceChildren();$("inspect-content").hidden=true;$("inspect-placeholder").hidden=false;
   try {
     const data=await api(`/api/admin/messages/${encodeURIComponent(message.id)}?username=${encodeURIComponent(inspectUsername)}`);
     if(version!==inspectReadVersion) return;
@@ -716,7 +729,12 @@ async function inspectMessage(message) {
     $("inspect-from").textContent=preview.from || "—";$("inspect-to").textContent=preview.to || "—";$("inspect-date").textContent=preview.date || "—";
     const imageBase=`/api/admin/messages/${encodeURIComponent(message.id)}?username=${encodeURIComponent(inspectUsername)}&image=`;
     inspectionReader.show(preview,{loadImage:index=>api(imageBase+index,{quiet:true})});$("inspect-raw").textContent=PostPlusMailReader.bodySource(data.raw);
-    $("inspect-message-folder").textContent=t(mailFolderLabels[message.folder] || message.folder);
+    for(const file of preview.attachments || []) {
+      if(!Number.isSafeInteger(file.index) || file.index<0)continue;
+      const link=element("a","attachment-card");link.href=`/api/admin/messages/${encodeURIComponent(message.id)}?username=${encodeURIComponent(inspectUsername)}&attachment=${file.index}`;link.download=file.filename || "attachment";
+      const copy=element("span","attachment-copy");copy.append(element("strong","",file.filename || t("Attachment")),element("small","muted",bytes(file.size || 0)));link.append(copy);$("inspect-attachments").append(link);
+    }
+    $("inspect-message-folder").textContent=inspectionFolderLabel(message.folder);
     $("inspect-content").hidden=false;$("inspect-placeholder").hidden=true;renderInspection();
   } catch(error) {if(version===inspectReadVersion) formError("inspect-error",error.message);}
 }

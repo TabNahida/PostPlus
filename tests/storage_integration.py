@@ -270,7 +270,7 @@ def check_filter(services):
                   "\r\n--test-boundary--\r\n")
     assert rpc(attachment)["action"] == "reject"
     spam = rpc("Subject: lottery winner\r\n\r\nUrgent money transfer: free money\r\n")
-    assert spam["action"] == "reject" and spam["spam_score"] >= 5
+    assert spam["action"] == "spam" and spam["spam_score"] >= 5 and spam["spam_reasons"]
     for reply, expected, slow in ((b"stream: OK\0", "accept", False),
                                   (b"stream: Test-Malware FOUND\0", "reject", False),
                                   (b"stream: size limit exceeded ERROR\0", "defer", False),

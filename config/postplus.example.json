@@ -61,5 +61,11 @@
   "clamav_port": 3310,
   "clamav_timeout_seconds": 15,
   "blocked_terms": [],
-  "spam_threshold": 5
+  "spam_threshold": 5,
+  "spam_allow_senders": [],
+  "spam_block_senders": [],
+  "rspamd_enabled": false,
+  "rspamd_host": "127.0.0.1",
+  "rspamd_port": 11333,
+  "rspamd_timeout_seconds": 5
 }

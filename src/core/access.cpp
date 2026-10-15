@@ -35,7 +35,7 @@ std::optional<std::string> required_api_permission(std::string_view method, std:
     if (!read && !write) return {};
     if (path == "/api/admin/users") return read ? "users:read" : "users:write";
     if (path == "/api/admin/password") return write ? std::optional<std::string>("users:write") : std::nullopt;
-    if (path == "/api/admin/messages" || path.starts_with("/api/admin/messages/")) return read ? std::optional<std::string>("mail:read") : std::nullopt;
+    if (path == "/api/admin/folders" || path == "/api/admin/messages" || path.starts_with("/api/admin/messages/")) return read ? std::optional<std::string>("mail:read") : std::nullopt;
     if (path == "/api/admin/quota") return read ? "quota:read" : "quota:write";
     if (path == "/api/admin/password-policy") return read ? "policy:read" : "policy:write";
     if (path == "/api/admin/stats") return read ? std::optional<std::string>("stats:read") : std::nullopt;

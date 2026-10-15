@@ -1,11 +1,34 @@
 #include "postplus/core.hpp"
 #include <algorithm>
 #include <charconv>
+#include <mutex>
 #include <set>
 #include <sstream>
 
 using namespace postplus;
 namespace {
+// Both POP3 listeners share one maildrop lease. Deferred DELE changes belong
+// only to the successful authorization transaction and disappear on disconnect.
+class MaildropLease {
+    static std::mutex mutex_;
+    static std::set<std::string> owners_;
+    std::string owner_;
+public:
+    bool acquire(const std::string& username) {
+        std::lock_guard guard(mutex_);
+        if (!owner_.empty() || !owners_.insert(username).second) return false;
+        owner_ = username; return true;
+    }
+    void release() {
+        std::lock_guard guard(mutex_);
+        if (!owner_.empty()) owners_.erase(owner_);
+        owner_.clear();
+    }
+    ~MaildropLease() { release(); }
+};
+std::mutex MaildropLease::mutex_;
+std::set<std::string> MaildropLease::owners_;
+
 bool number(std::string_view token, std::size_t& value) {
     if (token.empty()) return false;
     auto [p, ec] = std::from_chars(token.data(), token.data() + token.size(), value);
@@ -27,19 +50,52 @@ void pop3(Connection& c, const Config& cfg) {
     std::string candidate, user, credential_version;
     unsigned auth_failures = 0;
     const auto auth_limit = static_cast<unsigned>(std::clamp(cfg.number("max_auth_attempts", 5), 1, 20));
+    const auto password_limit = static_cast<std::size_t>(std::clamp(cfg.number("max_password_bytes", 1024), 12, 4096));
     std::vector<Json> messages;
     std::set<std::size_t> deleted;
+    MaildropLease lease;
     auto allowed = [&] { return c.encrypted() || (cfg.flag("allow_insecure_auth") && c.socket().remote_endpoint().address().is_loopback()); };
     auto tls = [&] { return !cfg.text("tls_certificate").empty() && !cfg.text("tls_private_key").empty(); };
+    auto auth_failure = [&](const char* message) {
+        candidate.clear();
+        if (++auth_failures >= auth_limit) { c.write("-ERR [LOGIN-DELAY] Too many failed authentication attempts\r\n"); return true; }
+        c.write(message); return false;
+    };
+    auto login = [&](std::string username, const std::string& password) {
+        username = lower(std::move(username)); candidate.clear();
+        if (!valid_address(username) || password.empty() || password.size() > password_limit || password.find('\0') != password.npos)
+            return auth_failure("-ERR [AUTH] Invalid credentials\r\n");
+        const auto result = rpc(cfg, "auth", {{"op", "verify"}, {"username", username}, {"password", password}, {"session", true}});
+        if (!result.value("ok", false)) return auth_failure("-ERR [AUTH] Invalid credentials\r\n");
+        if (!lease.acquire(username)) { c.write("-ERR [IN-USE] Mailbox is locked by another POP3 session\r\n"); return false; }
+        try {
+            auto mailbox = rpc(cfg, "storage", {{"op", "list"}, {"username", username}, {"folder", "INBOX"}});
+            if (!mailbox.value("ok", false)) { lease.release(); c.write("-ERR [SYS/TEMP] Mailbox unavailable\r\n"); return false; }
+            messages = mailbox.at("messages").get<std::vector<Json>>();
+            credential_version = result.at("credential_version").get<std::string>(); user = std::move(username);
+            log("pop3","Mailbox opened for "+user+": "+std::to_string(messages.size())+" messages","debug");
+        } catch (...) { lease.release(); throw; }
+        c.write("+OK Mailbox ready\r\n"); return false;
+    };
     c.write("+OK PostPlus POP3 ready\r\n");
     for (;;) {
-        auto line = c.line(8192); auto space = line.find(' ');
+        // RFC 1939 permits a client to remain idle for at least ten minutes.
+        // The short connection deadline still bounds a command once its first
+        // bytes arrive, and the poll observes supervisor shutdown promptly.
+        const auto idle_deadline = std::chrono::steady_clock::now() + std::chrono::minutes(10);
+        while (!c.wait_readable(std::chrono::seconds(1))) {
+            if (std::chrono::steady_clock::now() >= idle_deadline) { c.write("-ERR [SYS/TEMP] Inactivity timeout\r\n"); return; }
+        }
+        auto line = c.line(8192); auto space = line.find_first_of(" \t");
         auto cmd = lower(line.substr(0, space));
         auto arg = space == std::string::npos ? "" : line.substr(space + 1);
         try {
             if (!user.empty()) {
                 const auto valid = rpc(cfg, "auth", {{"op", "session_check"}, {"username", user}, {"credential_version", credential_version}});
                 if (!valid.value("ok", false) || !valid.value("valid", false)) { c.write("-ERR [AUTH] Account credentials changed\r\n"); return; }
+            }
+            if ((cmd == "quit" || cmd == "capa" || cmd == "noop" || cmd == "rset" || cmd == "stat") && !trim(arg).empty()) {
+                c.write("-ERR Unexpected command arguments\r\n"); continue;
             }
             if (cmd == "quit") {
                 if (!user.empty() && !deleted.empty()) {
@@ -52,13 +108,13 @@ void pop3(Connection& c, const Config& cfg) {
                         {"permanent", true}, {"folder", "INBOX"}, {"expected_uids", expected_uids}});
                     if (!result.value("ok", false)) { c.write("-ERR Unable to commit deletions\r\n"); return; }
                 }
-                c.write("+OK Goodbye\r\n"); return;
+                lease.release(); c.write("+OK Goodbye\r\n"); return;
             }
             if (cmd == "capa") {
-                c.write("+OK Capability list follows\r\nTOP\r\nUIDL\r\nRESP-CODES\r\n");
-                if (user.empty() && allowed()) c.write("USER\r\n");
-                if (user.empty() && !c.encrypted() && tls()) c.write("STLS\r\n");
-                c.write(".\r\n"); continue;
+                std::string capabilities = "+OK Capability list follows\r\nTOP\r\nUIDL\r\nRESP-CODES\r\nPIPELINING\r\n";
+                if (user.empty() && allowed()) capabilities += "USER\r\nSASL PLAIN LOGIN\r\n";
+                if (user.empty() && !c.encrypted() && tls()) capabilities += "STLS\r\n";
+                c.write(capabilities + ".\r\n"); continue;
             }
             if (cmd == "stls") {
                 if (!arg.empty() || !user.empty() || c.encrypted() || !tls()) { c.write("-ERR STLS unavailable\r\n"); continue; }
@@ -67,8 +123,37 @@ void pop3(Connection& c, const Config& cfg) {
                 candidate.clear(); continue;
             }
             if (user.empty()) {
-                if (cmd != "user" && cmd != "pass") { c.write("-ERR Authenticate first\r\n"); continue; }
+                if (cmd != "user" && cmd != "pass" && cmd != "auth") { c.write("-ERR Authenticate first\r\n"); continue; }
                 if (!allowed()) { c.write("-ERR [AUTH] TLS required\r\n"); continue; }
+                if (cmd == "auth") {
+                    candidate.clear();
+                    if (trim(arg).empty()) { c.write("+OK Supported authentication mechanisms\r\nPLAIN\r\nLOGIN\r\n.\r\n"); continue; }
+                    std::istringstream arguments(arg); std::string mechanism, initial, extra;
+                    arguments >> mechanism >> initial >> extra; mechanism = lower(mechanism);
+                    if (!extra.empty()) { if (auth_failure("-ERR Invalid authentication arguments\r\n")) return; continue; }
+                    if (mechanism != "plain" && mechanism != "login") { c.write("-ERR Unsupported authentication mechanism\r\n"); continue; }
+                    std::string username, password;
+                    try {
+                        if (initial.empty()) { c.write(mechanism == "plain" ? "+ \r\n" : "+ VXNlcm5hbWU6\r\n"); initial = c.line(8192); }
+                        if (initial == "*") { c.write("-ERR Authentication canceled\r\n"); continue; }
+                        const auto decoded = base64_decode(initial == "=" ? "" : initial);
+                        if (mechanism == "plain") {
+                            const auto first = decoded.find('\0');
+                            const auto second = first == decoded.npos ? first : decoded.find('\0', first + 1);
+                            if (first == decoded.npos || second == decoded.npos || decoded.find('\0', second + 1) != decoded.npos)
+                                throw std::invalid_argument("Invalid PLAIN data");
+                            username = lower(decoded.substr(first + 1, second - first - 1)); password = decoded.substr(second + 1);
+                            if (first && lower(decoded.substr(0, first)) != username) throw std::invalid_argument("Authorization identity mismatch");
+                        } else {
+                            username = decoded;
+                            c.write("+ UGFzc3dvcmQ6\r\n"); initial = c.line(8192);
+                            if (initial == "*") { c.write("-ERR Authentication canceled\r\n"); continue; }
+                            password = base64_decode(initial == "=" ? "" : initial);
+                        }
+                    } catch (const std::invalid_argument&) { if (auth_failure("-ERR Invalid authentication encoding\r\n")) return; continue; }
+                    if (login(std::move(username), password)) return;
+                    continue;
+                }
                 if (cmd == "user") {
                     candidate = lower(trim(arg));
                     if (!valid_address(candidate)) { candidate.clear(); c.write("-ERR Invalid username\r\n"); }
@@ -76,16 +161,8 @@ void pop3(Connection& c, const Config& cfg) {
                     continue;
                 }
                 if (candidate.empty()) { c.write("-ERR Send USER first\r\n"); continue; }
-                auto result = rpc(cfg, "auth", {{"op", "verify"}, {"username", candidate}, {"password", arg}, {"session", true}});
-                if (!result.value("ok", false)) {
-                    candidate.clear();
-                    if (++auth_failures >= auth_limit) { c.write("-ERR [LOGIN-DELAY] Too many failed authentication attempts\r\n"); return; }
-                    c.write("-ERR [AUTH] Invalid credentials\r\n"); continue;
-                }
-                auto mailbox = rpc(cfg, "storage", {{"op", "list"}, {"username", candidate}, {"folder", "INBOX"}});
-                if (!mailbox.value("ok", false)) { c.write("-ERR Mailbox unavailable\r\n"); continue; }
-                messages = mailbox.at("messages").get<std::vector<Json>>(); user = candidate; credential_version = result.at("credential_version").get<std::string>();
-                c.write("+OK Mailbox ready\r\n"); continue;
+                if (login(candidate, arg)) return;
+                continue;
             }
             if (cmd == "noop") { c.write("+OK\r\n"); continue; }
             if (cmd == "rset") { deleted.clear(); c.write("+OK Deletions reset\r\n"); continue; }

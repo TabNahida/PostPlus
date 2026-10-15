@@ -78,6 +78,13 @@ async function badgeChecks(){
   menu.fire("keydown",{key:"Tab"});assert.equal(menu.hidden,true);assert.equal(document.activeElement,trigger,"Tab closes and restores focus before normal focus traversal");trigger.fire("click");callbacks.get("click")({target:new Element()});assert.equal(menu.hidden,true,"Click outside dismisses the folder menu");
   const moves=[];sandbox.captureMove=(path,options)=>moves.push({path,options});vm.runInContext('api=async(path,options)=>{captureMove(path,options);return path==="/api/folders"?{folders:[]}:{messages:[]};};',sandbox);
   await items[2].fire("click");assert.equal(moves[0].path,"/api/messages/one/move");assert.equal(moves[0].options.body.folder,"Trash");assert.equal(menu.hidden,true);
+  vm.runInContext('state.folders=[{name:"Projects/客户",selectable:true,total:3,unread:2},{name:"<b>literal</b>",selectable:true,unread:1},{name:"Parent",selectable:false}];state.view="Projects/客户";renderFolderState();',sandbox);
+  const custom=controls.get("custom-folders").querySelectorAll("button");
+  assert.deepEqual(custom.map(item=>item.dataset.folder),["Projects/客户","<b>literal</b>"],"Custom IMAP folders are available in Webmail; namespace-only parents are excluded");
+  assert.equal(controls.get("folder-title").textContent,"Projects/客户");assert.equal(custom[0].attributes["aria-current"],"page");
+  assert.equal(custom[0].children.at(-1).textContent,"2");assert.match(custom[1].textContent,/<b>literal<\/b>/,"Folder names are literal text");
+  assert.ok(menu.querySelectorAll("button").some(item=>item.dataset.moveFolder==="<b>literal</b>"),"Move menu includes client-created folders");
+  vm.runInContext('signedOut()',sandbox);assert.equal(controls.get("custom-folders").children.length,0,"Logout clears private folder names");
   const html=fs.readFileSync(path.join(root,"web/index.html"),"utf8");assert.equal(html.split('src="/verification-code.js"').length-1,1);assert.equal(html.split('id="verification-code"').length-1,1);assert.ok(html.indexOf('src="/verification-code.js"')<html.indexOf('src="/app.js"'));
 }
 (async()=>{await componentChecks();await badgeChecks();console.log("Verification code UI checks passed: copy without Seen, expiry, safe source text, stale/logout replies, localization and folder badge semantics.");})().catch(error=>{console.error(error);process.exitCode=1;});
