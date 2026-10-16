@@ -133,11 +133,14 @@ for (const file of ["index.html", "admin.html", "setup.html"]) {
   }
   for (const match of html.matchAll(/data-i18n-(?:aria-label|title|placeholder)="([^"]+)"/g)) translated(match[1], file);
 }
-for (const file of ["app.js", "admin.js", "setup.js", "settings.js", "size.js", "acme.js", "dns.js", "preferences.js", "address.js", "mail-reader.js", "mail-clients.js", "update.js", "mail-tools.js"]) {
+for (const file of ["app.js", "admin.js", "admin-security.js", "setup.js", "settings.js", "size.js", "acme.js", "dns.js", "preferences.js", "address.js", "mail-reader.js", "mail-clients.js", "update.js", "mail-tools.js"]) {
   const script = fs.readFileSync(path.join(root, "web", file), "utf8");
   new vm.Script(script, {filename:file});
   for (const match of script.matchAll(/\bt\("([^"]+)"/g)) translated(match[1], file);
   if(file==="acme.js") for(const match of script.matchAll(/\bnode\("[^"]+","([^"]+)"/g)) translated(match[1], file);
+  if(file==="admin-security.js") {
+    for(const pattern of [/\bnode\("[^"]+","([^"]+)"/g,/\bbutton\("([^"]+)"/g,/\bfield\([^,]+,"[^"]+","([^"]+)"/g])for(const match of script.matchAll(pattern))translated(match[1],file);
+  }
 }
 
 // Typed settings must submit only deliberate changes and preserve saved secrets.

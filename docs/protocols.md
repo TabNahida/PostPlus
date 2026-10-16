@@ -10,7 +10,9 @@ Default public ports are SMTP 25, submission 587, SMTPS 465, POP3 110/995, and I
 
 Accounts use full email addresses. SMTP PLAIN authorization identities must be empty or equal to the authenticating username. Authentication, mailbox operations, and queue submissions use authenticated internal RPC; a failed dependency produces a protocol error rather than accepting unpersisted work.
 
-Each protocol connection closes after `max_auth_attempts` failed credential checks (default 5, bounded to 1–20). This limits work on one connection; deployments also need connection/IP rate limits at their ingress, since reconnecting starts a new connection counter.
+Each protocol connection closes after `max_auth_attempts` failed credential checks (default 5, bounded to 1–20). Authentication also uses a shared source-IP policy in the authentication service, across SMTP, IMAP, POP3, Webmail, administration and API credentials. By default, five unknown-account attempts or twenty total failures from one IP within five minutes create a fifteen-minute login ban. Malformed authentication payloads count as failures. Counters and bans persist in the authentication database, so reconnecting or restarting a protocol process cannot reset them. Successful logins do not clear earlier failures from the same IP.
+
+Authentication audit logs record the socket peer IP, protocol, attempted account, result and ban events without passwords, API keys or SASL payloads. Forwarding headers supplied by clients are not trusted as source IPs. Administrators can change thresholds, observation windows and ban durations, allowlist IP addresses or CIDR ranges, and inspect, add or remove bans in the Security panel. Policy edits apply immediately; active bans remain until expiry or removal. Existing sessions stay usable for recovery. Bans reject authentication with SMTP 421, IMAP NO [UNAVAILABLE] followed by BYE, or POP3 -ERR [LOGIN-DELAY], and close that connection. Unauthenticated SMTP reception on port 25 remains available so login protection does not block incoming Internet mail.
 
 ## SMTP
 
@@ -32,6 +34,8 @@ Outgoing delivery supports public MX lookup, priority/address failover, bounded 
 Implemented commands: `CAPA`, `STLS`, `USER`, `PASS`, `AUTH PLAIN`, `AUTH LOGIN`, `STAT`, `LIST`, `UIDL`, `RETR`, `TOP`, `DELE`, `RSET`, `NOOP`, `QUIT`. SASL supports initial responses, challenge responses and cancellation. CAPA advertises password mechanisms only when secure authentication is available. PIPELINING is supported.
 
 The mailbox is snapshotted after successful authentication. Message numbers are stable within the session. UIDL uses the persisted UID. DELE marks messages within the session, RSET clears those marks, and QUIT commits all deletions in one storage transaction. Disconnecting does not commit deletions. RETR/TOP use CRLF and dot-stuff response lines. New mail is visible after reconnecting. A maildrop lease prevents simultaneous POP3 transactions for the same account across both listeners. IMAP or Webmail can still remove a message before RETR. Authenticated idle sessions remain open for at least ten minutes; command reads retain the configured short deadline.
+
+LIST and STAT sizes count the canonical CRLF message returned by RETR, excluding transparency dots and the terminating line. Imported LF-only messages and messages without a final newline therefore report their download size rather than their stored byte count. Size metadata is cached; existing maildrops populate it on their first POP3 login after upgrading.
 
 Not implemented: APOP and server-managed expiry policies. APOP is not advertised; clients use TLS with a supported password mechanism.
 
@@ -56,5 +60,7 @@ POP3 reads only `INBOX`; its QUIT deletions and IMAP EXPUNGE/CLOSE permanently r
 ## MIME
 
 The shared `postplus::mime` library supports unfolded headers, multipart boundaries and nested parts, message/rfc822 nesting, base64, quoted-printable, and RFC 2047 B/Q encoded words. Parsing bounds total input and aggregate decoded bytes (including nested message containers), header bytes, header count, part count, and nesting depth. Malformed transfer encodings, duplicate structural MIME headers, and incomplete multipart bodies are rejected.
+
+IMAP uses a separate bounded wire-structure parser for metadata and numeric sections. It preserves ordinary leaf transfer encodings without decoding them, so unfamiliar encodings or malformed attachment payloads do not prevent retrieval of the remaining message. Embedded RFC 822 messages are decoded only to expose their nested structure; unencoded nested bodies are not repeatedly counted against the message size limit. ENVELOPE reads only headers. Multipart structures follow RFC 3501 child adjacency, and non-ASCII metadata uses IMAP literals rather than eight-bit quoted strings.
 
 MIME leaf bodies remain decoded bytes in their original character set. Display helpers convert declared charsets to UTF-8, including Chinese legacy encodings, and decode RFC 2047 header charsets; storage and protocol fetches preserve the original message. Multipart alternatives expose plain text and HTML, related raster CID images are available to the isolated browser renderer, and attached RFC 822 messages have separate forwarded views. The composer produces text/plain UTF-8 messages, folded encoded subjects, Date, Message-ID, and MIME headers. It validates sender/recipient addresses and rejects CR/LF/NUL subject injection. Attachment composition, S/MIME, and PGP/MIME are outside this initial API.

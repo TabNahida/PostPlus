@@ -178,19 +178,57 @@ std::string select_headers(std::string_view raw, const std::set<std::string>& fi
     }
     return selected + "\r\n";
 }
-std::string nstring(std::string_view value) { return value.empty()?"NIL":quote(value); }
+// Quoted strings are seven-bit in IMAP4rev1. RFC 6532 header values can
+// contain UTF-8 even without UTF8=ACCEPT, so send those strings as literals.
+// Keep quote() separate: it also escapes incoming command literals.
+std::string metadata_string(std::string_view value) {
+    if(value.find('\0')!=value.npos) throw Bad("Invalid metadata string byte");
+    if(std::any_of(value.begin(),value.end(),[](unsigned char ch){return ch>=128 || ch=='\r' || ch=='\n';}))
+        return "{"+std::to_string(value.size())+"}\r\n"+std::string(value);
+    return quote(value);
+}
+std::string nstring(std::string_view value) { return value.empty()?"NIL":metadata_string(value); }
 std::string addresses(std::string_view header) {
-    std::string result="("; std::size_t start=0; bool quoted=false,escaped=false; unsigned angle=0,comment=0;
+    std::string result="("; std::size_t start=0; bool quoted=false,escaped=false,in_group=false; unsigned angle=0,comment=0;
+    auto append=[&](const std::string& value){if(result.size()>1)result+=' ';result+=value;};
+    auto unquote=[](std::string value){
+        if(value.size()<2 || value.front()!='"' || value.back()!='"')return value;
+        std::string decoded;
+        for(std::size_t at=1;at+1<value.size();++at){if(value[at]=='\\' && at+2<value.size())++at;decoded+=value[at];}
+        return decoded;
+    };
     auto add=[&](std::string_view token) {
-        auto value=trim(std::string(token)); if(value.empty()) return;
+        // Comments are CFWS, not part of the mailbox or its domain. Keep a
+        // trailing comment as the personal name for traditional RFC 5322 mail.
+        std::string cleaned,personal;bool inside_quote=false,escape=false;unsigned depth=0;
+        for(char ch:token){
+            if(escape){if(!depth)cleaned+='\\';(depth?personal:cleaned)+=ch;escape=false;continue;}
+            if(ch=='\\' && (inside_quote || depth)){escape=true;continue;}
+            if(ch=='"' && !depth)inside_quote=!inside_quote;
+            if(!inside_quote && ch=='('){if(depth++)personal+='(';continue;}
+            if(depth){if(ch==')'){if(--depth)personal+=')';}else personal+=ch;continue;}
+            cleaned+=ch;
+        }
+        auto value=trim(cleaned); if(value.empty()) return;
         std::string display,address;
-        const auto opening=value.find('<'), closing=value.rfind('>');
-        if(opening!=std::string::npos && closing>opening) { display=trim(value.substr(0,opening)); address=trim(value.substr(opening+1,closing-opening-1)); }
+        std::size_t opening=std::string::npos,closing=std::string::npos;inside_quote=false;escape=false;
+        for(std::size_t at=0;at<value.size();++at){
+            const auto ch=value[at];if(escape){escape=false;continue;}
+            if(ch=='\\' && inside_quote){escape=true;continue;}if(ch=='"')inside_quote=!inside_quote;
+            if(!inside_quote && ch=='<' && opening==std::string::npos)opening=at;
+            else if(!inside_quote && ch=='>' && opening!=std::string::npos){closing=at;break;}
+        }
+        if(opening!=std::string::npos && closing!=std::string::npos && closing>opening) { display=trim(value.substr(0,opening)); address=trim(value.substr(opening+1,closing-opening-1)); }
         else address=value;
-        if(display.size()>=2 && display.front()=='"' && display.back()=='"') display=display.substr(1,display.size()-2);
+        display=unquote(display.empty()?trim(personal):display);
+        // Obsolete source routes remain valid address syntax. Their domains
+        // belong in address-adl instead of the mailbox local part.
+        std::string route;
+        if(address.starts_with('@')){const auto colon=address.find(':');if(colon!=address.npos){route=address.substr(0,colon);address=address.substr(colon+1);}}
         const auto at=address.rfind('@'); if(at==std::string::npos || !at || at+1==address.size()) return;
-        if(result.size()>1) result+=' ';
-        result+="("+nstring(display)+" NIL "+quote(address.substr(0,at))+" "+quote(address.substr(at+1))+")";
+        auto local=unquote(trim(address.substr(0,at))),host=trim(address.substr(at+1));
+        if(local.empty() || host.empty())return;
+        append("("+nstring(display)+" "+nstring(route)+" "+metadata_string(local)+" "+metadata_string(host)+")");
     };
     for(std::size_t i=0;i<header.size();++i) {
         const char ch=header[i];
@@ -201,7 +239,14 @@ std::string addresses(std::string_view header) {
         if(ch=='(') ++comment; else if(ch==')' && comment) --comment;
         if(comment) continue;
         if(ch=='<') ++angle; else if(ch=='>' && angle) --angle;
-        if(!angle && ch==',' ) { add(header.substr(start,i-start)); start=i+1; }
+        if(!angle && ch==':' && !in_group){
+            auto name=unquote(trim(std::string(header.substr(start,i-start))));
+            if(!name.empty()){append("(NIL NIL "+metadata_string(name)+" NIL)");in_group=true;start=i+1;}
+        }
+        else if(!angle && (ch==',' || (ch==';' && in_group))) {
+            add(header.substr(start,i-start)); start=i+1;
+            if(ch==';'){append("(NIL NIL NIL NIL)");in_group=false;}
+        }
     }
     add(header.substr(start)); return result.size()==1?"NIL":result+")";
 }
@@ -228,7 +273,7 @@ std::string parameters(std::string_view header) {
             }
             if(at==header.size()) throw Bad("Invalid MIME parameter"); ++at;
         } else { const auto end=header.find(';',at); value=trim(std::string(header.substr(at,end-at))); at=end; }
-        if(!name.empty()) { if(result.size()>1) result+=' '; result+=quote(upper(name))+" "+quote(value); }
+        if(!name.empty()) { if(result.size()>1) result+=' '; result+=metadata_string(upper(name))+" "+metadata_string(value); }
         at=header.find(';',at);
     }
     return result.size()==1?"NIL":result+")";
@@ -245,7 +290,7 @@ RawPart raw_part(std::string_view raw,const mime::Part& part) {
     else if(boundary==std::string_view::npos) { boundary=raw.find("\n\n"); delimiter=2; }
     const auto header_size=boundary==std::string_view::npos?raw.size():boundary+delimiter;
     RawPart result{&part,raw,raw.substr(0,header_size),raw.substr(header_size),{}};
-    if(part.content_type=="message/rfc822" && !part.parts.empty()) result.children.push_back(raw_part(part.embedded_message,part.parts[0]));
+    if(part.content_type=="message/rfc822" && !part.parts.empty()) result.children.push_back(raw_part(part.embedded_message.empty()?result.body:std::string_view(part.embedded_message),part.parts[0]));
     else if(part.content_type.starts_with("multipart/")) {
         const auto marker="--"+mime::parameter(mime::header(part,"content-type"),"boundary");
         std::size_t pos=0,start=std::string_view::npos,index=0;
@@ -268,19 +313,21 @@ RawPart raw_part(std::string_view raw,const mime::Part& part) {
 }
 std::string disposition(const mime::Part& part) {
     const auto value=mime::header(part,"content-disposition");
-    return value.empty()?"NIL":"("+quote(upper(trim(value.substr(0,value.find(';')))))+" "+parameters(value)+")";
+    return value.empty()?"NIL":"("+metadata_string(upper(trim(value.substr(0,value.find(';')))))+" "+parameters(value)+")";
 }
 std::string body_structure(const RawPart& node,bool extended) {
     const auto& part=*node.part; const auto slash=part.content_type.find('/');
     const auto type=upper(part.content_type.substr(0,slash)), subtype=upper(slash==std::string::npos?"PLAIN":part.content_type.substr(slash+1));
     std::string result="(";
     if(type=="MULTIPART") {
-        for(const auto& child:node.children) result+=body_structure(child,extended)+" ";
-        result+=quote(subtype);
+        // RFC 3501 body-type-mpart is 1*body SP subtype: adjacent child
+        // structures have no separating SP. Strict mobile clients rely on it.
+        for(const auto& child:node.children) result+=body_structure(child,extended);
+        result+=" "+metadata_string(subtype);
         if(extended) result+=" "+parameters(mime::header(part,"content-type"))+" "+disposition(part)+" "+nstring(mime::header(part,"content-language"))+" "+nstring(mime::header(part,"content-location"));
     } else {
         auto encoding=upper(mime::header(part,"content-transfer-encoding")); if(encoding.empty()) encoding="7BIT";
-        result+=quote(type)+" "+quote(subtype)+" "+parameters(mime::header(part,"content-type"))+" "+nstring(mime::header(part,"content-id"))+" "+nstring(mime::header(part,"content-description"))+" "+quote(encoding)+" "+std::to_string(node.body.size());
+        result+=metadata_string(type)+" "+metadata_string(subtype)+" "+parameters(mime::header(part,"content-type"))+" "+nstring(mime::header(part,"content-id"))+" "+nstring(mime::header(part,"content-description"))+" "+metadata_string(encoding)+" "+std::to_string(node.body.size());
         if(type=="MESSAGE" && subtype=="RFC822" && !node.children.empty()) result+=" "+envelope(*node.children[0].part)+" "+body_structure(node.children[0],extended);
         if(type=="TEXT" || (type=="MESSAGE" && subtype=="RFC822")) result+=" "+std::to_string(std::count(node.body.begin(),node.body.end(),'\n'));
         if(extended) result+=" "+nstring(mime::header(part,"content-md5"))+" "+disposition(part)+" "+nstring(mime::header(part,"content-language"))+" "+nstring(mime::header(part,"content-location"));
@@ -418,6 +465,7 @@ bool wildcard(std::string pattern, const std::string& value) {
 }
 void imap(Connection& c, const Config& cfg) {
     std::string user, credential_version, selected_folder = "INBOX"; bool selected = false, readonly = false;
+    const auto peer_ip = c.socket().remote_endpoint().address().to_string();
     unsigned auth_failures = 0;
     const auto auth_limit = static_cast<unsigned>(std::clamp(cfg.number("max_auth_attempts", 5), 1, 20));
     std::vector<Json> messages; std::set<std::string> deleted,recent;
@@ -501,6 +549,7 @@ void imap(Connection& c, const Config& cfg) {
         }
         catch (...) { c.write("* BYE Invalid or oversized command framing\r\n"); return; }
         std::string tag = "*", cmd;
+        bool authentication_payload = false;
         try {
             auto args = tokenize(frame.text);
             if (args.size() < 2) throw Bad("Missing tag or command");
@@ -533,6 +582,7 @@ void imap(Connection& c, const Config& cfg) {
             if (cmd == "LOGIN" || cmd == "AUTHENTICATE") {
                 if (!user.empty()) { c.write(tag + " BAD Already authenticated\r\n"); continue; }
                 if (!allowed()) { c.write(tag + " NO [PRIVACYREQUIRED] TLS required\r\n"); continue; }
+                authentication_payload = true;
                 std::string candidate, password;
                 if (cmd == "LOGIN") { require_count(2); candidate = lower(args[0]); password = args[1]; }
                 else {
@@ -554,7 +604,8 @@ void imap(Connection& c, const Config& cfg) {
                     if (a && lower(decoded.substr(0, a)) != candidate) throw Bad("Authorization identity mismatch");
                     }
                 }
-                auto result = rpc(cfg, "auth", {{"op", "verify"}, {"username", candidate}, {"password", password}, {"session", true}});
+                auto result = rpc(cfg, "auth", {{"op", "verify"}, {"username", candidate}, {"password", password}, {"session", true}, {"peer_ip", peer_ip}, {"protocol", "imap"}});
+                if (const auto code = result.value("code", ""); code == "ip_banned" || code == "rate_limit") { c.write(tag + " NO [UNAVAILABLE] Too many authentication attempts; try again later\r\n* BYE Authentication temporarily unavailable\r\n"); return; }
                 if (!result.value("ok", false)) {
                     c.write(tag + " NO [AUTHENTICATIONFAILED] Invalid credentials\r\n");
                     if (++auth_failures >= auth_limit) { c.write("* BYE Too many failed authentication attempts\r\n"); return; }
@@ -727,8 +778,13 @@ void imap(Connection& c, const Config& cfg) {
                     if (!sequence.includes(uid_mode ? uid : i + 1, uid_mode ? max_uid : messages.size())) continue;
                     bool need_raw = std::any_of(items.begin(), items.end(), [](const FetchItem& item) { return item.literal || item.name=="ENVELOPE" || item.name=="BODY" || item.name=="BODYSTRUCTURE"; });
                     auto raw = need_raw ? raw_message(message) : "";
-                    std::optional<mime::Part> parsed; std::optional<RawPart> tree;
-                    auto get_tree=[&]() -> const RawPart& { if(!tree) { parsed=mime::parse(raw,mime::Limits{static_cast<std::size_t>(cfg.number("max_message_bytes",10485760))}); tree=raw_part(raw,*parsed); } return *tree; };
+                    std::optional<mime::Part> parsed,headers; std::optional<RawPart> tree;
+                    const auto mime_limits=mime::Limits{static_cast<std::size_t>(cfg.number("max_message_bytes",10485760))};
+                    auto get_tree=[&]() -> const RawPart& { if(!tree) { parsed=mime::parse_wire(raw,mime_limits); tree=raw_part(raw,*parsed); } return *tree; };
+                    // ENVELOPE depends only on message headers. A damaged or
+                    // unfamiliar attachment encoding must not hide the sender
+                    // and subject from clients doing their first sync.
+                    auto get_headers=[&]() -> const mime::Part& {if(!headers)headers=mime::parse_headers(raw,mime_limits);return *headers;};
                     bool seen_changed = false;
                     if (!readonly && !message.value("seen", false) && std::any_of(items.begin(), items.end(), [](const FetchItem& item) { return item.mark_seen; })) {
                         auto result = rpc(cfg, "storage", {{"op", "flags"}, {"username", user}, {"id", message.at("id")}, {"uid", message.at("uid")}, {"seen", true}});
@@ -742,7 +798,7 @@ void imap(Connection& c, const Config& cfg) {
                         if (item.name == "FLAGS") response += flags(message);
                         else if (item.name == "UID") response += std::to_string(uid);
                         else if (item.name == "RFC822.SIZE") response += std::to_string(message.at("size").get<std::uint64_t>());
-                        else if(item.name=="ENVELOPE") response+=envelope(*get_tree().part);
+                        else if(item.name=="ENVELOPE") response+=envelope(get_headers());
                         else if(item.name=="BODY" || item.name=="BODYSTRUCTURE") response+=body_structure(get_tree(),item.name=="BODYSTRUCTURE");
                         else if (item.name == "INTERNALDATE") {
                             if (!message.contains("internal_date")) throw Bad("INTERNALDATE unavailable for this message");
@@ -863,7 +919,16 @@ void imap(Connection& c, const Config& cfg) {
             }
             throw Bad("Command not implemented");
         } catch(const MailboxGone& error){log("imap",error.what(),"debug");c.write(std::string("* BYE ")+error.what()+"\r\n");return;}
-        catch (const Bad& error) {log("imap","Command "+(cmd.size()<=24 && std::all_of(cmd.begin(),cmd.end(),[](unsigned char ch){return std::isalnum(ch);})?cmd:"invalid")+": "+error.what(),"debug");c.write(tag + " BAD " + error.what() + "\r\n"); }
+        catch (const Bad& error) {
+            if (authentication_payload) {
+                try {
+                    const auto result = rpc(cfg, "auth", {{"op", "security_failure"}, {"peer_ip", peer_ip}, {"protocol", "imap"}, {"reason", "malformed_auth"}});
+                    if (const auto code = result.value("code", ""); code == "ip_banned" || code == "rate_limit") { c.write(tag + " NO [UNAVAILABLE] Too many authentication attempts; try again later\r\n* BYE Authentication temporarily unavailable\r\n"); return; }
+                } catch (const std::exception&) { c.write(tag + " NO Temporary service failure\r\n"); continue; }
+                if (++auth_failures >= auth_limit) { c.write(tag + " BAD " + error.what() + "\r\n* BYE Too many failed authentication attempts\r\n"); return; }
+            }
+            log("imap","Command "+(cmd.size()<=24 && std::all_of(cmd.begin(),cmd.end(),[](unsigned char ch){return std::isalnum(ch);})?cmd:"invalid")+": "+error.what(),"debug");c.write(tag + " BAD " + error.what() + "\r\n");
+        }
         catch (const std::exception& error) {log("imap","Command "+(cmd.size()<=24 && std::all_of(cmd.begin(),cmd.end(),[](unsigned char ch){return std::isalnum(ch);})?cmd:"invalid")+": "+error.what(),"error");c.write(tag + " NO Temporary service failure\r\n"); }
     }
 }

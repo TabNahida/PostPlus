@@ -362,9 +362,17 @@ def main():
                         "--bin-dir", str(binaries)], check=True)
         subprocess.run([os.sys.executable, str(ROOT / "tests/protocol_security.py"),
                         "--bin-dir", str(binaries)], check=True)
+        subprocess.run([os.sys.executable, str(ROOT / "tests/auth_security_integration.py"),
+                        "--bin-dir", str(binaries)], check=True)
+        subprocess.run([os.sys.executable, str(ROOT / "tests/security_http_integration.py"),
+                        "--bin-dir", str(binaries)], check=True)
+        subprocess.run([os.sys.executable, str(ROOT / "tests/login_ip_protocol_integration.py"),
+                        "--bin-dir", str(binaries)], check=True)
         subprocess.run([os.sys.executable, str(ROOT / "tests/mail_clients_integration.py"),
                         "--bin-dir", str(binaries)], check=True)
         subprocess.run([os.sys.executable, str(ROOT / "tests/imap_clients_integration.py"),
+                        "--bin-dir", str(binaries)], check=True)
+        subprocess.run([os.sys.executable, str(ROOT / "tests/imap_mime_integration.py"),
                         "--bin-dir", str(binaries)], check=True)
         subprocess.run([os.sys.executable, str(ROOT / "tests/pop3_clients_integration.py"),
                         "--bin-dir", str(binaries)], check=True)

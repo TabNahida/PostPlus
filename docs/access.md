@@ -1,5 +1,7 @@
 # Mailbox features and API permissions
 
+[Login security and IP bans](security.md) documents the shared authentication policy, audit logs and dedicated API-key permissions.
+
 Webmail badges show unread counts for Inbox, Junk and Archive, and unsent draft counts for Drafts. Sent and Trash have no count badges.
 
 ## Latest verification code

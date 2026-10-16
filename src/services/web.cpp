@@ -34,8 +34,19 @@ const std::string service_name = "web", cookie_name = "pp_session";
 using Clock = std::chrono::steady_clock;
 struct ApiError : std::runtime_error {
     int status;
-    ApiError(int code, const std::string& message) : std::runtime_error(message), status(code) {}
+    std::int64_t retry_after;
+    std::string code;
+    ApiError(int status, const std::string& message, std::int64_t retry_after = 0, std::string code = {})
+        : std::runtime_error(message), status(status), retry_after(retry_after), code(std::move(code)) {}
 };
+HttpResponse api_error_response(const ApiError& error) {
+    Json body{{"ok",false},{"error",error.what()}};
+    if (!error.code.empty()) body["code"]=error.code;
+    if (error.retry_after>0) body["retry_after"]=error.retry_after;
+    auto response=json_response(body,error.status);
+    if (error.status==429) response.headers["Retry-After"]=std::to_string(error.retry_after>0?error.retry_after:60);
+    return response;
+}
 
 std::string header(const HttpRequest& request, const std::string& name) {
     auto found = request.headers.find(name);
@@ -378,6 +389,8 @@ public:
             load_static(root, "/update.js", "update.js", "application/javascript; charset=utf-8");
             load_static(root, "/admin-access.js", "admin-access.js", "application/javascript; charset=utf-8");
             load_static(root, "/admin-access.css", "admin-access.css", "text/css; charset=utf-8");
+            load_static(root, "/admin-security.js", "admin-security.js", "application/javascript; charset=utf-8");
+            load_static(root, "/admin-security.css", "admin-security.css", "text/css; charset=utf-8");
             load_static(root, "/admin-settings.css", "admin-settings.css", "text/css; charset=utf-8");
         } else {
             load_static(root, "/app.js", "app.js", "application/javascript; charset=utf-8");
@@ -406,8 +419,7 @@ public:
         HttpResponse response;
         try { response = route(request); }
         catch (const ApiError& error) {
-            response = json_response({{"ok", false}, {"error", error.what()}}, error.status);
-            if (error.status == 429) response.headers["Retry-After"] = "60";
+            response = api_error_response(error);
         }
         catch (const SettingsError& error) {
             response = json_response({{"ok", false}, {"code", "invalid_configuration"},
@@ -438,7 +450,7 @@ public:
             if (request.method != "GET") require_csrf(request,session);
             return std::nullopt;
         } catch (const ApiError& error) {
-            return json_response({{"ok",false},{"error",error.what()}},error.status);
+            return api_error_response(error);
         } catch (const std::exception&) {
             return json_response({{"ok",false},{"error","A required service is unavailable. Please retry."}},503);
         }
@@ -512,9 +524,14 @@ private:
             if (api_key_management_route(path))
                 throw ApiError(403, "Use a browser session to manage API keys.");
             const auto authorization = header(request, "authorization");
-            if (authorization.size() != 74 || lower(authorization.substr(0, 7)) != "bearer ")
+            if (authorization.size() != 74 || lower(authorization.substr(0, 7)) != "bearer ") {
+                const auto failure = rpc(config_, "auth", {{"op", "security_failure"}, {"peer_ip", request.peer_address}, {"protocol", "api"}});
+                reject_auth_throttled(failure);
                 throw ApiError(401, "Invalid or expired API key.");
-            const auto account = rpc(config_, "auth", {{"op", "api_key_verify"}, {"key", authorization.substr(7)}});
+            }
+            const auto account = rpc(config_, "auth", {{"op", "api_key_verify"}, {"key", authorization.substr(7)},
+                {"peer_ip", request.peer_address}, {"protocol", "api"}});
+            reject_auth_throttled(account);
             require_ok(account, "A required service is unavailable. Please retry.");
             if (!account.value("valid", false)) throw ApiError(401, "Invalid or expired API key.");
             if (account.value("audience", std::string{}) != (admin_only ? "admin" : "mailbox"))
@@ -558,13 +575,37 @@ private:
             throw ApiError(403, "Security token is missing or expired. Refresh this page.");
     }
 
+    static void reject_auth_throttled(const Json& result) {
+        if (result.value("code", std::string{}) == "ip_banned")
+            throw ApiError(429, "Too many authentication attempts. This IP address is temporarily blocked. Try again later.",
+                result.value("retry_after",INT64_C(60)), "ip_banned");
+        if (result.value("code", std::string{}) == "rate_limit")
+            throw ApiError(429, "Too many authentication attempts. Try again later.",
+                result.value("retry_after",INT64_C(60)), "rate_limit");
+    }
+
     HttpResponse login(const HttpRequest& request) {
         require_transport(request);
         allow_login(request);
-        auto input = request_json(request);
-        auto username = username_field(input);
-        auto password = field(input, "password", 4096);
-        auto user = rpc(config_, "auth", {{"op", "verify"}, {"username", username}, {"password", password}, {"session", true}});
+        Json input;
+        std::string username, password;
+        try {
+            input = request_json(request);
+            username = username_field(input);
+            password = field(input, "password", 4096);
+        }
+        catch (const ApiError&) {
+            std::string attempted;
+            if (input.is_object() && input.contains("username") && input.at("username").is_string())
+                attempted = input.at("username").get_ref<const std::string&>().substr(0,254);
+            const auto failure = rpc(config_, "auth", {{"op", "security_failure"}, {"username", attempted},
+                {"peer_ip", request.peer_address}, {"protocol", admin_only ? "admin" : "webmail"}});
+            reject_auth_throttled(failure);
+            throw;
+        }
+        auto user = rpc(config_, "auth", {{"op", "verify"}, {"username", username}, {"password", password}, {"session", true},
+            {"peer_ip", request.peer_address}, {"protocol", admin_only ? "admin" : "webmail"}});
+        reject_auth_throttled(user);
         if (!user.value("ok",false)) log(service_name,"sign-in failed for " + username + " from " + request.peer_address,"warn");
         require_ok(user, "The email address or password is incorrect.", 401);
         if (admin_only && !user.value("admin",false)) throw ApiError(403,"Administrator access is required.");
@@ -773,6 +814,34 @@ private:
             if (!session.api_key_id.empty() && request.method != "GET")
                 log(service_name, "API key " + session.api_key_id + " owned by administrator " + session.username +
                     " requested " + request.method + " " + path);
+            if (path == "/api/admin/security" || path.starts_with("/api/admin/security/")) {
+                Json command{{"actor",session.username}};
+                if (path == "/api/admin/security" && request.method == "GET") command["op"] = "security_get";
+                else {
+                    const auto input = request_json(request);
+                    std::set<std::string> allowed;
+                    if (path == "/api/admin/security/policy" && request.method == "PUT") {
+                        command["op"]="security_policy_set"; allowed={"policy","revision"};
+                    } else if (path == "/api/admin/security/unban" && request.method == "POST") {
+                        command["op"]="security_unban"; allowed={"ip"};
+                    } else if (path == "/api/admin/security/ban" && request.method == "POST") {
+                        command["op"]="security_ban"; allowed={"ip","seconds","reason"};
+                    } else throw ApiError(405,"Unsupported security operation.");
+                    for (const auto& [name,value] : input.items()) {
+                        if (!allowed.contains(name)) throw ApiError(400,"Unexpected security field.");
+                        command[name]=value;
+                    }
+                }
+                const auto result=rpc(config_,"auth",command);
+                if (!result.value("ok",false)) {
+                    const auto code=result.value("code",std::string{});
+                    if (code=="administrator_required") return json_response(result,403);
+                    if (code=="security_policy_conflict") return json_response(result,409);
+                    if (code=="security_capacity") return json_response(result,409);
+                    return json_response(result,400);
+                }
+                return json_response(result);
+            }
             if (path == "/api/admin/invitations" || path.starts_with("/api/admin/invitations/")) {
                 Json command{{"username",session.username}};
                 if (path == "/api/admin/invitations") {

@@ -82,6 +82,15 @@ std::string field(const Json& request, const char* key, std::size_t maximum, boo
         throw std::invalid_argument(std::string("invalid ") + key + " length or content");
     return value;
 }
+std::int64_t pop3_octets(std::string_view raw) {
+    // POP3 RETR uses CRLF even for LF-only imported messages and terminates an
+    // unfinished final line. Transparency dots and the terminator do not count.
+    auto size = static_cast<std::int64_t>(raw.size());
+    for (std::size_t i = 0; i < raw.size(); ++i)
+        if (raw[i] == '\n' && (i == 0 || raw[i - 1] != '\r')) ++size;
+    if (!raw.empty() && raw.back() != '\n') size += 2;
+    return size;
+}
 std::int64_t integer_field(const Json& request, const char* key, std::int64_t fallback,
                            std::int64_t minimum, std::int64_t maximum) {
     if (!request.contains(key)) return fallback;
@@ -361,6 +370,9 @@ public:
                 "CREATE INDEX IF NOT EXISTS delivery_events_queue ON delivery_events(queue_id,id);"
                 "CREATE TABLE IF NOT EXISTS message_filter("
                 "id TEXT PRIMARY KEY REFERENCES messages(id) ON DELETE CASCADE,action TEXT NOT NULL,score REAL NOT NULL,reasons TEXT NOT NULL);"
+                "CREATE TABLE IF NOT EXISTS message_pop3("
+                "id TEXT PRIMARY KEY REFERENCES messages(id) ON DELETE CASCADE,source_uid INTEGER NOT NULL,"
+                "source_size INTEGER NOT NULL,octets INTEGER NOT NULL);"
                 "PRAGMA user_version=2;");
             execute(db_, "INSERT OR IGNORE INTO queue_context(queue_id,sent_username,inbound) "
                 "SELECT q.id,COALESCE(s.username,''),CASE WHEN s.username IS NULL THEN 1 ELSE 0 END FROM queue q "
@@ -968,11 +980,31 @@ private:
         save_search(id,uid,raw);
     }
     void save_search(const std::string& id,std::int64_t uid,const std::string& raw) {
+        save_pop3_size(id,uid,static_cast<std::int64_t>(raw.size()),pop3_octets(raw));
         const auto document=search_document(raw);
         Statement index(db_,"INSERT INTO message_search(id,source_uid,sender,recipients,subject,body,filenames,has_attachment,display_to) VALUES(?,?,?,?,?,?,?,?,?) "
             "ON CONFLICT(id) DO UPDATE SET source_uid=excluded.source_uid,sender=excluded.sender,recipients=excluded.recipients,subject=excluded.subject,body=excluded.body,filenames=excluded.filenames,has_attachment=excluded.has_attachment,display_to=excluded.display_to");
         index.text(1,id); index.integer(2,uid); index.text(3,document.from); index.text(4,document.recipients); index.text(5,document.subject);
         index.text(6,document.body); index.text(7,document.filenames); index.integer(8,document.attachment?1:0); index.text(9,document.to); index.done();
+    }
+    void save_pop3_size(const std::string& id, std::int64_t uid, std::int64_t size, std::int64_t octets) {
+        Statement save(db_, "INSERT INTO message_pop3(id,source_uid,source_size,octets) VALUES(?,?,?,?) "
+            "ON CONFLICT(id) DO UPDATE SET source_uid=excluded.source_uid,source_size=excluded.source_size,octets=excluded.octets");
+        save.text(1,id); save.integer(2,uid); save.integer(3,size); save.integer(4,octets); save.done();
+    }
+    void ensure_pop3_sizes(const std::string& username, const std::string& selected) {
+        // A compatible side table keeps existing databases and updater rollback
+        // working. Backfill only the requested maildrop, one message at a time;
+        // later logins need metadata only. UID/size guards catch older writers,
+        // draft replacement and folder moves without retaining raw mail in RAM.
+        std::vector<std::tuple<std::string,std::int64_t,std::int64_t,std::int64_t>> pending;
+        {
+            Statement missing(db_, "SELECT m.id,m.uid,m.size,m.raw FROM messages m LEFT JOIN message_pop3 p ON p.id=m.id "
+                "WHERE m.username=? AND m.folder=? AND (p.id IS NULL OR p.source_uid<>m.uid OR p.source_size<>m.size)");
+            missing.text(1,username); missing.text(2,selected);
+            while (missing.row()) pending.emplace_back(missing.string(0),missing.integer(1),missing.integer(2),pop3_octets(missing.string(3)));
+        }
+        for (const auto& [id,uid,size,octets] : pending) save_pop3_size(id,uid,size,octets);
     }
     void save_flags(const std::string& id, const Json& request) {
         Statement existing(db_, "SELECT answered,flagged,draft,deleted,keywords FROM message_flags WHERE id=?");
@@ -1223,9 +1255,13 @@ private:
             throw std::invalid_argument("include_envelope must be boolean");
         if (request.contains("claim_recent") && !request.at("claim_recent").is_boolean())
             throw std::invalid_argument("claim_recent must be boolean");
+        if (request.contains("include_pop3_size") && !request.at("include_pop3_size").is_boolean())
+            throw std::invalid_argument("include_pop3_size must be boolean");
         const auto include_envelope = request.value("include_envelope", false);
+        const auto include_pop3_size = request.value("include_pop3_size", false);
         Transaction transaction(db_);
         ensure_mailbox(username);
+        if (include_pop3_size) ensure_pop3_sizes(username,selected);
         Json result = {{"ok", true}, {"folder", selected}, {"messages", Json::array()}};
         {
             Statement query(db_, "SELECT uidvalidity,uidnext FROM mailboxes WHERE username=?"); query.text(1, username); query.row();
@@ -1237,13 +1273,20 @@ private:
             if (!query.row()) throw std::runtime_error("mailbox catalog missing folder");
             recent_uid = query.integer(0); }
         {
-            Statement query(db_, "SELECT m.id,m.uid,m.size,m.seen,m.created_at,COALESCE(f.answered,0),COALESCE(f.flagged,0),COALESCE(f.draft,0),COALESCE(f.deleted,0),COALESCE(f.keywords,'[]') "
-                "FROM messages m LEFT JOIN message_flags f ON f.id=m.id WHERE m.username=? AND m.folder=? ORDER BY m.uid");
+            Statement query(db_, "SELECT m.id,m.uid,m.size,m.seen,m.created_at,COALESCE(f.answered,0),COALESCE(f.flagged,0),COALESCE(f.draft,0),COALESCE(f.deleted,0),COALESCE(f.keywords,'[]'),p.octets "
+                "FROM messages m LEFT JOIN message_flags f ON f.id=m.id LEFT JOIN message_pop3 p ON p.id=m.id AND p.source_uid=m.uid AND p.source_size=m.size "
+                "WHERE m.username=? AND m.folder=? ORDER BY m.uid");
             query.text(1, username); query.text(2, selected);
-            while (query.row()) result["messages"].push_back({{"id", query.string(0)}, {"uid", query.integer(1)},
-                {"size", query.integer(2)}, {"seen", query.integer(3) != 0}, {"internal_date", query.integer(4)}, {"folder", selected},
-                {"answered",query.integer(5)!=0},{"flagged",query.integer(6)!=0},{"draft",query.integer(7)!=0},{"deleted",query.integer(8)!=0},
-                {"keywords",Json::parse(query.string(9))},{"recent",query.integer(1)>recent_uid}});
+            while (query.row()) {
+                result["messages"].push_back({{"id", query.string(0)}, {"uid", query.integer(1)},
+                    {"size", query.integer(2)}, {"seen", query.integer(3) != 0}, {"internal_date", query.integer(4)}, {"folder", selected},
+                    {"answered",query.integer(5)!=0},{"flagged",query.integer(6)!=0},{"draft",query.integer(7)!=0},{"deleted",query.integer(8)!=0},
+                    {"keywords",Json::parse(query.string(9))},{"recent",query.integer(1)>recent_uid}});
+                if (include_pop3_size) {
+                    if (query.null(10)) throw std::runtime_error("missing POP3 size metadata");
+                    result["messages"].back()["pop3_size"] = query.integer(10);
+                }
+            }
         }
         if (include_envelope) {
             Statement query(db_, "SELECT id,substr(raw,1,16384) FROM messages WHERE username=? AND folder=? ORDER BY uid DESC LIMIT 100");

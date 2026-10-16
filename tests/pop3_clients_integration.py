@@ -3,17 +3,23 @@
 import argparse
 import base64
 from contextlib import closing
+from email import policy
+from email.message import EmailMessage
+from email.parser import BytesParser
 from pathlib import Path
 import poplib
 import secrets
 import socket
 import ssl
+import sqlite3
 import time
 
 from integration import PASSWORD, ROOT, Suite
 
 USER = "pop-reader@localhost"
 EMPTY = "pop-empty@localhost"
+MIME_USER = "pop-mime@localhost"
+OCTET_USER = "pop-octets@localhost"
 
 
 def context():
@@ -143,6 +149,116 @@ def buffered_tls_commands(suite):
         flush()
         assert reply().startswith(b"+OK")
     print("PASS POP3 coalesced TLS handshake/commands, buffered records and partial-record polling", flush=True)
+
+
+def mime_messages(suite):
+    """A client must be able to render RETR, not merely list a maildrop."""
+    assert suite.rpc("auth", op="create", username=MIME_USER, password=PASSWORD)["ok"]
+    message = EmailMessage(policy=policy.SMTP)
+    message["From"] = "\u53d1\u4ef6\u4eba <sender@localhost>"
+    message["To"] = MIME_USER
+    message["Subject"] = "\u624b\u673a\u5ba2\u6237\u7aef\uff1a\u6b63\u6587\u4e0e\u9644\u4ef6 " + "folded header " * 8
+    message["Date"] = "Fri, 16 Oct 2026 10:00:00 +0000"
+    message["Message-ID"] = "<pop-mime-fixture@localhost>"
+    message.set_content("\u6b63\u6587\u4fe1\u606f\r\n.first\r\n..second\r\n", cte="quoted-printable")
+    message.add_alternative('<html><body><p>HTML \u6b63\u6587</p><img src="cid:logo"></body></html>',
+                            subtype="html", cte="base64")
+    image = b"\x89PNG\r\n\x1a\n\0\xffbinary-image"
+    message.get_payload()[1].add_related(image, maintype="image", subtype="png", cid="<logo>")
+    attachment = b"\0\x01\x02\xff\r\n.\r\nattachment-bytes"
+    message.add_attachment(attachment, maintype="application", subtype="octet-stream", filename="\u62a5\u544a.bin")
+    forwarded = EmailMessage(policy=policy.SMTP)
+    forwarded["From"] = "original@localhost"
+    forwarded["To"] = MIME_USER
+    forwarded["Subject"] = "Forwarded message"
+    forwarded.set_content("Embedded message body.\n")
+    message.add_attachment(forwarded, filename="forwarded.eml")
+    raw = message.as_bytes()
+    assert suite.rpc("storage", op="deliver", username=MIME_USER, raw=raw, delivery_id="pop3-mime-fixture")["ok"]
+    for implicit in (True, False):
+        with closing(encrypted(suite, implicit)) as client:
+            authenticate(client, user=MIME_USER)
+            assert client.stat() == (1, len(raw))
+            assert client.list(1).split()[1:] == [b"1", str(len(raw)).encode()]
+            header_bytes = b"\r\n".join(client.top(1, 0)[1]) + b"\r\n"
+            headers = BytesParser(policy=policy.default).parsebytes(header_bytes)
+            assert str(headers["Subject"]) == str(message["Subject"])
+            assert headers["From"].addresses[0].display_name == "\u53d1\u4ef6\u4eba"
+            assert headers["Message-ID"] == message["Message-ID"]
+            retrieved = b"\r\n".join(client.retr(1)[1]) + b"\r\n"
+            assert retrieved == raw, "POP3 damaged a MIME boundary, encoding, header fold or dot-prefixed line"
+            parsed = BytesParser(policy=policy.default).parsebytes(retrieved)
+            assert not any(part.defects for part in parsed.walk())
+            assert parsed.get_body(preferencelist=("plain",)).get_content() == "\u6b63\u6587\u4fe1\u606f\r\n.first\r\n..second\r\n"
+            assert "HTML \u6b63\u6587" in parsed.get_body(preferencelist=("html",)).get_content()
+            assert next(part for part in parsed.walk() if part.get("Content-ID") == "<logo>").get_payload(decode=True) == image
+            attachments = {part.get_filename(): part for part in parsed.iter_attachments()}
+            assert attachments["\u62a5\u544a.bin"].get_payload(decode=True) == attachment
+            assert attachments["forwarded.eml"].get_payload()[0].get_content().strip() == "Embedded message body."
+            client.quit()
+    print("PASS POP3 renderable MIME: folded encoded headers, text/HTML, inline image, Unicode attachment and forwarded message over TLS and STLS", flush=True)
+
+
+def canonical_octets(suite):
+    assert suite.rpc("auth", op="create", username=OCTET_USER, password=PASSWORD)["ok"]
+    # API import and IMAP APPEND preserve the supplied bytes. POP3 uses CRLF
+    # and terminates the final line, so stored bytes are not its octet count.
+    messages = [b"Subject: LF import\n\n.first\nlast", b"Subject: Missing final CRLF\r\n\r\nbody",
+                b"Subject: Mixed newlines\n\r\n..first\r\nlast\n"]
+    expected = [value.replace(b"\r\n", b"\n").replace(b"\n", b"\r\n") for value in messages]
+    expected = [value if value.endswith(b"\r\n") else value + b"\r\n" for value in expected]
+    for raw in messages:
+        assert suite.rpc("storage", op="append", username=OCTET_USER, folder="INBOX", raw=raw)["ok"]
+    database = Path(suite.config["data_dir"]) / "storage.sqlite3"
+    # An upgraded installation has no POP3 size side table. Startup must add
+    # it without rewriting existing mail or scanning bodies for normal lists.
+    suite.stop("storage")
+    with sqlite3.connect(database) as connection:
+        connection.execute("DROP TABLE message_pop3")
+    suite.start("storage")
+    ordinary = suite.rpc("storage", op="list", username=OCTET_USER, folder="INBOX")["messages"]
+    assert [item["size"] for item in ordinary] == list(map(len, messages))
+    assert all("pop3_size" not in item for item in ordinary)
+    with sqlite3.connect(database) as connection:
+        assert connection.execute("PRAGMA user_version").fetchone() == (2,)
+        assert connection.execute("SELECT COUNT(*) FROM message_pop3 p JOIN messages m ON m.id=p.id WHERE m.username=?", (OCTET_USER,)).fetchone()[0] == 0
+    for implicit in (True, False):
+        with closing(encrypted(suite, implicit)) as client:
+            authenticate(client, user=OCTET_USER)
+            assert client.stat() == (len(messages), sum(map(len, expected)))
+            assert [row.split() for row in client.list()[1]] == [
+                [str(index).encode(), str(len(value)).encode()] for index, value in enumerate(expected, 1)]
+            for index, value in enumerate(expected, 1):
+                assert client.list(index).split()[1:] == [str(index).encode(), str(len(value)).encode()]
+                retrieved = b"\r\n".join(client.retr(index)[1]) + b"\r\n"
+                assert retrieved == value and len(retrieved) == len(value)
+            client.dele(1)
+            assert client.stat() == (len(messages) - 1, sum(map(len, expected[1:])))
+            client.rset()
+            client.quit()
+    with sqlite3.connect(database) as connection:
+        assert [row[0] for row in connection.execute("SELECT p.octets FROM message_pop3 p JOIN messages m ON m.id=p.id WHERE m.username=? ORDER BY m.uid", (OCTET_USER,))] == list(map(len, expected))
+        assert connection.execute("SELECT COUNT(*) FROM message_pop3 p JOIN messages m ON m.id=p.id WHERE m.username<>?", (OCTET_USER,)).fetchone()[0] == 0
+    # Replacing a draft can keep its ID and stored length while changing its
+    # POP3 size. Moving it to INBOX must update a stale source UID in the cache.
+    first = b"Subject: draft\n\nbody"
+    second = b"Subject: draft\r\n\r\nxx"
+    assert len(first) == len(second)
+    draft = suite.rpc("storage", op="draft_save", username=OCTET_USER, raw=first)
+    assert draft["ok"]
+    saved = suite.rpc("storage", op="draft_save", username=OCTET_USER, id=draft["id"], uid=draft["uid"], raw=second)
+    assert saved["ok"] and saved["uid"] != draft["uid"]
+    moved = suite.rpc("storage", op="copy", username=OCTET_USER, source_folder="Drafts", folder="INBOX", move=True,
+                      ids=[saved["id"]], expected_uids={saved["id"]: saved["uid"]})
+    assert moved["ok"]
+    listed = suite.rpc("storage", op="list", username=OCTET_USER, folder="INBOX", include_pop3_size=True)["messages"]
+    assert listed[-1]["id"] == saved["id"] and listed[-1]["pop3_size"] == len(second) + 2
+    assert suite.rpc("storage", op="delete", username=OCTET_USER, ids=[saved["id"]], permanent=True,
+                     folder="INBOX", expected_uids={saved["id"]: listed[-1]["uid"]})["ok"]
+    with sqlite3.connect(database) as connection:
+        assert connection.execute("SELECT COUNT(*) FROM message_pop3 WHERE id=?", (saved["id"],)).fetchone()[0] == 0
+    print("PASS POP3 LIST/STAT octets match CRLF-normalized RETR including imported LF and unterminated final lines", flush=True)
+    print("PASS POP3 size cache: lazy legacy backfill, draft replacement, folder move and deletion cleanup", flush=True)
 
 
 def run(suite):
@@ -285,6 +401,8 @@ def run(suite):
         assert client.stat()[0] == 2
         client.quit()
     print("PASS POP3 idle reader survives the short command deadline; credential rotation closes the transaction, rolls back deletion and releases its lock", flush=True)
+    mime_messages(suite)
+    canonical_octets(suite)
 
 
 def main():

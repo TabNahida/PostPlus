@@ -48,9 +48,9 @@ std::string multiline(std::string_view raw) {
 }
 void pop3(Connection& c, const Config& cfg) {
     std::string candidate, user, credential_version;
+    const auto peer_ip = c.socket().remote_endpoint().address().to_string();
     unsigned auth_failures = 0;
     const auto auth_limit = static_cast<unsigned>(std::clamp(cfg.number("max_auth_attempts", 5), 1, 20));
-    const auto password_limit = static_cast<std::size_t>(std::clamp(cfg.number("max_password_bytes", 1024), 12, 4096));
     std::vector<Json> messages;
     std::set<std::size_t> deleted;
     MaildropLease lease;
@@ -61,15 +61,23 @@ void pop3(Connection& c, const Config& cfg) {
         if (++auth_failures >= auth_limit) { c.write("-ERR [LOGIN-DELAY] Too many failed authentication attempts\r\n"); return true; }
         c.write(message); return false;
     };
+    auto banned = [&](const Json& result) {
+        const auto code = result.value("code", "");
+        if (code != "ip_banned" && code != "rate_limit") return false;
+        c.write("-ERR [LOGIN-DELAY] Too many authentication attempts; try again later\r\n"); return true;
+    };
+    auto malformed_auth = [&](const std::string& username = "") {
+        return banned(rpc(cfg, "auth", {{"op", "security_failure"}, {"peer_ip", peer_ip}, {"protocol", "pop3"}, {"username", username}, {"reason", "malformed_auth"}}));
+    };
     auto login = [&](std::string username, const std::string& password) {
         username = lower(std::move(username)); candidate.clear();
-        if (!valid_address(username) || password.empty() || password.size() > password_limit || password.find('\0') != password.npos)
-            return auth_failure("-ERR [AUTH] Invalid credentials\r\n");
-        const auto result = rpc(cfg, "auth", {{"op", "verify"}, {"username", username}, {"password", password}, {"session", true}});
+        const auto result = rpc(cfg, "auth", {{"op", "verify"}, {"username", username}, {"password", password}, {"session", true}, {"peer_ip", peer_ip}, {"protocol", "pop3"}});
+        if (banned(result)) return true;
         if (!result.value("ok", false)) return auth_failure("-ERR [AUTH] Invalid credentials\r\n");
+        username = result.value("username", username);
         if (!lease.acquire(username)) { c.write("-ERR [IN-USE] Mailbox is locked by another POP3 session\r\n"); return false; }
         try {
-            auto mailbox = rpc(cfg, "storage", {{"op", "list"}, {"username", username}, {"folder", "INBOX"}});
+            auto mailbox = rpc(cfg, "storage", {{"op", "list"}, {"username", username}, {"folder", "INBOX"}, {"include_pop3_size", true}});
             if (!mailbox.value("ok", false)) { lease.release(); c.write("-ERR [SYS/TEMP] Mailbox unavailable\r\n"); return false; }
             messages = mailbox.at("messages").get<std::vector<Json>>();
             credential_version = result.at("credential_version").get<std::string>(); user = std::move(username);
@@ -130,7 +138,7 @@ void pop3(Connection& c, const Config& cfg) {
                     if (trim(arg).empty()) { c.write("+OK Supported authentication mechanisms\r\nPLAIN\r\nLOGIN\r\n.\r\n"); continue; }
                     std::istringstream arguments(arg); std::string mechanism, initial, extra;
                     arguments >> mechanism >> initial >> extra; mechanism = lower(mechanism);
-                    if (!extra.empty()) { if (auth_failure("-ERR Invalid authentication arguments\r\n")) return; continue; }
+                    if (!extra.empty()) { if (malformed_auth() || auth_failure("-ERR Invalid authentication arguments\r\n")) return; continue; }
                     if (mechanism != "plain" && mechanism != "login") { c.write("-ERR Unsupported authentication mechanism\r\n"); continue; }
                     std::string username, password;
                     try {
@@ -150,13 +158,13 @@ void pop3(Connection& c, const Config& cfg) {
                             if (initial == "*") { c.write("-ERR Authentication canceled\r\n"); continue; }
                             password = base64_decode(initial == "=" ? "" : initial);
                         }
-                    } catch (const std::invalid_argument&) { if (auth_failure("-ERR Invalid authentication encoding\r\n")) return; continue; }
+                    } catch (const std::invalid_argument&) { if (malformed_auth(username) || auth_failure("-ERR Invalid authentication encoding\r\n")) return; continue; }
                     if (login(std::move(username), password)) return;
                     continue;
                 }
                 if (cmd == "user") {
                     candidate = lower(trim(arg));
-                    if (!valid_address(candidate)) { candidate.clear(); c.write("-ERR Invalid username\r\n"); }
+                    if (!valid_address(candidate)) { if (malformed_auth(candidate) || auth_failure("-ERR Invalid username\r\n")) return; }
                     else c.write("+OK Send password\r\n");
                     continue;
                 }
@@ -168,13 +176,13 @@ void pop3(Connection& c, const Config& cfg) {
             if (cmd == "rset") { deleted.clear(); c.write("+OK Deletions reset\r\n"); continue; }
             if (cmd == "stat") {
                 std::uint64_t size = 0; std::size_t count = 0;
-                for (std::size_t i = 0; i < messages.size(); ++i) if (!deleted.contains(i)) { ++count; size += messages[i].at("size").get<std::uint64_t>(); }
+                for (std::size_t i = 0; i < messages.size(); ++i) if (!deleted.contains(i)) { ++count; size += messages[i].at("pop3_size").get<std::uint64_t>(); }
                 c.write("+OK " + std::to_string(count) + " " + std::to_string(size) + "\r\n"); continue;
             }
             if ((cmd == "list" || cmd == "uidl") && arg.empty()) {
                 c.write("+OK Listing follows\r\n");
                 for (std::size_t i = 0; i < messages.size(); ++i) if (!deleted.contains(i)) {
-                    auto value = messages[i].at(cmd == "list" ? "size" : "uid").get<std::uint64_t>();
+                    auto value = messages[i].at(cmd == "list" ? "pop3_size" : "uid").get<std::uint64_t>();
                     c.write(std::to_string(i + 1) + " " + std::to_string(value) + "\r\n");
                 }
                 c.write(".\r\n"); continue;
@@ -189,7 +197,7 @@ void pop3(Connection& c, const Config& cfg) {
             --index;
             if (cmd == "dele") { deleted.insert(index); c.write("+OK Message marked for deletion\r\n"); continue; }
             if (cmd == "list" || cmd == "uidl") {
-                c.write("+OK " + std::to_string(index + 1) + " " + std::to_string(messages[index].at(cmd == "list" ? "size" : "uid").get<std::uint64_t>()) + "\r\n"); continue;
+                c.write("+OK " + std::to_string(index + 1) + " " + std::to_string(messages[index].at(cmd == "list" ? "pop3_size" : "uid").get<std::uint64_t>()) + "\r\n"); continue;
             }
             auto result = rpc(cfg, "storage", {{"op", "get"}, {"username", user}, {"id", messages[index].at("id")},
                 {"folder", "INBOX"}, {"uid", messages[index].at("uid")}});

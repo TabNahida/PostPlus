@@ -1012,7 +1012,66 @@ window.PostPlusI18n = (() => {
   "Only expected public DNS values may be supplied. Hosts and ports come from saved settings.": "只能提交预期的公网 DNS 记录值；主机名与端口由服务器已保存的配置决定。",
   "Enter public IPv4 and IPv6 addresses in their matching fields.": "请在对应字段中填写公网 IPv4 和 IPv6 地址。"
 });
+  Object.assign(chinese,{
+    "Login security":"登录安全",
+    "Review login attempts in Service logs and limit repeated authentication failures from the same IP.":"可在服务日志中查看登录尝试，并限制同一 IP 反复进行失败的身份验证。",
+    "Automatic protection":"自动防护",
+    "Temporarily block new authentication when an IP reaches either failure threshold within the observation window. Existing mail sessions continue working.":"当同一 IP 在观察窗口内达到任一失败阈值时，暂时封禁新的身份验证。现有邮件会话继续工作。",
+    "Enable automatic login protection":"启用登录自动防护",
+    "Observation window (seconds)":"观察窗口（秒）",
+    "Failed sign-ins before blocking":"登录失败封禁阈值",
+    "Unknown-account attempts before blocking":"未注册账号尝试封禁阈值",
+    "Temporary block duration (seconds)":"临时封禁时长（秒）",
+    "IP allowlist":"IP 白名单",
+    "One IPv4, IPv6 or CIDR range per line. Allowlisted IPs bypass automatic blocking. Existing and manual blocks remain until expiry or explicit unblocking.":"每行填写一个 IPv4、IPv6 地址或 CIDR 网段。白名单内 IP 不会被自动封禁；已有封禁和手动封禁仍需到期或手动解封。",
+    "Reload security policy":"重新加载安全策略",
+    "Save security policy":"保存安全策略",
+    "How IP protection works":"IP 防护如何生效",
+    "Blocks apply to new password authentication through Webmail, administration, SMTP, IMAP and POP3. They do not block incoming mail delivery or existing sessions. Policy changes apply immediately without a restart.":"封禁作用于 Webmail、管理后台、SMTP、IMAP 和 POP3 的新密码验证，不影响入站邮件投递或现有会话。策略保存后立即生效，无需重启。",
+    "Login logs record the direct socket IP. Forwarded HTTP headers are not trusted; behind a reverse proxy, the recorded IP may be the proxy address.":"登录日志记录连接的直接来源 IP，不信任 HTTP 转发请求头。使用反向代理时，记录的可能是代理服务器地址。",
+    "Temporary IP blocks":"临时 IP 封禁",
+    "Expired entries disappear automatically. Unblocking clears the IP's recorded failures.":"封禁到期后自动移除。手动解封会同时清除此 IP 的失败计数。",
+    "Refresh blocks":"刷新封禁列表",
+    "Search blocked IPs":"搜索封禁 IP",
+    "IP address":"IP 地址",
+    "Failed attempts":"失败次数",
+    "Blocked until":"封禁至",
+    "No active IP blocks.":"当前没有被封禁的 IP。",
+    "No IP blocks match this search.":"没有匹配的封禁 IP。",
+    "{shown} of {total} active IP blocks":"显示 {shown} / {total} 个有效封禁 IP",
+    "Block an IP manually":"手动封禁 IP",
+    "Create a temporary authentication block for one exact IP address, including allowlisted IPs. Existing sessions and incoming delivery continue working.":"对单个完整 IP 地址创建临时登录封禁，包括白名单内 IP。现有会话和入站邮件投递继续工作。",
+    "Block duration (seconds)":"封禁时长（秒）",
+    "Reason (optional)":"原因（可选）",
+    "Block IP":"封禁 IP",
+    "Unblock":"解封",
+    "Unsaved security policy changes.":"有尚未保存的安全策略更改。",
+    "Security policy is up to date.":"安全策略已是最新。",
+    "The security policy changed elsewhere. Reload it before saving again.":"安全策略已在其他位置修改，请重新加载后再保存。",
+    "Too many unknown-account attempts":"尝试未注册账号次数过多",
+    "Too many failed sign-ins":"登录失败次数过多",
+    "Manual block":"手动封禁",
+    "Automatic block":"自动封禁",
+    "{total} total · {unknown} unknown accounts":"共 {total} 次 · 未注册账号 {unknown} 次",
+    "IP unblocked.":"IP 已解封。",
+    "Loading login security…":"正在加载登录安全设置…",
+    "Policy and temporary blocks loaded.":"已加载安全策略和临时封禁列表。",
+    "The IP allowlist may contain up to 100 entries.":"IP 白名单最多可包含 100 项。",
+    "Use up to 160 UTF-8 bytes for the reason, without control characters.":"原因最多可包含 160 个 UTF-8 字节，且不能包含控制字符。",
+    "Saving security policy…":"正在保存安全策略…",
+    "Security policy saved. Protection is active immediately.":"安全策略已保存，防护立即生效。",
+    "Security policy saved.":"安全策略已保存。",
+    "IP temporarily blocked.":"IP 已被临时封禁。",
+    "Read security policy and IP bans":"读取安全策略和 IP 封禁",
+    "Manage security policy and IP bans":"管理安全策略和 IP 封禁",
+    "Check the login security policy fields.":"请检查登录安全策略字段。",
+    "Login security policy changed. Reload it before saving again.":"登录安全策略已更改，请重新加载后再保存。",
+    "Authentication temporarily blocked. Try again later.":"登录暂时被封禁，请稍后重试。"
+  });
   function error(data) {
+    if(data?.code==="ip_banned")return t("Authentication temporarily blocked. Try again later.");
+    if(data?.code==="invalid_security_policy")return t("Check the login security policy fields.");
+    if(data?.code==="security_policy_conflict")return t("Login security policy changed. Reload it before saving again.");
     if(data?.code==="unknown_destination" || data?.code==="nonlocal_destination")return t("Choose an existing mailbox in this server's domain.");
     if(data?.code==="duplicate_forwarding")return t("This forwarding pattern already exists.");
     if(data?.code==="password_policy_violation")return t("Password does not meet the displayed requirements.");

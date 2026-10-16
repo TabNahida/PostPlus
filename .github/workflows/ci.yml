@@ -59,6 +59,7 @@ jobs:
       - name: Administration API key and restart controls
         run: |
           node tests/api_keys_ui_test.js
+          node tests/security_ui_test.js
           node tests/verification_code_ui_test.js
           node tests/access_ui_test.js
           node tests/logs_ui_test.js

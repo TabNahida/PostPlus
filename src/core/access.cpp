@@ -7,7 +7,7 @@ std::vector<std::string> api_key_permission_ids(std::string_view audience) {
     if (audience == "admin") return {"users:read", "users:write", "mail:read", "quota:read", "quota:write",
         "policy:read", "policy:write", "stats:read", "queue:read", "logs:read", "config:read", "config:write",
         "backup:read", "backup:write", "services:write", "updates:read", "updates:write", "invites:read", "invites:write",
-        "forwarding:read", "forwarding:write"};
+        "forwarding:read", "forwarding:write", "security:read", "security:write"};
     if (audience == "mailbox") return {"mailbox:read", "mailbox:write", "mailbox:send", "codes:read"};
     return {};
 }
@@ -38,6 +38,9 @@ std::optional<std::string> required_api_permission(std::string_view method, std:
     if (path == "/api/admin/folders" || path == "/api/admin/messages" || path.starts_with("/api/admin/messages/")) return read ? std::optional<std::string>("mail:read") : std::nullopt;
     if (path == "/api/admin/quota") return read ? "quota:read" : "quota:write";
     if (path == "/api/admin/password-policy") return read ? "policy:read" : "policy:write";
+    if (path == "/api/admin/security" && read) return "security:read";
+    if ((path == "/api/admin/security/policy" && method == "PUT") ||
+        ((path == "/api/admin/security/ban" || path == "/api/admin/security/unban") && method == "POST")) return "security:write";
     if (path == "/api/admin/stats") return read ? std::optional<std::string>("stats:read") : std::nullopt;
     if (path == "/api/admin/queue") return read ? std::optional<std::string>("queue:read") : std::nullopt;
     if (path == "/api/admin/logs") return read ? std::optional<std::string>("logs:read") : std::nullopt;

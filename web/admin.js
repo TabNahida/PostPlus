@@ -2,7 +2,7 @@
 const t = (...args) => PostPlusI18n.t(...args);
 const $ = id => document.getElementById(id);
 const state = {user:null,view:"overview",userMode:"create"};
-const viewLabels = {overview:"Overview",accounts:"User accounts",queue:"Delivery queue",logs:"Service logs","api-keys":"API keys",settings:"Server settings",maintenance:"Server maintenance",restart:"Restart and shutdown"};
+const viewLabels = {overview:"Overview",accounts:"User accounts",queue:"Delivery queue",logs:"Service logs",security:"Login security","api-keys":"API keys",settings:"Server settings",maintenance:"Server maintenance",restart:"Restart and shutdown"};
 const inspectionReader=PostPlusMailReader.create($("inspect-body"));
 let settingsData = null;
 let settingsEditor = null;
@@ -13,7 +13,7 @@ let acmeControl=null;
 let updateControl=null,updateBusy=false;
 let passwordPolicyData=null, passwordPolicyVersion=0, userDialogVersion=0, policySaving=false;
 let apiKeysData=null,apiKeysVersion=0,apiKeyDialogVersion=0,apiKeyCreating=false,apiKeyRevoking=false,apiKeyRevokeTarget=null;
-let keyPermissionEditor=null,accessControl=null;
+let keyPermissionEditor=null,accessControl=null,securityControl=null;
 let usersData=[];
 let restartJob=null,restartVersion=0,restartTimer=null,restartStarted=0,restartBusy=false,restartText="",restartSubmitting=false;
 let noticeTimer;
@@ -79,6 +79,7 @@ function signedOut() {
   state.user = null;
   usersData=[];$("users-search").value="";$("users-count").textContent="";$("users-empty").hidden=true;
   accessControl?.dispose();accessControl=null;keyPermissionEditor?.clear();keyPermissionEditor=null;
+  securityControl?.dispose();securityControl=null;
   clearRestart();
   updateControl?.dispose();updateControl=null;updateBusy=false;
   backupVersion++;clearTimeout(backupTimer);backupTimer=null;shutdownPending=false;
@@ -111,6 +112,8 @@ function signedOut() {
 async function signedIn(user) {
   if (!user.admin) throw new Error(t("Administrator access is required."));
   state.user = user;
+  securityControl?.dispose();
+  if(window.PostPlusAdminSecurity)securityControl=PostPlusAdminSecurity.mount($("view-security"),{api,notice:showNotice});
   accessControl?.dispose();
   if(window.PostPlusAdminAccess)accessControl=PostPlusAdminAccess.mount($("view-accounts"),{api,notice:showNotice,inviteActions:$("account-create-actions"),afterDelete:loadAdmin});
   $("login-screen").hidden = true;
@@ -169,12 +172,13 @@ async function switchView(view) {
   if (!Object.hasOwn(viewLabels,view)) return;
   showAdminView(view);
   if (view === "logs") await loadLogs();
+  else if (view === "security") await securityControl?.refresh();
   else if (view === "api-keys") await loadApiKeys();
   else if (["settings","maintenance","restart"].includes(view)) { if (!settingsData) await loadSettings(); }
   else {await loadAdmin();if(view==="accounts")await accessControl?.refresh();}
 }
 document.querySelectorAll("[data-view]").forEach(button => button.addEventListener("click", () => switchView(button.dataset.view)));
-$("admin-refresh").addEventListener("click", () => state.view === "logs" ? loadLogs() : state.view === "api-keys" ? loadApiKeys() : Promise.allSettled([loadAdmin(),state.view==="accounts" ? accessControl?.refresh() : null]));
+$("admin-refresh").addEventListener("click", () => state.view === "logs" ? loadLogs() : state.view === "security" ? securityControl?.refresh() : state.view === "api-keys" ? loadApiKeys() : Promise.allSettled([loadAdmin(),state.view==="accounts" ? accessControl?.refresh() : null]));
 
 function renderUsers() {
   const query=$("users-search").value.trim().toLowerCase(),accounts=usersData.filter(account=>account.username.toLowerCase().includes(query));
@@ -661,6 +665,7 @@ document.addEventListener("postplus:language", () => {
   settingsEditor?.translate();
   updateSettingsCount();
   updateControl?.translate();
+  securityControl?.translate();
   renderPasswordHint();
   acmeControl?.translate();
   renderInspection();

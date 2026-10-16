@@ -34,7 +34,12 @@ def run(s):
         s.start(name)
     alice, bob, charlie, delta = [f"{name}@localhost" for name in ("alice", "bob", "charlie", "delta")]
     for user in (alice, bob, charlie, delta):
-        assert s.rpc("auth", op="create", username=user, password=PASSWORD)["ok"]
+        assert s.rpc("auth", op="create", username=user, password=PASSWORD, admin=user == alice)["ok"]
+    # This suite isolates the connection-local limit across many deliberately
+    # invalid sessions. Shared persistent IP bans have their own real-socket suite.
+    security = s.rpc("auth", op="security_get", actor=alice)
+    policy = dict(security["policy"], failure_threshold=100, unknown_user_threshold=100)
+    assert s.rpc("auth", op="security_policy_set", actor=alice, policy=policy, revision=security["revision"])["ok"]
 
     with smtplib.SMTP("127.0.0.1", s.ports["smtp"], local_hostname="localhost", timeout=10) as client:
         client.ehlo()

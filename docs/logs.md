@@ -5,6 +5,10 @@ first. Filter by service or level and search event text, timestamps, service
 names, levels or process IDs. **Load more** reads older retained events; it
 also continues a sparse search if the per-request scan budget is reached.
 
+Select `auth` and search an IP to inspect authentication successes, failures,
+blocked attempts and ban changes. Entries include the protocol and attempted
+account without credentials. See [login security and IP bans](security.md).
+
 Pages use a snapshot of file positions, so new events do not shift later
 pages. Refresh starts a new snapshot. Retention settings still apply: a file
 removed by rotation while browsing cannot be recovered by pagination. The

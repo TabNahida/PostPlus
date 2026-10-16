@@ -132,6 +132,7 @@ def migration(binaries, directory):
         s.start("auth")
         verified = s.rpc("auth", op="api_key_verify", key=token)
         assert verified["valid"] and verified["audience"] == "admin" and set(verified["permissions"]) == set(ADMIN_PERMISSIONS)
+        assert not {"security:read", "security:write"}.intersection(verified["permissions"]), "Migration silently granted new security permissions"
         with sqlite3.connect(data / "auth.sqlite3") as db:
             assert db.execute("PRAGMA user_version").fetchone() == (4,)
             assert db.execute("SELECT digest FROM api_keys WHERE id=?", (identifier,)).fetchone() == (hashlib.sha256(token.encode()).digest(),)

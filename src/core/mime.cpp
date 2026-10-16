@@ -405,6 +405,7 @@ std::string html_charset(std::string_view body) {
 }
 struct Parser {
     Limits limits;
+    bool wire = false, headers_only = false;
     std::size_t part_count = 0, decoded_bytes = 0;
     Part parse_part(std::string_view raw, std::size_t depth, std::string_view default_type = "text/plain") {
         if (depth > limits.max_depth || ++part_count > limits.max_parts) invalid("MIME nesting or part limit exceeded");
@@ -433,6 +434,7 @@ struct Parser {
         auto body = end_headers ? raw.substr(offset) : std::string_view{};
         auto content_type = header(out, "content-type");
         out.content_type = content_type.empty() ? std::string(default_type) : lower(trim(content_type.substr(0, content_type.find(';'))));
+        if (headers_only) return out;
         auto encoding = lower(trim(header(out, "content-transfer-encoding")));
         if (out.content_type.rfind("multipart/", 0) == 0) {
             if (!encoding.empty() && encoding != "7bit" && encoding != "8bit" && encoding != "binary") invalid("Encoded multipart is invalid");
@@ -462,13 +464,33 @@ struct Parser {
             if (!closed || out.parts.empty()) invalid("Incomplete MIME multipart");
             return out;
         }
+        if (wire && out.content_type != "message/rfc822") return out;
+        if (wire && (encoding.empty() || encoding == "7bit" || encoding == "8bit" || encoding == "binary")) {
+            // The caller already owns the wire bytes. Avoid retaining another
+            // full copy at every level of an unencoded forwarded message.
+            out.parts.push_back(parse_part(body, depth + 1));
+            return out;
+        }
         std::string decoded;
-        if (encoding == "base64") decoded = decode64(body);
-        else if (encoding == "quoted-printable") decoded = qp(body);
-        else if (encoding.empty() || encoding == "7bit" || encoding == "8bit" || encoding == "binary") decoded = std::string(body);
-        else invalid("Unsupported MIME content transfer encoding");
-        if (decoded.size() > limits.max_bytes - std::min(limits.max_bytes, decoded_bytes)) invalid("Decoded MIME size limit exceeded");
-        decoded_bytes += decoded.size();
+        try {
+            if (encoding == "base64") decoded = decode64(body);
+            else if (encoding == "quoted-printable") decoded = qp(body);
+            else if (encoding.empty() || encoding == "7bit" || encoding == "8bit" || encoding == "binary") decoded = std::string(body);
+            else invalid("Unsupported MIME content transfer encoding");
+        } catch (const std::invalid_argument&) {
+            if (!wire) throw;
+            // An undecodable attached message remains downloadable as opaque
+            // bytes; it must not prevent the rest of the message being read.
+            out.content_type = "application/octet-stream";
+            return out;
+        }
+        // Wire parsing allocates only embedded-message buffers. Each is no
+        // larger than its source, with total copies bounded by max_depth;
+        // counting an unencoded nested body again rejects valid large mail.
+        if (!wire) {
+            if (decoded.size() > limits.max_bytes - std::min(limits.max_bytes, decoded_bytes)) invalid("Decoded MIME size limit exceeded");
+            decoded_bytes += decoded.size();
+        }
         if (out.content_type == "message/rfc822") { out.parts.push_back(parse_part(decoded, depth + 1)); out.embedded_message = std::move(decoded); }
         else out.body = std::move(decoded);
         return out;
@@ -478,6 +500,14 @@ struct Parser {
 Part parse(std::string_view raw, Limits limits) {
     if (raw.size() > limits.max_bytes) invalid("MIME input size limit exceeded");
     return Parser{limits}.parse_part(raw, 0);
+}
+Part parse_wire(std::string_view raw, Limits limits) {
+    if (raw.size() > limits.max_bytes) invalid("MIME input size limit exceeded");
+    return Parser{limits, true}.parse_part(raw, 0);
+}
+Part parse_headers(std::string_view raw, Limits limits) {
+    if (raw.size() > limits.max_bytes) invalid("MIME input size limit exceeded");
+    return Parser{limits, true, true}.parse_part(raw, 0);
 }
 std::string header(const Part& part, std::string_view name) {
     auto wanted = lower(std::string(name));

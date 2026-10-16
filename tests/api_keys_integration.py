@@ -57,6 +57,11 @@ def run(s):
     for user in (admin, ordinary):
         assert s.rpc("auth", op="create", username=user, password=PASSWORD, admin=user == admin)["ok"]
     browser, user = login(s, "admin", admin), login(s, "web", ordinary)
+    # This suite deliberately exercises many invalid credentials; IP-ban
+    # thresholds and defaults are checked in the dedicated security suites.
+    security = s.rpc("auth", op="security_get", actor=admin)
+    assert s.rpc("auth", op="security_policy_set", actor=admin, revision=security["revision"],
+                 policy=dict(security["policy"], failure_threshold=1000, unknown_user_threshold=1000))["ok"]
     cookie = {"Cookie": browser["Cookie"]}
     assert s.http("admin", "GET", ROUTE)[0] == 401
     assert s.http("admin", "GET", ROUTE, headers=cookie)[0] == 403

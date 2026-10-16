@@ -16,10 +16,16 @@ struct Part {
     std::vector<std::pair<std::string, std::string>> headers;
     std::string content_type;
     std::string body; // Decoded bytes; character sets are preserved, never guessed.
-    std::string embedded_message; // Transfer-decoded wire message for message/rfc822 sections.
+    std::string embedded_message; // Decoded message/rfc822 wire; parse_wire leaves pass-through bytes in the source.
     std::vector<Part> parts;
 };
 Part parse(std::string_view raw, Limits limits = {});
+// Protocol metadata parsing keeps ordinary leaf bodies transfer-encoded and
+// never decodes attachments just to discover the MIME structure. Embedded
+// messages are decoded only when needed to describe their nested sections.
+Part parse_wire(std::string_view raw, Limits limits = {});
+// Envelope reads depend only on the header block, not MIME body validity.
+Part parse_headers(std::string_view raw, Limits limits = {});
 std::string header(const Part& part, std::string_view name);
 // Reads a case-insensitive MIME parameter; malformed/duplicate values throw.
 std::string parameter(std::string_view value, std::string_view name);

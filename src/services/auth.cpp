@@ -10,6 +10,7 @@
 #include <array>
 #include <chrono>
 #include <climits>
+#include <charconv>
 #include <mutex>
 #include <set>
 #include <stdexcept>
@@ -128,6 +129,62 @@ std::int64_t unix_seconds() {
         std::chrono::system_clock::now().time_since_epoch()).count();
 }
 
+// Only transport adapters supply this field. Never use a forwarded HTTP header.
+std::string canonical_ip(const std::string& input) {
+    if (input.empty() || input.size() > 64 || input.find('%') != input.npos)
+        throw std::invalid_argument("invalid peer IP address");
+    const bool ipv6 = input.find(':') != input.npos;
+    if (input.find_first_not_of(ipv6 ? "0123456789abcdefABCDEF:." : "0123456789.") != input.npos ||
+        (ipv6 && std::count(input.begin(), input.end(), ':') < 2) ||
+        (!ipv6 && std::count(input.begin(), input.end(), '.') != 3))
+        throw std::invalid_argument("invalid peer IP address");
+    asio::error_code error;
+    auto address = asio::ip::make_address(input, error);
+    // Windows' underlying conversion may accept an IPv4 address followed by a
+    // port. Enforce address family and canonical IPv4 syntax independently.
+    if (error || address.is_v6() != ipv6 || (!ipv6 && address.to_string() != input))
+        throw std::invalid_argument("invalid peer IP address");
+    if (address.is_v6() && address.to_v6().is_v4_mapped()) {
+        const auto bytes = address.to_v6().to_bytes();
+        address = asio::ip::address_v4({bytes[12], bytes[13], bytes[14], bytes[15]});
+    }
+    return address.to_string();
+}
+
+struct IpRange {
+    asio::ip::address address;
+    int prefix;
+};
+IpRange ip_range(const std::string& value) {
+    const auto slash = value.find('/');
+    const auto address = asio::ip::make_address(canonical_ip(value.substr(0, slash)));
+    int prefix = address.is_v4() ? 32 : 128;
+    if (slash != value.npos) {
+        const auto text = std::string_view(value).substr(slash + 1);
+        const auto parsed = std::from_chars(text.data(), text.data() + text.size(), prefix);
+        if (text.empty() || parsed.ec != std::errc{} || parsed.ptr != text.data() + text.size() ||
+            prefix < 0 || prefix > (address.is_v4() ? 32 : 128))
+            throw std::invalid_argument("invalid allowlist IP network");
+    }
+    return {address, prefix};
+}
+bool in_range(const asio::ip::address& address, const IpRange& range) {
+    if (address.is_v4() != range.address.is_v4()) return false;
+    auto matches = [&range](const auto& left, const auto& right) {
+        for (int bit = 0; bit < range.prefix; ++bit)
+            if (((left[bit / 8] ^ right[bit / 8]) & (1 << (7 - bit % 8))) != 0) return false;
+        return true;
+    };
+    return address.is_v4() ? matches(address.to_v4().to_bytes(), range.address.to_v4().to_bytes()) :
+        matches(address.to_v6().to_bytes(), range.address.to_v6().to_bytes());
+}
+
+std::string audit_value(std::string value) {
+    if (value.size() > 254) value.resize(254);
+    for (auto& ch : value) if (static_cast<unsigned char>(ch) < 32 || ch == 127) ch = '?';
+    return Json(value).dump(-1, ' ', false, Json::error_handler_t::replace);
+}
+
 class AuthStore {
 public:
     explicit AuthStore(const Config& config)
@@ -192,8 +249,15 @@ public:
                 if (!columns.contains("audience")) execute("ALTER TABLE api_keys ADD COLUMN audience TEXT NOT NULL DEFAULT 'admin';");
                 if (!columns.contains("permissions")) {
                     execute("ALTER TABLE api_keys ADD COLUMN permissions TEXT NOT NULL DEFAULT '[]';");
+                    // Preserve the original unscoped-key grants. New permission
+                    // families require an explicit administrator grant, even
+                    // when upgrading directly from a pre-permissions database.
+                    const Json legacy_permissions = {"users:read", "users:write", "mail:read", "quota:read", "quota:write",
+                        "policy:read", "policy:write", "stats:read", "queue:read", "logs:read", "config:read", "config:write",
+                        "backup:read", "backup:write", "services:write", "updates:read", "updates:write", "invites:read", "invites:write",
+                        "forwarding:read", "forwarding:write"};
                     Statement migrate(db_, "UPDATE api_keys SET permissions=?");
-                    migrate.text(1, Json(api_key_permission_ids("admin")).dump()); migrate.done();
+                    migrate.text(1, legacy_permissions.dump()); migrate.done();
                 }
                 execute("CREATE TABLE IF NOT EXISTS invitations ("
                     "id TEXT PRIMARY KEY, name TEXT NOT NULL CHECK(length(name) BETWEEN 1 AND 80),"
@@ -202,6 +266,13 @@ public:
                     "expires_at INTEGER NOT NULL, max_uses INTEGER NOT NULL CHECK(max_uses BETWEEN 1 AND 100),"
                     "uses INTEGER NOT NULL DEFAULT 0 CHECK(uses>=0 AND uses<=max_uses), revoked_at INTEGER);"
                     "CREATE TABLE IF NOT EXISTS account_deletions (username TEXT PRIMARY KEY, cleanup_id TEXT NOT NULL);"
+                    "CREATE TABLE IF NOT EXISTS security_policy (id INTEGER PRIMARY KEY CHECK(id=1),policy TEXT NOT NULL,revision INTEGER NOT NULL);"
+                    "INSERT OR IGNORE INTO security_policy VALUES(1,'{\"enabled\":true,\"window_seconds\":300,\"failure_threshold\":20,\"unknown_user_threshold\":5,\"ban_seconds\":900,\"allowlist\":[]}',1);"
+                    "CREATE TABLE IF NOT EXISTS security_attempts (ip TEXT PRIMARY KEY,window_start INTEGER NOT NULL,failures INTEGER NOT NULL,unknown_failures INTEGER NOT NULL,last_seen INTEGER NOT NULL);"
+                    "CREATE INDEX IF NOT EXISTS security_attempts_seen ON security_attempts(last_seen);"
+                    "CREATE INDEX IF NOT EXISTS security_attempts_window ON security_attempts(window_start);"
+                    "CREATE TABLE IF NOT EXISTS security_bans (ip TEXT PRIMARY KEY,banned_at INTEGER NOT NULL,expires_at INTEGER NOT NULL,reason TEXT NOT NULL,failures INTEGER NOT NULL,unknown_failures INTEGER NOT NULL);"
+                    "CREATE INDEX IF NOT EXISTS security_bans_expiry ON security_bans(expires_at);"
                     "PRAGMA user_version=4;");
                 migration.commit();
             }
@@ -220,6 +291,9 @@ public:
         const auto operation = required_string(request, "op", 32);
         if (operation == "verify") return verify(request);
         if (operation == "api_key_verify") return verify_api_key(request);
+        if (operation == "security_failure") return security_failure(request);
+        if (operation == "security_get" || operation == "security_policy_set" || operation == "security_unban" || operation == "security_ban")
+            return manage_security(request, operation);
         if (operation == "api_key_list" || operation == "api_key_create" || operation == "api_key_update" || operation == "api_key_revoke")
             return manage_api_keys(request, operation);
         if (operation == "invite_create" || operation == "invite_list" || operation == "invite_revoke")
@@ -309,6 +383,266 @@ public:
         return {{"ok", false}, {"error", "unknown authentication operation"}};
     }
 private:
+    struct AuthPeer {
+        std::string ip, protocol, username;
+        bool reserved = false, unknown = false;
+    };
+    struct PendingAuth { int total = 0, unknown = 0; };
+    static constexpr int max_security_ips = 10000;
+    std::map<std::string, PendingAuth> pending_auth_;
+
+    AuthPeer auth_peer(const Json& request) const {
+        AuthPeer peer;
+        if (request.contains("peer_ip")) {
+            if (!request.at("peer_ip").is_string()) throw std::invalid_argument("invalid peer IP address");
+            peer.ip = canonical_ip(request.at("peer_ip").get<std::string>());
+        }
+        peer.protocol = request.value("protocol", std::string("internal"));
+        if (peer.protocol != "webmail" && peer.protocol != "admin" && peer.protocol != "imap" && peer.protocol != "pop3" &&
+            peer.protocol != "smtp" && peer.protocol != "api" && peer.protocol != "internal")
+            throw std::invalid_argument("invalid authentication protocol");
+        if (request.contains("username") && request.at("username").is_string())
+            peer.username = lower(trim(request.at("username").get<std::string>()));
+        return peer;
+    }
+    void auth_audit(const AuthPeer& peer, const std::string& outcome, const std::string& reason = {}) const {
+        log("auth", "login " + outcome + " ip=" + (peer.ip.empty() ? "internal" : peer.ip) +
+            " protocol=" + peer.protocol + " username=" + audit_value(peer.username) +
+            (reason.empty() ? "" : " reason=" + reason), outcome == "success" ? "info" : "warn");
+    }
+    Json security_policy_view() {
+        Statement query(db_, "SELECT policy,revision FROM security_policy WHERE id=1");
+        if (query.step() != SQLITE_ROW) throw std::runtime_error("cannot read login security policy");
+        return {{"policy", Json::parse(query.string(0))}, {"revision", query.integer64(1)}};
+    }
+    bool allowlisted(const Json& policy, const std::string& ip) const {
+        const auto address = asio::ip::make_address(ip);
+        for (const auto& entry : policy.at("allowlist"))
+            if (in_range(address, ip_range(entry.get<std::string>()))) return true;
+        return false;
+    }
+    void expire_security(std::int64_t now) {
+        Statement query(db_, "SELECT ip FROM security_bans WHERE expires_at<=? LIMIT 1000"); query.integer64(1, now);
+        std::vector<std::string> expired;
+        for (int code; (code = query.step()) != SQLITE_DONE;) {
+            if (code != SQLITE_ROW) throw std::runtime_error("cannot expire login bans");
+            expired.push_back(query.string(0));
+        }
+        for (const auto& ip : expired) {
+            Statement remove(db_, "DELETE FROM security_bans WHERE ip=? AND expires_at<=?");
+            remove.text(1, ip); remove.integer64(2, now); remove.done();
+            log("auth", "login ban expired ip=" + ip);
+        }
+        Statement prune(db_, "DELETE FROM security_attempts WHERE window_start<=?");
+        prune.integer64(1, now - security_policy_view().at("policy").at("window_seconds").get<int>()); prune.done();
+    }
+    static Json banned_response(std::int64_t expires, std::int64_t now) {
+        return {{"ok", false}, {"valid", false}, {"code", "ip_banned"},
+            {"retry_after", std::max<std::int64_t>(1, expires - now)},
+            {"error", "Authentication temporarily blocked. Try again later."}};
+    }
+    std::optional<Json> active_ban(const AuthPeer& peer, std::int64_t now) {
+        if (peer.ip.empty()) return {};
+        Statement query(db_, "SELECT expires_at FROM security_bans WHERE ip=? AND expires_at>?");
+        query.text(1, peer.ip); query.integer64(2, now);
+        if (query.step() != SQLITE_ROW) return {};
+        auth_audit(peer, "blocked", "ip_banned");
+        return banned_response(query.integer64(0), now);
+    }
+    // Called under mutex_ before a hash. Reservations bound concurrent expensive
+    // work while failures are still being calculated; a success releases only its
+    // own reservation and never erases previous failed attempts.
+    std::optional<Json> begin_auth(AuthPeer& peer, bool unknown) {
+        peer.unknown = unknown;
+        const auto now = unix_seconds(); expire_security(now);
+        if (const auto banned = active_ban(peer, now)) return banned;
+        if (peer.ip.empty()) return {};
+        const auto policy = security_policy_view().at("policy");
+        if (!policy.at("enabled").get<bool>() || allowlisted(policy, peer.ip)) return {};
+        int failures = 0, unknown_failures = 0;
+        bool exists = false;
+        Statement count(db_, "SELECT failures,unknown_failures,window_start FROM security_attempts WHERE ip=?"); count.text(1, peer.ip);
+        if (count.step() == SQLITE_ROW) {
+            exists = true;
+            if (count.integer64(2) + policy.at("window_seconds").get<int>() > now) {
+                failures = count.integer(0); unknown_failures = count.integer(1);
+            }
+        }
+        if (!exists) {
+            Statement size(db_, "SELECT COUNT(*) FROM security_attempts");
+            if (size.step() != SQLITE_ROW) throw std::runtime_error("cannot count login security counters");
+            if (size.integer(0) >= max_security_ips || pending_auth_.size() >= max_security_ips) {
+                auth_audit(peer, "blocked", "security_capacity");
+                return Json{{"ok", false}, {"valid", false}, {"code", "rate_limit"}, {"retry_after", 60}, {"error", "authentication rate limit"}};
+            }
+            Statement reserve(db_, "INSERT INTO security_attempts VALUES(?,?,0,0,?)");
+            reserve.text(1, peer.ip); reserve.integer64(2, now); reserve.integer64(3, now); reserve.done();
+        }
+        auto& pending = pending_auth_[peer.ip];
+        if (failures + pending.total >= policy.at("failure_threshold").get<int>() ||
+            (unknown && unknown_failures + pending.unknown >= policy.at("unknown_user_threshold").get<int>())) {
+            if (!pending.total) pending_auth_.erase(peer.ip);
+            auth_audit(peer, "blocked", "concurrent_authentication_limit");
+            return Json{{"ok", false}, {"valid", false}, {"code", "rate_limit"}, {"retry_after", 1}, {"error", "authentication rate limit"}};
+        }
+        ++pending.total; if (unknown) ++pending.unknown; peer.reserved = true;
+        return {};
+    }
+    void release_auth(AuthPeer& peer) {
+        if (!peer.reserved) return;
+        const auto found = pending_auth_.find(peer.ip);
+        if (found != pending_auth_.end()) {
+            --found->second.total; if (peer.unknown) --found->second.unknown;
+            if (!found->second.total) pending_auth_.erase(found);
+        }
+        peer.reserved = false;
+    }
+    std::optional<Json> finish_auth(AuthPeer& peer, bool success, const std::string& reason) {
+        release_auth(peer);
+        const auto now = unix_seconds();
+        if (const auto banned = active_ban(peer, now)) return banned;
+        auth_audit(peer, success ? "success" : "failed", reason);
+        if (success || peer.ip.empty()) {
+            if (success && !peer.ip.empty() && !pending_auth_.contains(peer.ip)) {
+                Statement empty(db_, "DELETE FROM security_attempts WHERE ip=? AND failures=0"); empty.text(1, peer.ip); empty.done();
+            }
+            return {};
+        }
+        const auto policy = security_policy_view().at("policy");
+        if (!policy.at("enabled").get<bool>() || allowlisted(policy, peer.ip)) return {};
+        Statement capacity(db_, "SELECT EXISTS(SELECT 1 FROM security_attempts WHERE ip=?),(SELECT COUNT(*) FROM security_attempts)");
+        capacity.text(1, peer.ip);
+        if (capacity.step() != SQLITE_ROW) throw std::runtime_error("cannot check login security capacity");
+        if (!capacity.integer(0) && capacity.integer(1) >= max_security_ips)
+            return Json{{"ok", false}, {"valid", false}, {"code", "rate_limit"}, {"retry_after", 60}, {"error", "authentication rate limit"}};
+        const int window = policy.at("window_seconds").get<int>();
+        Statement record(db_, "INSERT INTO security_attempts(ip,window_start,failures,unknown_failures,last_seen) VALUES(?,?,1,?,?) "
+            "ON CONFLICT(ip) DO UPDATE SET window_start=CASE WHEN window_start+?<=excluded.last_seen THEN excluded.window_start ELSE window_start END,"
+            "failures=CASE WHEN window_start+?<=excluded.last_seen THEN 1 ELSE failures+1 END,"
+            "unknown_failures=CASE WHEN window_start+?<=excluded.last_seen THEN excluded.unknown_failures ELSE unknown_failures+excluded.unknown_failures END,last_seen=excluded.last_seen");
+        record.text(1, peer.ip); record.integer64(2, now); record.integer(3, peer.unknown ? 1 : 0); record.integer64(4, now);
+        record.integer(5, window); record.integer(6, window); record.integer(7, window); record.done();
+        Statement count(db_, "SELECT failures,unknown_failures FROM security_attempts WHERE ip=?"); count.text(1, peer.ip);
+        if (count.step() != SQLITE_ROW) throw std::runtime_error("cannot read login security counter");
+        const int failures = count.integer(0), unknown = count.integer(1);
+        if (failures < policy.at("failure_threshold").get<int>() && unknown < policy.at("unknown_user_threshold").get<int>()) return {};
+        Statement size(db_, "SELECT COUNT(*) FROM security_bans");
+        if (size.step() != SQLITE_ROW || size.integer(0) >= max_security_ips) return {};
+        const auto expires = now + policy.at("ban_seconds").get<int>();
+        const std::string why = unknown >= policy.at("unknown_user_threshold").get<int>() ? "unknown_account_attempts" : "failed_authentication_attempts";
+        Statement ban(db_, "INSERT OR REPLACE INTO security_bans VALUES(?,?,?,?,?,?)");
+        ban.text(1, peer.ip); ban.integer64(2, now); ban.integer64(3, expires); ban.text(4, why);
+        ban.integer(5, failures); ban.integer(6, unknown); ban.done();
+        Statement reset(db_, "DELETE FROM security_attempts WHERE ip=?"); reset.text(1, peer.ip); reset.done();
+        log("auth", "login IP banned ip=" + peer.ip + " reason=" + why + " failures=" + std::to_string(failures) +
+            " unknown_failures=" + std::to_string(unknown) + " expires_at=" + std::to_string(expires), "warn");
+        return banned_response(expires, now);
+    }
+    Json security_failure(const Json& request) {
+        auto peer = auth_peer(request);
+        std::lock_guard guard(mutex_); Transaction transaction(db_);
+        Statement account(db_, "SELECT 1 FROM users WHERE username=?"); account.text(1, peer.username);
+        // API bearer credentials do not claim an account name. They belong to
+        // the total failure pool, not the nonexistent-account threshold.
+        const bool unknown = !peer.username.empty() && account.step() != SQLITE_ROW;
+        if (const auto blocked = begin_auth(peer, unknown)) { transaction.commit(); return *blocked; }
+        const auto blocked = finish_auth(peer, false, unknown ? "unknown_account" : "invalid_credentials");
+        transaction.commit();
+        return blocked ? *blocked : Json{{"ok", false}, {"valid", false}, {"error", "invalid credentials"}};
+    }
+    Json security_view() {
+        const auto now = unix_seconds(); expire_security(now);
+        auto result = security_policy_view(); result["ok"] = true; result["bans"] = Json::array();
+        result["server_time"] = now; result["restart_required"] = false;
+        result["max_bans"] = max_security_ips;
+        Statement query(db_, "SELECT ip,banned_at,expires_at,reason,failures,unknown_failures FROM security_bans WHERE expires_at>? ORDER BY expires_at DESC,ip LIMIT 10000");
+        query.integer64(1, now);
+        for (int code; (code = query.step()) != SQLITE_DONE;) {
+            if (code != SQLITE_ROW) throw std::runtime_error("cannot list login bans");
+            result["bans"].push_back({{"ip", query.string(0)}, {"banned_at", query.integer64(1)}, {"expires_at", query.integer64(2)},
+                {"reason", query.string(3)}, {"failures", query.integer(4)}, {"unknown_failures", query.integer(5)}});
+        }
+        return result;
+    }
+    Json manage_security(const Json& request, const std::string& operation) {
+        const auto actor = lower(trim(required_string(request, request.contains("actor") ? "actor" : "username", 254)));
+        if (!valid_address(actor)) throw std::invalid_argument("invalid actor");
+        std::lock_guard guard(mutex_); Transaction transaction(db_);
+        Statement admin(db_, "SELECT admin FROM users WHERE username=?"); admin.text(1, actor);
+        if (admin.step() != SQLITE_ROW || admin.integer(0) != 1)
+            return {{"ok", false}, {"code", "administrator_required"}, {"error", "Administrator access is required."}};
+        auto invalid = [](const std::string& field) {
+            return Json{{"ok", false}, {"code", "invalid_security_policy"}, {"field", field}, {"error", "Check the login security policy fields."}};
+        };
+        if (operation == "security_policy_set") {
+            if (!request.contains("policy") || !request.at("policy").is_object()) return invalid("policy");
+            auto policy = request.at("policy");
+            const std::set<std::string> fields{"enabled", "window_seconds", "failure_threshold", "unknown_user_threshold", "ban_seconds", "allowlist"};
+            for (const auto& field : policy.items()) if (!fields.contains(field.key())) return invalid(field.key());
+            for (const auto& field : fields) if (!policy.contains(field)) return invalid(field);
+            if (!policy.at("enabled").is_boolean()) return invalid("enabled");
+            for (const auto& field : {"window_seconds", "failure_threshold", "unknown_user_threshold", "ban_seconds"}) {
+                const int maximum = std::string_view(field) == "ban_seconds" ? 604800 : (std::string_view(field) == "window_seconds" ? 86400 : 10000);
+                const auto& value = policy.at(field);
+                if (!value.is_number_integer() || (value.is_number_unsigned() && value.get<std::uint64_t>() > static_cast<unsigned>(maximum)) ||
+                    value.get<std::int64_t>() < 1 || value.get<std::int64_t>() > maximum) return invalid(field);
+            }
+            if (!policy.at("allowlist").is_array() || policy.at("allowlist").size() > 100) return invalid("allowlist");
+            std::set<std::string> entries;
+            try {
+                for (const auto& entry : policy.at("allowlist")) {
+                    if (!entry.is_string() || entry.get<std::string>().size() > 80) return invalid("allowlist");
+                    const auto value = trim(entry.get<std::string>()); const auto range = ip_range(value);
+                    entries.insert(range.address.to_string() + (value.find('/') == value.npos ? "" : "/" + std::to_string(range.prefix)));
+                }
+            } catch (const std::exception&) { return invalid("allowlist"); }
+            policy["allowlist"] = Json::array(); for (const auto& entry : entries) policy["allowlist"].push_back(entry);
+            constexpr std::int64_t maximum_revision = INT64_C(9007199254740991);
+            if (!request.contains("revision") || !request.at("revision").is_number_integer() ||
+                (request.at("revision").is_number_unsigned() && request.at("revision").get<std::uint64_t>() > maximum_revision) ||
+                request.at("revision").get<std::int64_t>() < 1) return invalid("revision");
+            const auto revision = request.at("revision").get<std::int64_t>(); const auto current = security_policy_view();
+            if (revision != current.at("revision").get<std::int64_t>()) {
+                auto result = security_view(); result["ok"] = false; result["code"] = "security_policy_conflict";
+                result["error"] = "Login security policy changed. Reload it before saving again."; transaction.commit(); return result;
+            }
+            if (policy != current.at("policy")) {
+                if (revision >= maximum_revision) return invalid("revision");
+                Statement save(db_, "UPDATE security_policy SET policy=?,revision=revision+1 WHERE id=1"); save.text(1, policy.dump()); save.done();
+                // A policy edit starts a new observation window. Active bans remain
+                // explicit until expiry or an administrator removes them.
+                execute("DELETE FROM security_attempts");
+                log("auth", "login security policy changed actor=" + audit_value(actor) + " revision=" + std::to_string(revision + 1));
+            }
+        } else if (operation == "security_unban" || operation == "security_ban") {
+            std::string ip;
+            try { ip = canonical_ip(required_string(request, "ip", 64)); } catch (const std::exception&) { return invalid("ip"); }
+            if (operation == "security_unban") {
+                Statement remove(db_, "DELETE FROM security_bans WHERE ip=?"); remove.text(1, ip); remove.done();
+                Statement clear(db_, "DELETE FROM security_attempts WHERE ip=?"); clear.text(1, ip); clear.done();
+                log("auth", "login IP unbanned ip=" + ip + " actor=" + audit_value(actor));
+            } else {
+                if (!request.contains("seconds") || !request.at("seconds").is_number_integer() ||
+                    (request.at("seconds").is_number_unsigned() && request.at("seconds").get<std::uint64_t>() > 604800) ||
+                    request.at("seconds").get<std::int64_t>() < 1 || request.at("seconds").get<std::int64_t>() > 604800) return invalid("seconds");
+                std::string reason = "administrator";
+                if (request.contains("reason")) {
+                    if (!request.at("reason").is_string()) return invalid("reason");
+                    reason = trim(request.at("reason").get<std::string>());
+                    if (reason.empty() || reason.size() > 160 || std::any_of(reason.begin(), reason.end(), [](unsigned char ch) { return ch < 32 || ch == 127; })) return invalid("reason");
+                }
+                expire_security(unix_seconds());
+                Statement size(db_, "SELECT COUNT(*) FROM security_bans WHERE ip<>?"); size.text(1, ip);
+                if (size.step() != SQLITE_ROW || size.integer(0) >= max_security_ips) return invalid("ip");
+                const auto now = unix_seconds();
+                Statement ban(db_, "INSERT OR REPLACE INTO security_bans VALUES(?,?,?,?,0,0)"); ban.text(1, ip); ban.integer64(2, now);
+                ban.integer64(3, now + request.at("seconds").get<int>()); ban.text(4, reason); ban.done();
+                log("auth", "login IP manually banned ip=" + ip + " actor=" + audit_value(actor) + " reason=" + audit_value(reason), "warn");
+            }
+        }
+        auto result = security_view(); transaction.commit(); return result;
+    }
+
     Json delete_user(const Json& request, const std::string& operation) {
         const auto username = username_from(request);
         const auto actor = lower(trim(required_string(request, "actor", 254)));
@@ -474,11 +808,15 @@ private:
     }
 
     Json verify_api_key(const Json& request) {
-        if (!request.contains("key") || !request.at("key").is_string()) return {{"ok", true}, {"valid", false}};
-        const auto key = request.at("key").get<std::string>();
-        if (!valid_api_key(key)) return {{"ok", true}, {"valid", false}};
+        auto peer = auth_peer(request);
+        const auto key = request.contains("key") && request.at("key").is_string() ? request.at("key").get<std::string>() : std::string{};
         std::lock_guard guard(mutex_);
         Transaction transaction(db_);
+        if (const auto blocked = begin_auth(peer, false)) { transaction.commit(); return *blocked; }
+        if (!valid_api_key(key)) {
+            const auto blocked = finish_auth(peer, false, "invalid_api_key"); transaction.commit();
+            return blocked ? *blocked : Json{{"ok", true}, {"valid", false}};
+        }
         const auto now = unix_seconds();
         Statement query(db_, "SELECT k.id,k.owner,k.prefix,k.audience,k.permissions FROM api_keys k JOIN users u ON u.username=k.owner "
                             "WHERE k.digest=? AND (k.audience='mailbox' OR (k.audience='admin' AND u.admin=1)) "
@@ -486,12 +824,16 @@ private:
         query.bytes(1, api_key_digest(key)); query.integer64(2, now);
         const auto code = query.step();
         if (code != SQLITE_ROW && code != SQLITE_DONE) throw std::runtime_error("cannot verify API key");
-        if (code != SQLITE_ROW) return {{"ok", true}, {"valid", false}};
+        if (code != SQLITE_ROW) {
+            const auto blocked = finish_auth(peer, false, "invalid_api_key"); transaction.commit();
+            return blocked ? *blocked : Json{{"ok", true}, {"valid", false}};
+        }
         const auto id = query.string(0), owner = query.string(1), prefix = query.string(2);
         const auto audience = query.string(3); const auto permissions = Json::parse(query.string(4));
         if (!api_permissions_valid(permissions, audience)) throw std::runtime_error("invalid stored API key permissions");
         Statement used(db_, "UPDATE api_keys SET last_used_at=? WHERE id=?");
         used.integer64(1, now); used.text(2, id); used.done();
+        peer.username = owner; finish_auth(peer, true, "api_key");
         transaction.commit();
         return {{"ok", true}, {"valid", true}, {"username", owner}, {"admin", audience == "admin"},
                 {"audience", audience}, {"permissions", permissions}, {"id", id}, {"prefix", prefix}};
@@ -730,27 +1072,19 @@ private:
     }
 
     Json verify(const Json& request) {
-        const auto username = username_from(request);
-        const auto password = required_string(request, "password", static_cast<std::size_t>(max_password_));
-        {
-            // Shared across SMTP/POP3/IMAP/Web, with bounded state and hash work.
-            std::lock_guard guard(rate_mutex_);
-            const auto now = std::chrono::steady_clock::now();
-            std::erase_if(attempts_, [now](const auto& item) { return item.second.expires <= now; });
-            if (global_attempts_.expires <= now) global_attempts_ = {now + std::chrono::minutes(1), 0};
-            if (global_attempts_.count >= 600 || (!attempts_.contains(username) && attempts_.size() >= 10000))
-                return {{"ok",false},{"error","authentication rate limit"}};
-            auto& rate = attempts_[username];
-            if (rate.expires <= now) rate = {now + std::chrono::minutes(1), 0};
-            if (rate.count >= 30) return {{"ok",false},{"error","authentication rate limit"}};
-            ++rate.count;
-            ++global_attempts_.count;
-        }
+        auto peer = auth_peer(request);
+        if (peer.username.empty() || peer.username.size() > 254 || !valid_address(peer.username) ||
+            !request.contains("password") || !request.at("password").is_string() || request.at("password").get_ref<const std::string&>().empty() ||
+            request.at("password").get_ref<const std::string&>().size() > static_cast<std::size_t>(max_password_))
+            return security_failure(request);
+        const auto username = peer.username, password = request.at("password").get<std::string>();
         std::string salt_value = dummy_salt_, expected(32, '\0');
         int iterations = rounds_;
         bool found = false, admin = false;
         {
             std::lock_guard guard(mutex_);
+            // The active ban is checked before account lookup or password work.
+            if (const auto banned = active_ban(peer, unix_seconds())) return *banned;
             Statement query(db_, "SELECT salt,password_hash,iterations,admin FROM users WHERE username=?");
             query.text(1, username);
             const auto code = query.step();
@@ -760,11 +1094,38 @@ private:
                 if (salt_value.size() != 16 || expected.size() != 32 || iterations < 600000 || iterations > 2000000)
                     throw std::runtime_error("invalid stored password record");
             } else if (code != SQLITE_DONE) throw std::runtime_error("cannot verify credentials");
+            if (const auto blocked = begin_auth(peer, !found)) return *blocked;
         }
-        const auto computed = password_hash(password, salt_value, iterations);
+        bool rate_limited = false;
+        {
+            // Shared across SMTP/POP3/IMAP/Web, with bounded state and hash work.
+            std::lock_guard guard(rate_mutex_);
+            const auto now = std::chrono::steady_clock::now();
+            std::erase_if(attempts_, [now](const auto& item) { return item.second.expires <= now; });
+            if (global_attempts_.expires <= now) global_attempts_ = {now + std::chrono::minutes(1), 0};
+            if (global_attempts_.count >= 600 || (!attempts_.contains(username) && attempts_.size() >= 10000)) rate_limited = true;
+            else {
+                auto& rate = attempts_[username];
+                if (rate.expires <= now) rate = {now + std::chrono::minutes(1), 0};
+                if (rate.count >= 30) rate_limited = true;
+                else { ++rate.count; ++global_attempts_.count; }
+            }
+        }
+        if (rate_limited) {
+            std::lock_guard guard(mutex_);
+            Transaction transaction(db_); const auto blocked = finish_auth(peer, false, "hash_rate_limit"); transaction.commit();
+            return blocked ? *blocked : Json{{"ok", false}, {"code", "rate_limit"}, {"retry_after", 60}, {"error", "authentication rate limit"}};
+        }
+        std::string computed;
+        try { computed = password_hash(password, salt_value, iterations); }
+        catch (...) { std::lock_guard guard(mutex_); release_auth(peer); throw; }
         const auto matches = secure_equal(computed, expected);
+        {
+            std::lock_guard guard(mutex_); Transaction transaction(db_);
+            const auto blocked = finish_auth(peer, found && matches, found ? (matches ? "password" : "invalid_credentials") : "unknown_account");
+            transaction.commit(); if (blocked) return *blocked;
+        }
         if (!found || !matches) {
-            log("auth","authentication failed: " + username,"warn");
             return {{"ok", false}, {"error", "invalid credentials"}};
         }
         if (iterations < rounds_) {
