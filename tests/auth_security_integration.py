@@ -144,9 +144,11 @@ def run(s):
     assert s.rpc("auth", op="security_ban", actor=ADMIN, ip=permanent_ip, permanent=False, seconds=60)["ok"]
     assert s.rpc("auth", op="security_ban", actor=ADMIN, ip=permanent_ip, permanent=True)["ok"]
     blocked(failure(s, permanent_ip), permanent=True)
-    assert s.rpc("auth", op="security_ban", actor=ADMIN, ip=permanent_ip, seconds=1)["ok"]
+    # Expiry uses integer Unix seconds; one second can elapse at the next
+    # clock tick before the following RPC, especially on a Debug runner.
+    assert s.rpc("auth", op="security_ban", actor=ADMIN, ip=permanent_ip, seconds=3)["ok"]
     blocked(failure(s, permanent_ip))
-    time.sleep(1.1)
+    time.sleep(3.1)
     assert s.rpc("auth", op="verify", peer_ip=permanent_ip, protocol="imap", username=USER, password=PASSWORD)["ok"]
     print("PASS permanent manual bans survive expiry sweeps/restarts, override allowlists, reject invalid edits, and recover by unban or timed replacement", flush=True)
     assert not s.rpc("auth", op="security_ban", actor=ADMIN, ip="127.0.0.1:25", seconds=2)["ok"]
@@ -200,9 +202,9 @@ def run(s):
     assert not result["ok"] and result["field"] == "ip", result
     blocked(s.rpc("auth", op="verify", peer_ip="10.99.0.1", protocol="imap", username=USER, password=PASSWORD), permanent=True)
     # Updating a full pool's existing address does not consume another slot.
-    result = s.rpc("auth", op="security_ban", actor=ADMIN, ip="10.99.0.1", seconds=1)
+    result = s.rpc("auth", op="security_ban", actor=ADMIN, ip="10.99.0.1", seconds=3)
     assert result["ok"] and len(result["bans"]) == 10000, result
-    time.sleep(1.1)
+    time.sleep(3.1)
     result = s.rpc("auth", op="security_ban", actor=ADMIN, ip="192.0.2.250", permanent=True)
     assert result["ok"] and len(result["bans"]) == 10000, result
     assert s.rpc("auth", op="security_unban", actor=ADMIN, ip="192.0.2.250")["ok"]
