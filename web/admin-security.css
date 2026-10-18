@@ -7,6 +7,10 @@
 .security-field>label { display:block; margin:0 0 11px; font-size:13px; line-height:1.6; }
 .security-field>input,.security-field>textarea { margin:0; width:100%; }
 .security-policy-grid input { max-width:260px; }
+.security-duration-controls { display:flex; gap:10px; max-width:320px; align-items:stretch; }
+.security-duration-controls>input { width:0; min-width:90px; flex:1 1 140px; margin:0; }
+.security-duration-controls>select { width:auto; flex:0 0 128px; min-width:0; margin:0; }
+.security-duration-hint { max-width:42ch; margin:9px 0 0; font-size:12px; line-height:1.6; }
 .security-policy form>.security-field { max-width:850px; }
 .security-policy textarea { min-height:112px; font:13px/1.7 Consolas,monospace; resize:vertical; }
 .security-policy form>.field-hint { max-width:90ch; margin:11px 0 0; }
@@ -32,7 +36,9 @@
 .security-manual { margin:28px 0 0; padding:22px 26px; }
 .security-manual[open]>summary { margin-bottom:20px; }
 .security-manual>.field-hint { max-width:90ch; margin:0 0 22px; }
-.security-manual-form { display:grid; grid-template-columns:minmax(170px,1fr) minmax(140px,.7fr) minmax(170px,1fr); gap:24px; align-items:end; }
+.security-manual-form { display:grid; grid-template-columns:minmax(170px,1fr) minmax(220px,1fr) minmax(170px,1fr); gap:24px; align-items:start; }
+.security-manual-timing { min-width:0; }
+.security-permanent { grid-column:1 / -1; margin:0; min-height:22px; }
 .security-manual-form>.button { justify-self:start; min-height:44px; }
 @media(max-width:900px) {
   .security-manual-form { grid-template-columns:repeat(2,minmax(0,1fr)); }
@@ -41,6 +47,7 @@
   .security-policy { padding:22px 20px; }
   .security-policy-grid { grid-template-columns:1fr; gap:22px; }
   .security-policy-grid input { max-width:none; }
+  .security-duration-controls { max-width:none; }
   .security-policy-actions { align-items:stretch; }
   .security-policy-actions>p { flex-basis:100%; }
   .security-policy-actions>.button { flex:1 1 160px; }

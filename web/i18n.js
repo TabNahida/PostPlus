@@ -1016,6 +1016,25 @@ window.PostPlusI18n = (() => {
     "Login security":"登录安全",
     "Review login attempts in Service logs and limit repeated authentication failures from the same IP.":"可在服务日志中查看登录尝试，并限制同一 IP 反复进行失败的身份验证。",
     "Automatic protection":"自动防护",
+    "Observation window":"观察窗口",
+    "Temporary block duration":"临时封禁时长",
+    "Block duration":"封禁时长",
+    "Seconds":"秒",
+    "Minutes":"分钟",
+    "Hours":"小时",
+    "Days":"天",
+    "{field} unit":"{field}单位",
+    "Use 1 second to 1 day, in whole seconds.":"可设置 1 秒至 1 天，换算后须为整秒。",
+    "Use 1 second to 7 days, in whole seconds.":"可设置 1 秒至 7 天，换算后须为整秒。",
+    "Equivalent to {seconds} seconds.":"相当于 {seconds} 秒。",
+    "Choose valid durations within the displayed limits, in whole seconds.":"请在显示的范围内设置有效时长，换算后须为整秒。",
+    "IP blocks":"IP 封禁",
+    "Timed blocks expire automatically. Permanent blocks remain until unblocked. Unblocking also clears the IP's recorded failures.":"限时封禁到期后自动移除，永久封禁需手动解封。解封同时会清除此 IP 的失败计数。",
+    "Block authentication for one exact IP address, including allowlisted IPs. Choose a duration or a permanent block. Existing sessions and incoming delivery continue working.":"对单个完整 IP 地址封禁登录，包括白名单内 IP。可指定时长或永久封禁，不影响现有会话和入站邮件投递。",
+    "Permanent block":"永久封禁",
+    "Permanent":"永久",
+    "IP permanently blocked.":"IP 已被永久封禁。",
+    "Policy and IP blocks loaded.":"已加载安全策略和 IP 封禁列表。",
     "Temporarily block new authentication when an IP reaches either failure threshold within the observation window. Existing mail sessions continue working.":"当同一 IP 在观察窗口内达到任一失败阈值时，暂时封禁新的身份验证。现有邮件会话继续工作。",
     "Enable automatic login protection":"启用登录自动防护",
     "Observation window (seconds)":"观察窗口（秒）",
@@ -1066,10 +1085,11 @@ window.PostPlusI18n = (() => {
     "Manage security policy and IP bans":"管理安全策略和 IP 封禁",
     "Check the login security policy fields.":"请检查登录安全策略字段。",
     "Login security policy changed. Reload it before saving again.":"登录安全策略已更改，请重新加载后再保存。",
-    "Authentication temporarily blocked. Try again later.":"登录暂时被封禁，请稍后重试。"
+    "Authentication temporarily blocked. Try again later.":"登录暂时被封禁，请稍后重试。",
+    "Authentication blocked. Contact the administrator to restore access.":"登录已被封禁，请联系管理员恢复访问。"
   });
   function error(data) {
-    if(data?.code==="ip_banned")return t("Authentication temporarily blocked. Try again later.");
+    if(data?.code==="ip_banned")return t(data.permanent===true?"Authentication blocked. Contact the administrator to restore access.":"Authentication temporarily blocked. Try again later.");
     if(data?.code==="invalid_security_policy")return t("Check the login security policy fields.");
     if(data?.code==="security_policy_conflict")return t("Login security policy changed. Reload it before saving again.");
     if(data?.code==="unknown_destination" || data?.code==="nonlocal_destination")return t("Choose an existing mailbox in this server's domain.");

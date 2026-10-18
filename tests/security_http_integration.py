@@ -31,6 +31,10 @@ def run(s):
     assert request("PUT", "/policy", {"policy": policy, "revision": current["revision"]}, {"Cookie": session["Cookie"]})[0] == 403
     assert request("POST", "/ban", {"ip": "bad address", "seconds": 60})[0] == 400
     assert request("POST", "/ban", {"ip": "192.0.2.99", "seconds": 60, "actor": admin})[0] == 400
+    for body in ({"ip": "192.0.2.99", "permanent": "true"},
+                 {"ip": "192.0.2.99", "permanent": True, "seconds": 60},
+                 {"ip": "192.0.2.99", "permanent": False}):
+        assert request("POST", "/ban", body)[0] == 400, body
 
     # Client-controlled JSON and forwarding headers cannot replace the socket peer.
     spoof = {"X-Forwarded-For": "198.51.100.77", "Forwarded": "for=203.0.113.8"}
@@ -46,7 +50,7 @@ def run(s):
     status, _, view = request()
     assert status == 200, "An existing administrator session must remain available to recover/unban."
     ban = next(item for item in view["bans"] if item["ip"] == "127.0.0.1")
-    assert ban["unknown_failures"] >= 3 and ban["expires_at"] > ban["banned_at"]
+    assert ban["unknown_failures"] >= 3 and ban["expires_at"] > ban["banned_at"] and ban["permanent"] is False
     assert all(item["ip"] not in ("198.51.100.77", "203.0.113.8") for item in view["bans"])
     assert request("POST", "/unban", {"ip": "127.0.0.1"})[0] == 200
 
@@ -58,6 +62,25 @@ def run(s):
     assert request(headers=rw)[0] == 403
     assert request("POST", "/ban", {"ip": "192.0.2.99", "seconds": 60, "reason": "Synthetic admin ban"}, rw)[0] == 200
     assert request("POST", "/unban", {"ip": "192.0.2.99"}, rw)[0] == 200
+    status, _, result = request("POST", "/ban", {"ip": "127.0.0.1", "permanent": True, "reason": "Permanent HTTP test"}, rw)
+    assert status == 200, result
+    ban = next(item for item in result["bans"] if item["ip"] == "127.0.0.1")
+    assert ban["permanent"] is True and ban["expires_at"] is None, ban
+    # Existing cookie sessions remain a recovery path; new passwords and API keys stay blocked.
+    assert request()[0] == 200
+    for service in ("web", "admin"):
+        status, headers, result = s.http(service, "POST", "/api/login", {"username": admin, "password": PASSWORD})
+        assert status == 429 and result["code"] == "ip_banned" and result["permanent"] is True, (status, result)
+        assert "retry_after" not in result and "Retry-After" not in headers
+    status, headers, result = request(headers=ro)
+    assert status == 429 and result["permanent"] is True and "retry_after" not in result
+    assert "Retry-After" not in headers
+    s.stop("auth"); s.start("auth")
+    status, headers, result = request(headers=rw)
+    assert status == 429 and result["permanent"] is True and "Retry-After" not in headers
+    assert request("POST", "/unban", {"ip": "127.0.0.1"})[0] == 200
+    assert request(headers=ro)[0] == 200
+    print("PASS permanent bans require explicit valid input, block passwords/API keys without a finite retry time, survive restart, and permit cookie-session recovery", flush=True)
     status, user_headers, _ = s.http("admin", "POST", "/api/login", {"username": user, "password": PASSWORD})
     assert status == 403
     status, user_headers, _ = s.http("web", "POST", "/api/login", {"username": user, "password": PASSWORD})

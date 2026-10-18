@@ -24,7 +24,7 @@ def connect(suite, name, encrypted=False):
     return sock, sock.makefile("rb")
 
 
-def imap_attempt(suite, username, password, banned=False, encrypted=False):
+def imap_attempt(suite, username, password, banned=False, encrypted=False, permanent=False):
     sock, stream = connect(suite, "imaps" if encrypted else "imap", encrypted)
     try:
         assert stream.readline().startswith(b"* OK")
@@ -32,6 +32,8 @@ def imap_attempt(suite, username, password, banned=False, encrypted=False):
         response = stream.readline()
         if banned:
             assert response.startswith(b"a NO [UNAVAILABLE]"), response
+            if permanent:
+                assert b"contact administrator" in response and b"try again later" not in response, response
             assert stream.readline().startswith(b"* BYE")
             assert stream.readline() == b""
         else:
@@ -41,7 +43,7 @@ def imap_attempt(suite, username, password, banned=False, encrypted=False):
         sock.close()
 
 
-def pop3_attempt(suite, username, password, banned=False, encrypted=False):
+def pop3_attempt(suite, username, password, banned=False, encrypted=False, permanent=False):
     sock, stream = connect(suite, "pop3s" if encrypted else "pop3", encrypted)
     try:
         assert stream.readline().startswith(b"+OK")
@@ -50,6 +52,8 @@ def pop3_attempt(suite, username, password, banned=False, encrypted=False):
         sock.sendall(f"PASS {password}\r\n".encode())
         response = stream.readline()
         assert response.startswith(b"-ERR [LOGIN-DELAY]" if banned else b"-ERR [AUTH]"), response
+        if permanent:
+            assert b"contact administrator" in response and b"try again later" not in response, response
         if banned:
             assert stream.readline() == b""
     finally:
@@ -57,7 +61,7 @@ def pop3_attempt(suite, username, password, banned=False, encrypted=False):
         sock.close()
 
 
-def smtp_attempt(suite, username, password, banned=False, encrypted=False):
+def smtp_attempt(suite, username, password, banned=False, encrypted=False, permanent=False):
     if encrypted:
         context = ssl.create_default_context(cafile=str(ROOT / "tests/fixtures/localhost-test-only.crt"))
         connection = smtplib.SMTP_SSL("localhost", suite.ports["smtps"], local_hostname="localhost", context=context, timeout=10)
@@ -66,8 +70,10 @@ def smtp_attempt(suite, username, password, banned=False, encrypted=False):
     with connection as client:
         client.ehlo()
         payload = base64.b64encode(f"\0{username}\0{password}".encode()).decode()
-        code, _ = client.docmd("AUTH", "PLAIN " + payload)
+        code, response = client.docmd("AUTH", "PLAIN " + payload)
         assert code == (421 if banned else 535), code
+        if permanent:
+            assert b"contact administrator" in response and b"try again later" not in response, response
         if banned:
             assert client.file.readline() == b""
 
@@ -196,6 +202,22 @@ def run(suite):
         client.ehlo()
         assert client.login(USER, PASSWORD)[0] == 235
     print("PASS temporary bans expire automatically and permit a correct password", flush=True)
+
+    # Manual permanent bans share the same protocol boundary and survive restarts.
+    result = suite.rpc("auth", op="security_ban", actor=USER, ip="127.0.0.1", permanent=True)
+    assert result["ok"] and any(row["permanent"] and row["expires_at"] is None for row in result["bans"]), result
+    suite.stop("auth"); suite.start("auth")
+    for encrypted in (False, True):
+        imap_attempt(suite, USER, PASSWORD, banned=True, encrypted=encrypted, permanent=True)
+        pop3_attempt(suite, USER, PASSWORD, banned=True, encrypted=encrypted, permanent=True)
+        smtp_attempt(suite, USER, PASSWORD, banned=True, encrypted=encrypted, permanent=True)
+    with smtplib.SMTP("127.0.0.1", suite.ports["smtp"], local_hostname="localhost", timeout=10) as client:
+        assert client.sendmail("remote@example.net", [USER], b"Subject: incoming while permanently banned\r\n\r\nbody\r\n") == {}
+    unban(suite)
+    with smtplib.SMTP("127.0.0.1", suite.ports["smtp"], local_hostname="localhost", timeout=10) as client:
+        client.ehlo()
+        assert client.login(USER, PASSWORD)[0] == 235
+    print("PASS permanent bans block valid logins across SMTP/IMAP/POP3 and TLS, preserve inbound mail, and recover after unban", flush=True)
 
     # Read durable structured logs as well as stdout: never store passwords,
     # service authorization tokens or complete SASL payloads in audit entries.

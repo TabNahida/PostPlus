@@ -64,7 +64,8 @@ void pop3(Connection& c, const Config& cfg) {
     auto banned = [&](const Json& result) {
         const auto code = result.value("code", "");
         if (code != "ip_banned" && code != "rate_limit") return false;
-        c.write("-ERR [LOGIN-DELAY] Too many authentication attempts; try again later\r\n"); return true;
+        c.write(result.value("permanent", false) ? "-ERR [LOGIN-DELAY] IP address blocked; contact administrator\r\n" :
+                                                  "-ERR [LOGIN-DELAY] Too many authentication attempts; try again later\r\n"); return true;
     };
     auto malformed_auth = [&](const std::string& username = "") {
         return banned(rpc(cfg, "auth", {{"op", "security_failure"}, {"peer_ip", peer_ip}, {"protocol", "pop3"}, {"username", username}, {"reason", "malformed_auth"}}));

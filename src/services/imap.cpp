@@ -605,7 +605,10 @@ void imap(Connection& c, const Config& cfg) {
                     }
                 }
                 auto result = rpc(cfg, "auth", {{"op", "verify"}, {"username", candidate}, {"password", password}, {"session", true}, {"peer_ip", peer_ip}, {"protocol", "imap"}});
-                if (const auto code = result.value("code", ""); code == "ip_banned" || code == "rate_limit") { c.write(tag + " NO [UNAVAILABLE] Too many authentication attempts; try again later\r\n* BYE Authentication temporarily unavailable\r\n"); return; }
+                if (const auto code = result.value("code", ""); code == "ip_banned" || code == "rate_limit") {
+                    c.write(tag + (result.value("permanent", false) ? " NO [UNAVAILABLE] IP address blocked; contact administrator\r\n* BYE Authentication blocked\r\n" :
+                                                                     " NO [UNAVAILABLE] Too many authentication attempts; try again later\r\n* BYE Authentication temporarily unavailable\r\n")); return;
+                }
                 if (!result.value("ok", false)) {
                     c.write(tag + " NO [AUTHENTICATIONFAILED] Invalid credentials\r\n");
                     if (++auth_failures >= auth_limit) { c.write("* BYE Too many failed authentication attempts\r\n"); return; }
@@ -923,7 +926,10 @@ void imap(Connection& c, const Config& cfg) {
             if (authentication_payload) {
                 try {
                     const auto result = rpc(cfg, "auth", {{"op", "security_failure"}, {"peer_ip", peer_ip}, {"protocol", "imap"}, {"reason", "malformed_auth"}});
-                    if (const auto code = result.value("code", ""); code == "ip_banned" || code == "rate_limit") { c.write(tag + " NO [UNAVAILABLE] Too many authentication attempts; try again later\r\n* BYE Authentication temporarily unavailable\r\n"); return; }
+                    if (const auto code = result.value("code", ""); code == "ip_banned" || code == "rate_limit") {
+                        c.write(tag + (result.value("permanent", false) ? " NO [UNAVAILABLE] IP address blocked; contact administrator\r\n* BYE Authentication blocked\r\n" :
+                                                                         " NO [UNAVAILABLE] Too many authentication attempts; try again later\r\n* BYE Authentication temporarily unavailable\r\n")); return;
+                    }
                 } catch (const std::exception&) { c.write(tag + " NO Temporary service failure\r\n"); continue; }
                 if (++auth_failures >= auth_limit) { c.write(tag + " BAD " + error.what() + "\r\n* BYE Too many failed authentication attempts\r\n"); return; }
             }

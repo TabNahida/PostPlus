@@ -99,6 +99,10 @@ const adminAppearance=appearanceFixture({portal:"admin"});adminAppearance.api.up
 assert.equal(adminAppearance.storage.has("postplus.admin.preferences"),true);assert.equal(adminAppearance.storage.has("postplus.webmail.preferences"),false);
 
 const chinese = fixture("zh-CN").i18n;
+assert.equal(chinese.error({code:"ip_banned",permanent:true}),"登录已被封禁，请联系管理员恢复访问。");
+assert.equal(chinese.error({code:"ip_banned",permanent:false,retry_after:60}),"登录暂时被封禁，请稍后重试。");
+assert.equal(chinese.error({code:"ip_banned",retry_after:60}),"登录暂时被封禁，请稍后重试。","Legacy temporary ban errors remain unchanged");
+assert.equal(fresh.i18n.error({code:"ip_banned",permanent:true}),"Authentication blocked. Contact the administrator to restore access.");
 assert.equal(chinese.error({error:"The email address or password is incorrect."}), "邮箱地址或密码错误。");
 assert.equal(chinese.error({code:"invalid_api_key",error:"private detail"}),"请检查 API 密钥名称或有效期后重试。");
 assert.equal(chinese.error({code:"api_key_not_found"}),"找不到此 API 密钥，请刷新密钥列表。");

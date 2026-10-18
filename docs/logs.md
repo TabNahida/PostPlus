@@ -5,6 +5,11 @@ first. Filter by service or level and search event text, timestamps, service
 names, levels or process IDs. **Load more** reads older retained events; it
 also continues a sparse search if the per-request scan budget is reached.
 
+The log table grows with the viewport height and uses compact rows so more
+events remain visible. Its header stays in place while scrolling, and long
+event text wraps. Filters and **Load more** remain available above and below
+the table; short screens can scroll the page as needed.
+
 Select `auth` and search an IP to inspect authentication successes, failures,
 blocked attempts and ban changes. Entries include the protocol and attempted
 account without credentials. See [login security and IP bans](security.md).

@@ -103,11 +103,17 @@ void smtp(Connection& c, const Config& cfg, std::chrono::seconds data_timeout, b
                     } else { reply("504 5.5.4 Unsupported authentication mechanism\r\n"); continue; }
                 } catch (const std::exception&) {
                     const auto result = rpc(cfg, "auth", {{"op", "security_failure"}, {"peer_ip", peer_ip}, {"protocol", "smtp"}, {"username", user}, {"reason", "malformed_auth"}});
-                    if (const auto code = result.value("code", ""); code == "ip_banned" || code == "rate_limit") { reply("421 4.7.0 Too many authentication attempts; try again later\r\n"); return; }
+                    if (const auto code = result.value("code", ""); code == "ip_banned" || code == "rate_limit") {
+                        reply(result.value("permanent", false) ? "421 4.7.0 IP address blocked; contact administrator\r\n" :
+                                                                "421 4.7.0 Too many authentication attempts; try again later\r\n"); return;
+                    }
                     if (auth_failure("501 5.5.2 Invalid authentication encoding\r\n")) return; continue;
                 }
                 auto result = rpc(cfg, "auth", {{"op", "verify"}, {"username", user}, {"password", password}, {"session", true}, {"peer_ip", peer_ip}, {"protocol", "smtp"}});
-                if (const auto code = result.value("code", ""); code == "ip_banned" || code == "rate_limit") { reply("421 4.7.0 Too many authentication attempts; try again later\r\n"); return; }
+                if (const auto code = result.value("code", ""); code == "ip_banned" || code == "rate_limit") {
+                    reply(result.value("permanent", false) ? "421 4.7.0 IP address blocked; contact administrator\r\n" :
+                                                            "421 4.7.0 Too many authentication attempts; try again later\r\n"); return;
+                }
                 if (!result.value("ok", false)) { if (auth_failure("535 5.7.8 Invalid credentials\r\n")) return; continue; }
                 username = result.value("username", user); credential_version = result.at("credential_version").get<std::string>(); reply("235 2.7.0 Authentication successful\r\n"); continue;
             }

@@ -25,25 +25,25 @@ SHA-256 value against its entry before extracting it:
 
 ```powershell
 # Windows PowerShell
-Get-FileHash .\postplus-0.4.1-windows-x64.zip -Algorithm SHA256
-Expand-Archive .\postplus-0.4.1-windows-x64.zip -DestinationPath .
-Set-Location .\postplus-0.4.1
+Get-FileHash .\postplus-0.4.2-windows-x64.zip -Algorithm SHA256
+Expand-Archive .\postplus-0.4.2-windows-x64.zip -DestinationPath .
+Set-Location .\postplus-0.4.2
 .\postplus.exe
 ```
 
 ```sh
 # Linux
-sha256sum postplus-0.4.1-linux-x86_64.tar.gz
-tar -xzf postplus-0.4.1-linux-x86_64.tar.gz
-cd postplus-0.4.1
+sha256sum postplus-0.4.2-linux-x86_64.tar.gz
+tar -xzf postplus-0.4.2-linux-x86_64.tar.gz
+cd postplus-0.4.2
 ./postplus
 ```
 
 ```sh
 # macOS
-shasum -a 256 postplus-0.4.1-macosx-arm64.tar.gz
-tar -xzf postplus-0.4.1-macosx-arm64.tar.gz
-cd postplus-0.4.1
+shasum -a 256 postplus-0.4.2-macosx-arm64.tar.gz
+tar -xzf postplus-0.4.2-macosx-arm64.tar.gz
+cd postplus-0.4.2
 ./postplus
 ```
 

@@ -36,15 +36,17 @@ struct ApiError : std::runtime_error {
     int status;
     std::int64_t retry_after;
     std::string code;
-    ApiError(int status, const std::string& message, std::int64_t retry_after = 0, std::string code = {})
-        : std::runtime_error(message), status(status), retry_after(retry_after), code(std::move(code)) {}
+    bool permanent;
+    ApiError(int status, const std::string& message, std::int64_t retry_after = 0, std::string code = {}, bool permanent = false)
+        : std::runtime_error(message), status(status), retry_after(retry_after), code(std::move(code)), permanent(permanent) {}
 };
 HttpResponse api_error_response(const ApiError& error) {
     Json body{{"ok",false},{"error",error.what()}};
     if (!error.code.empty()) body["code"]=error.code;
+    if (error.code=="ip_banned") body["permanent"]=error.permanent;
     if (error.retry_after>0) body["retry_after"]=error.retry_after;
     auto response=json_response(body,error.status);
-    if (error.status==429) response.headers["Retry-After"]=std::to_string(error.retry_after>0?error.retry_after:60);
+    if (error.status==429 && !error.permanent) response.headers["Retry-After"]=std::to_string(error.retry_after>0?error.retry_after:60);
     return response;
 }
 
@@ -576,9 +578,12 @@ private:
     }
 
     static void reject_auth_throttled(const Json& result) {
-        if (result.value("code", std::string{}) == "ip_banned")
-            throw ApiError(429, "Too many authentication attempts. This IP address is temporarily blocked. Try again later.",
-                result.value("retry_after",INT64_C(60)), "ip_banned");
+        if (result.value("code", std::string{}) == "ip_banned") {
+            const bool permanent = result.value("permanent", false);
+            throw ApiError(429, permanent ? "This IP address is blocked. Contact the administrator to restore access." :
+                                           "Too many authentication attempts. This IP address is temporarily blocked. Try again later.",
+                permanent ? INT64_C(0) : result.value("retry_after",INT64_C(60)), "ip_banned", permanent);
+        }
         if (result.value("code", std::string{}) == "rate_limit")
             throw ApiError(429, "Too many authentication attempts. Try again later.",
                 result.value("retry_after",INT64_C(60)), "rate_limit");
@@ -825,7 +830,7 @@ private:
                     } else if (path == "/api/admin/security/unban" && request.method == "POST") {
                         command["op"]="security_unban"; allowed={"ip"};
                     } else if (path == "/api/admin/security/ban" && request.method == "POST") {
-                        command["op"]="security_ban"; allowed={"ip","seconds","reason"};
+                        command["op"]="security_ban"; allowed={"ip","seconds","permanent","reason"};
                     } else throw ApiError(405,"Unsupported security operation.");
                     for (const auto& [name,value] : input.items()) {
                         if (!allowed.contains(name)) throw ApiError(400,"Unexpected security field.");

@@ -422,14 +422,14 @@ private:
         return false;
     }
     void expire_security(std::int64_t now) {
-        Statement query(db_, "SELECT ip FROM security_bans WHERE expires_at<=? LIMIT 1000"); query.integer64(1, now);
+        Statement query(db_, "SELECT ip FROM security_bans WHERE expires_at>0 AND expires_at<=? LIMIT 1000"); query.integer64(1, now);
         std::vector<std::string> expired;
         for (int code; (code = query.step()) != SQLITE_DONE;) {
             if (code != SQLITE_ROW) throw std::runtime_error("cannot expire login bans");
             expired.push_back(query.string(0));
         }
         for (const auto& ip : expired) {
-            Statement remove(db_, "DELETE FROM security_bans WHERE ip=? AND expires_at<=?");
+            Statement remove(db_, "DELETE FROM security_bans WHERE ip=? AND expires_at>0 AND expires_at<=?");
             remove.text(1, ip); remove.integer64(2, now); remove.done();
             log("auth", "login ban expired ip=" + ip);
         }
@@ -437,13 +437,16 @@ private:
         prune.integer64(1, now - security_policy_view().at("policy").at("window_seconds").get<int>()); prune.done();
     }
     static Json banned_response(std::int64_t expires, std::int64_t now) {
-        return {{"ok", false}, {"valid", false}, {"code", "ip_banned"},
-            {"retry_after", std::max<std::int64_t>(1, expires - now)},
-            {"error", "Authentication temporarily blocked. Try again later."}};
+        const bool permanent = expires == 0;
+        Json result{{"ok", false}, {"valid", false}, {"code", "ip_banned"}, {"permanent", permanent},
+            {"error", permanent ? "Authentication blocked. Contact the administrator to restore access." :
+                                  "Authentication temporarily blocked. Try again later."}};
+        if (!permanent) result["retry_after"] = std::max<std::int64_t>(1, expires - now);
+        return result;
     }
     std::optional<Json> active_ban(const AuthPeer& peer, std::int64_t now) {
         if (peer.ip.empty()) return {};
-        Statement query(db_, "SELECT expires_at FROM security_bans WHERE ip=? AND expires_at>?");
+        Statement query(db_, "SELECT expires_at FROM security_bans WHERE ip=? AND (expires_at=0 OR expires_at>?)");
         query.text(1, peer.ip); query.integer64(2, now);
         if (query.step() != SQLITE_ROW) return {};
         auth_audit(peer, "blocked", "ip_banned");
@@ -555,11 +558,13 @@ private:
         auto result = security_policy_view(); result["ok"] = true; result["bans"] = Json::array();
         result["server_time"] = now; result["restart_required"] = false;
         result["max_bans"] = max_security_ips;
-        Statement query(db_, "SELECT ip,banned_at,expires_at,reason,failures,unknown_failures FROM security_bans WHERE expires_at>? ORDER BY expires_at DESC,ip LIMIT 10000");
+        Statement query(db_, "SELECT ip,banned_at,expires_at,reason,failures,unknown_failures FROM security_bans WHERE expires_at=0 OR expires_at>? ORDER BY (expires_at=0) DESC,expires_at DESC,ip LIMIT 10000");
         query.integer64(1, now);
         for (int code; (code = query.step()) != SQLITE_DONE;) {
             if (code != SQLITE_ROW) throw std::runtime_error("cannot list login bans");
-            result["bans"].push_back({{"ip", query.string(0)}, {"banned_at", query.integer64(1)}, {"expires_at", query.integer64(2)},
+            const bool permanent = query.integer64(2) == 0;
+            result["bans"].push_back({{"ip", query.string(0)}, {"banned_at", query.integer64(1)},
+                {"permanent", permanent}, {"expires_at", permanent ? Json(nullptr) : Json(query.integer64(2))},
                 {"reason", query.string(3)}, {"failures", query.integer(4)}, {"unknown_failures", query.integer(5)}});
         }
         return result;
@@ -622,9 +627,12 @@ private:
                 Statement clear(db_, "DELETE FROM security_attempts WHERE ip=?"); clear.text(1, ip); clear.done();
                 log("auth", "login IP unbanned ip=" + ip + " actor=" + audit_value(actor));
             } else {
-                if (!request.contains("seconds") || !request.at("seconds").is_number_integer() ||
+                if (request.contains("permanent") && !request.at("permanent").is_boolean()) return invalid("permanent");
+                const bool permanent = request.value("permanent", false);
+                if (permanent && request.contains("seconds")) return invalid("seconds");
+                if (!permanent && (!request.contains("seconds") || !request.at("seconds").is_number_integer() ||
                     (request.at("seconds").is_number_unsigned() && request.at("seconds").get<std::uint64_t>() > 604800) ||
-                    request.at("seconds").get<std::int64_t>() < 1 || request.at("seconds").get<std::int64_t>() > 604800) return invalid("seconds");
+                    request.at("seconds").get<std::int64_t>() < 1 || request.at("seconds").get<std::int64_t>() > 604800)) return invalid("seconds");
                 std::string reason = "administrator";
                 if (request.contains("reason")) {
                     if (!request.at("reason").is_string()) return invalid("reason");
@@ -636,8 +644,10 @@ private:
                 if (size.step() != SQLITE_ROW || size.integer(0) >= max_security_ips) return invalid("ip");
                 const auto now = unix_seconds();
                 Statement ban(db_, "INSERT OR REPLACE INTO security_bans VALUES(?,?,?,?,0,0)"); ban.text(1, ip); ban.integer64(2, now);
-                ban.integer64(3, now + request.at("seconds").get<int>()); ban.text(4, reason); ban.done();
-                log("auth", "login IP manually banned ip=" + ip + " actor=" + audit_value(actor) + " reason=" + audit_value(reason), "warn");
+                const auto expires = permanent ? INT64_C(0) : now + request.at("seconds").get<int>();
+                ban.integer64(3, expires); ban.text(4, reason); ban.done();
+                log("auth", "login IP manually banned ip=" + ip + " actor=" + audit_value(actor) + " reason=" + audit_value(reason) +
+                    (permanent ? " permanent=true" : " expires_at=" + std::to_string(expires)), "warn");
             }
         }
         auto result = security_view(); transaction.commit(); return result;
