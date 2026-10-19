@@ -142,20 +142,20 @@ def json_depth(suite, username):
     print("PASS JSON depth 64 accepted, deeper nesting rejected with 400, quoted brackets ignored", flush=True)
 
 
-def slow_headers(suite):
+def slow_request(suite, initial, fragment, description):
     timeout = suite.config["timeout_seconds"]
     assert timeout == 2
     stop = threading.Event()
     sent = []
     with socket.create_connection(("127.0.0.1", suite.ports["web"]), timeout=4) as sock:
         start = time.monotonic()
-        sock.sendall(b"GET /health HTTP/1.1\r\nHost: localhost\r\n")
+        sock.sendall(initial)
 
         def trickle():
             index = 0
             while not stop.wait(0.3):
                 try:
-                    sock.sendall(f"X-Trickle-{index}: test\r\n".encode())
+                    sock.sendall(fragment(index))
                     sent.append(time.monotonic())
                     index += 1
                 except OSError:
@@ -168,23 +168,32 @@ def slow_headers(suite):
             sock.settimeout(max(0.1, 4 - (time.monotonic() - start)))
             # The writer deliberately keeps sending after the request deadline.
             # Closing with those unread bytes can produce RST on macOS. Either
-            # EOF or RST proves deadline enforcement; socket timeouts still fail,
-            # and any returned HTTP bytes must form a complete response below.
+            # EOF or RST proves deadline enforcement; socket timeouts still fail.
+            # An expired input budget closes silently: attempting an HTTP error
+            # response while bytes keep arriving can truncate it on TCP reset.
             response = receive_closed(sock, allow_reset=True)
             elapsed = time.monotonic() - start
-            assert len(sent) >= 2, "the request closed before exercising repeated header reads"
-            assert elapsed < 4, f"HTTP headers reset the whole-request timeout: {elapsed:.2f}s"
-            if response:
-                status, _, result = parse_response(response)
-                assert status in (400, 408, 503) and result["ok"] is False, (status, result)
+            assert len(sent) >= 2, "the request closed before exercising repeated input reads"
+            assert elapsed < 4, f"{description} reset the whole-request timeout: {elapsed:.2f}s"
+            assert response == b"", f"Expired request unexpectedly wrote HTTP response bytes: {response!r}"
         finally:
             stop.set()
             with contextlib.suppress(OSError):
                 sock.shutdown(socket.SHUT_RDWR)
             writer.join(timeout=2)
-            assert not writer.is_alive(), "slow-header test writer did not stop"
+            assert not writer.is_alive(), "slow-request test writer did not stop"
     healthy(suite)
-    print(f"PASS continuously trickled HTTP headers close within the total request budget ({elapsed:.2f}s)", flush=True)
+    print(f"PASS continuously trickled {description} close silently within the total request budget ({elapsed:.2f}s)", flush=True)
+
+
+def slow_headers(suite):
+    slow_request(suite, b"GET /health HTTP/1.1\r\nHost: localhost\r\n",
+                 lambda index: f"X-Trickle-{index}: test\r\n".encode(), "HTTP headers")
+
+
+def slow_body(suite):
+    slow_request(suite, request_bytes("/api/login", headers=("Content-Length: 1024",)),
+                 lambda _index: b" ", "HTTP body")
 
 
 def graceful_stop(suite):
@@ -248,6 +257,7 @@ def run(suite):
     invalid_framing(suite)
     json_depth(suite, username)
     slow_headers(suite)
+    slow_body(suite)
     graceful_stop(suite)
     healthy(suite)
 

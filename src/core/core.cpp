@@ -241,6 +241,12 @@ std::string Config::relay_password() const {
     return result;
 }
 
+namespace {
+class ConnectionTimeout final : public std::runtime_error {
+public:
+    using std::runtime_error::runtime_error;
+};
+}
 struct Connection::Impl {
     asio::io_context io;
     tcp::socket socket{io};
@@ -262,7 +268,7 @@ struct Connection::Impl {
         auto expires = std::chrono::steady_clock::now() + timeout;
         if (operation_deadline) expires = std::min(expires, *operation_deadline);
         if (deadline) expires = std::min(expires, *deadline);
-        if (expires <= std::chrono::steady_clock::now()) throw std::runtime_error("transaction timed out");
+        if (expires <= std::chrono::steady_clock::now()) throw ConnectionTimeout("transaction timed out");
         timer.expires_at(expires);
         timer.async_wait([&](std::error_code ec) {
             if (!ec) { expired = true; std::error_code ignored; socket.cancel(ignored); resolver.cancel(); }
@@ -271,7 +277,7 @@ struct Connection::Impl {
             start([&](std::error_code ec) { result = ec; timer.cancel(); });
             io.run();
         } catch (...) { timer.cancel(); io.poll(); throw; }
-        if (expired) throw std::runtime_error("connection timed out");
+        if (expired) throw ConnectionTimeout("connection timed out");
         if (result) throw std::system_error(result);
     }
     std::string receive(std::size_t size) {
@@ -589,6 +595,7 @@ HttpResponse json_response(const Json& value, int status) {
 void serve_http(const Config& config, const std::string& service, HttpHandler handler, bool internal, HttpPreflight preflight, std::function<bool()> stop_requested, bool check_ip_bans) {
     serve_tcp(config, service, [&](Connection& connection) {
         if (!internal && !config.text("tls_certificate").empty()) connection.start_tls_server(config);
+        bool request_complete = false, response_started = false;
         try {
             connection.set_deadline(std::chrono::steady_clock::now() + std::chrono::seconds(config.number("timeout_seconds",30)));
             HttpRequest request;
@@ -623,8 +630,18 @@ void serve_http(const Config& config, const std::string& service, HttpHandler ha
             if (request.headers.contains("expect")) throw std::invalid_argument("Expect unsupported");
             request.body = connection.read(size);
             check_json_depth(request.body);
+            request_complete = true;
             connection.set_deadline(std::nullopt);
-            send_response(connection, handler(request));
+            const auto response = handler(request);
+            response_started = true;
+            send_response(connection, response);
+        } catch (const ConnectionTimeout&) {
+            // A timed-out sender may keep transmitting. Closing unread input
+            // can reset TCP and truncate a freshly started error response, so
+            // stop at the request budget without writing any response bytes.
+            if (!request_complete || response_started) return;
+            connection.set_deadline(std::nullopt);
+            send_response(connection, json_response({{"ok",false},{"error","service unavailable"}}, 503));
         } catch (const std::invalid_argument&) {
             connection.set_deadline(std::nullopt);
             send_response(connection, json_response({{"ok",false},{"error","invalid request"}}, 400));
