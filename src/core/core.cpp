@@ -149,7 +149,9 @@ Config Config::from_file(const std::filesystem::path& path) {
     if (config.number("max_message_bytes", 10485760) < 1024 || config.number("max_message_bytes", 10485760) > 100 * 1024 * 1024) throw std::invalid_argument("max_message_bytes must be 1024..104857600");
     if (config.number("max_connections", 32) < 1 || config.number("max_connections", 32) > 1024) throw std::invalid_argument("max_connections must be 1..1024");
     if (config.number("timeout_seconds", 30) < 1 || config.number("timeout_seconds", 30) > 300) throw std::invalid_argument("timeout_seconds must be 1..300");
-    (void)config.mail_domains();
+    // Keep legacy readers (hostname derivation, supervisor probes and DKIM key
+    // paths) consistent with the canonical domain set used for mail routing.
+    config.values["domain"] = config.mail_domains().front();
     const auto outbound = config.outbound_mode();
     if (outbound != "disabled" && outbound != "direct" && outbound != "relay") throw std::invalid_argument("outbound_mode must be disabled, direct, or relay");
     const auto hostname = config.mail_hostname();

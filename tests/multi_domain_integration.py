@@ -11,8 +11,9 @@ from password_policy_integration import login
 
 
 def run(s):
-    s.config.update(domain="example.com", additional_domains=["EXAMPLE.NET", "example.net"],
-                    mail_hostname="mail.example.com", outbound_mode="disabled")
+    s.config.update(domain=" Example.COM ", additional_domains=["EXAMPLE.NET", "example.net"],
+                    outbound_mode="disabled")
+    s.config.pop("mail_hostname", None)  # Derive the hostname from the normalized primary suffix.
     s.save()
     for service in ("auth", "storage", "filter", "smtp", "web", "admin"):
         s.start(service)
