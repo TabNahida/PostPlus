@@ -4,7 +4,7 @@ The mailbox JSON API shares an origin with Webmail, normally port 80. The admini
 
 With TLS and no explicit Web port, Webmail uses 443. [Mail client discovery](mail-clients.md) provides public HTTPS XML configuration endpoints. [Upgrade API endpoints](updates.md#administration-api) download and install changed modules through the native supervisor.
 
-[Login security](security.md) records source IPs and applies shared temporary bans to password and API-key authentication. Its administration endpoints use the explicit `security:read` and `security:write` permissions.
+[IP security](security.md) records source IPs and rejects banned peers at public mail and Webmail/administration connection entrances. Automatic bans are temporary; manual bans can be permanent. Its administration endpoints use the explicit `security:read` and `security:write` permissions.
 
 `postplus-web` exposes mailbox routes and rejects `/api/admin/*`. `postplus-admin` exposes administration routes and rejects mailbox/send routes. Both services provide their own login/session/logout routes. Only administrator accounts may log in to the administration service.
 

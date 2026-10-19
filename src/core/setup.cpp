@@ -536,7 +536,7 @@ bool run_setup(const SetupOptions& options, SetupProvision provision) {
     serve_http(listener, "web", handler, false, preflight, [&] {
         const auto deadline = stop_after.load();
         return deadline != 0 && monotonic_milliseconds() >= deadline;
-    });
+    }, false); // No auth service/database exists during first-run setup.
     return completed.load();
 }
 }

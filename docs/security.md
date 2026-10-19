@@ -23,14 +23,27 @@ Counters and bans persist across authentication-service restarts; expired bans
 stop blocking automatically. Successful authentication does not erase other
 failures from that IP. Existing per-connection and global rate limits remain.
 
-Bans apply to new credential checks, including API keys. They do not act as an
-OS firewall and do not reject ordinary unauthenticated incoming SMTP delivery.
-Existing browser sessions remain usable, allowing a signed-in administrator to
-unban an address. If no administrator session is available, timed bans expire;
-permanent bans require administrator recovery. Use an authenticated session
-from another unblocked IP or the trusted internal RPC with the service token
-to unban the address. Do not publish internal service listeners or their
-shared token.
+Bans reject new public connections to SMTP (including incoming delivery),
+submission, POP3, IMAP, Webmail and administration. PostPlus closes the accepted
+socket before TLS negotiation, protocol greetings, HTTP parsing or credential
+processing. This is application-level admission control, not an OS firewall;
+the operating system may still complete a TCP handshake. The indexed IP check
+uses authenticated internal RPC with a two-second total deadline. If the
+authentication service is unavailable or incompatible, public connections
+close without proceeding. Internal RPC and the first-run configuration wizard
+are excluded so setup and trusted recovery remain possible.
+
+Already-open connections are not forcibly disconnected; credential checks on
+them still enforce active bans. Browser cookies and API keys do not bypass the
+connection check, so an existing browser login cannot reconnect from a blocked
+IP. Use an authenticated administrator session from another unblocked IP, or
+the trusted internal RPC with the service token, to unban the address. Timed
+bans also stop blocking when they expire. Do not publish internal service
+listeners or their shared token.
+
+An explicit loopback-IP ban also blocks public-port health probes from that
+address. Remove such a ban through trusted local RPC before restarting the
+service group, otherwise its readiness checks can fail.
 
 The recorded address comes from the actual TCP connection. Client JSON fields,
 `Forwarded` and `X-Forwarded-For` headers do not override it. With a reverse
@@ -43,7 +56,9 @@ toward the same 10,000-address limit as timed bans.
 
 Authentication logs include source IP, protocol, attempted account and outcome
 for success, failure and blocked attempts. Ban creation, expiry, removal and
-policy changes are logged. Search the IP in **Service logs**, selecting `auth`.
+policy changes are logged. Rejected connections record their socket IP and
+reason in the public service log, with the ban check also audited by `auth`.
+Search the IP in **Service logs**.
 Passwords, complete API keys and SASL payloads are never logged. Log rotation
 and retention continue to apply; the ban pool is a current-state view.
 
@@ -73,8 +88,10 @@ omitting `seconds`, while `false` or an omitted `permanent` requires a valid
 
 Each ban includes `permanent`. Timed bans expose an integer Unix `expires_at`;
 permanent bans expose `expires_at:null`. This is compatible with existing timed
-ban records and requires no data reset. HTTP authentication blocked by a ban
-returns 429 with code `ip_banned` and a `permanent` boolean. Timed bans also
+ban records and requires no data reset. A login request that creates a ban, or
+a credential check on an already-open connection, can return HTTP 429 with code
+`ip_banned` and a `permanent` boolean. Timed bans also
 return `retry_after` seconds and the `Retry-After` header. Permanent bans omit
-both retry fields and advise contacting an administrator. Ordinary incoming
-mail and existing authenticated sessions continue to work in either mode.
+both retry fields and advise contacting an administrator. Later connections
+from the banned IP close before HTTP, including connections with valid cookies
+or API keys; no HTTP response or retry header is sent at this boundary.

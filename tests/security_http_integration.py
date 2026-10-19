@@ -1,12 +1,31 @@
 #!/usr/bin/env python3
 """IP bans on real HTTP peers, administrator controls and API scopes."""
 import argparse
-import json
+import http.client
 from pathlib import Path
 import secrets
-import time
+import socket
 
 from integration import PASSWORD, ROOT, Suite
+
+
+def assert_http_blocked(suite, service, headers=None):
+    # A newly accepted banned peer must be dropped without waiting for HTTP
+    # headers; cookies, API keys and forwarding headers cannot reach routing.
+    with socket.create_connection(("127.0.0.1", suite.ports[service]), timeout=3) as sock:
+        sock.settimeout(2)
+        try:
+            response = sock.recv(4096)
+        except (ConnectionResetError, ConnectionAbortedError):
+            response = b""
+        assert response == b"", (service, response)
+    try:
+        result = suite.http(service, "GET", "/api/session", headers=headers)
+    except TimeoutError:
+        raise AssertionError((service, "Banned HTTP peer waited for a request timeout"))
+    except (OSError, http.client.HTTPException):
+        return
+    raise AssertionError((service, "Banned HTTP peer reached the request handler", result))
 
 
 def run(s):
@@ -45,14 +64,14 @@ def run(s):
         assert status == (429 if index == 2 else 401), (index, status, result)
     assert result["code"] == "ip_banned" and 1 <= result["retry_after"] <= 60
     assert int(headers["Retry-After"]) == result["retry_after"]
-    status, _, result = s.http("admin", "POST", "/api/login", {"username": admin, "password": PASSWORD})
-    assert status == 429, (status, result)
-    status, _, view = request()
-    assert status == 200, "An existing administrator session must remain available to recover/unban."
+    for service in ("web", "admin"):
+        assert_http_blocked(s, service, {**session, **spoof})
+    view = s.rpc("auth", op="security_get", actor=admin)
     ban = next(item for item in view["bans"] if item["ip"] == "127.0.0.1")
     assert ban["unknown_failures"] >= 3 and ban["expires_at"] > ban["banned_at"] and ban["permanent"] is False
     assert all(item["ip"] not in ("198.51.100.77", "203.0.113.8") for item in view["bans"])
-    assert request("POST", "/unban", {"ip": "127.0.0.1"})[0] == 200
+    assert s.rpc("auth", op="security_unban", actor=admin, ip="127.0.0.1")["ok"]
+    assert request()[0] == 200, "Existing cookies must remain valid after an administrative unban."
 
     readonly = s.rpc("auth", op="api_key_create", username=admin, name="Security view", permissions=["security:read"])["key"]
     writer = s.rpc("auth", op="api_key_create", username=admin, name="Security controls", permissions=["security:write"])["key"]
@@ -66,21 +85,17 @@ def run(s):
     assert status == 200, result
     ban = next(item for item in result["bans"] if item["ip"] == "127.0.0.1")
     assert ban["permanent"] is True and ban["expires_at"] is None, ban
-    # Existing cookie sessions remain a recovery path; new passwords and API keys stay blocked.
-    assert request()[0] == 200
+    # Connection admission happens before cookie/API-key processing. Recovery
+    # from the same source must use the trusted internal RPC interface.
     for service in ("web", "admin"):
-        status, headers, result = s.http(service, "POST", "/api/login", {"username": admin, "password": PASSWORD})
-        assert status == 429 and result["code"] == "ip_banned" and result["permanent"] is True, (status, result)
-        assert "retry_after" not in result and "Retry-After" not in headers
-    status, headers, result = request(headers=ro)
-    assert status == 429 and result["permanent"] is True and "retry_after" not in result
-    assert "Retry-After" not in headers
+        assert_http_blocked(s, service, session)
+    assert_http_blocked(s, "admin", ro)
     s.stop("auth"); s.start("auth")
-    status, headers, result = request(headers=rw)
-    assert status == 429 and result["permanent"] is True and "Retry-After" not in headers
-    assert request("POST", "/unban", {"ip": "127.0.0.1"})[0] == 200
+    assert_http_blocked(s, "admin", rw)
+    assert s.rpc("auth", op="security_unban", actor=admin, ip="127.0.0.1")["ok"]
     assert request(headers=ro)[0] == 200
-    print("PASS permanent bans require explicit valid input, block passwords/API keys without a finite retry time, survive restart, and permit cookie-session recovery", flush=True)
+    assert request()[0] == 200
+    print("PASS permanent bans validate input and drop new HTTP connections before cookie/API-key processing, survive restart, and recover through trusted RPC", flush=True)
     status, user_headers, _ = s.http("admin", "POST", "/api/login", {"username": user, "password": PASSWORD})
     assert status == 403
     status, user_headers, _ = s.http("web", "POST", "/api/login", {"username": user, "password": PASSWORD})
@@ -94,25 +109,27 @@ def run(s):
     for index in range(2):
         status, headers, result = request(headers={"Authorization": "Bearer " + "pp_" + "0" * 64})
         assert status == (429 if index == 1 else 401), (status, result)
-    assert request(headers=ro)[0] == 429
-    assert request("POST", "/unban", {"ip": "127.0.0.1"})[0] == 200
+    assert_http_blocked(s, "admin", ro)
+    assert s.rpc("auth", op="security_unban", actor=admin, ip="127.0.0.1")["ok"]
     assert request(headers=ro)[0] == 200
     # Missing/invalid bearer framing is counted too; log messages never contain supplied secrets.
     secret = "malformed-secret-never-log-041"
     for index in range(2):
         status, _, _ = request(headers={"Authorization": "Bearer " + secret})
         assert status == (429 if index == 1 else 401)
-    assert request("POST", "/unban", {"ip": "127.0.0.1"})[0] == 200
+    assert_http_blocked(s, "admin", session)
+    assert s.rpc("auth", op="security_unban", actor=admin, ip="127.0.0.1")["ok"]
     # Malformed logins still have an auditable socket source and share the pool.
     for index in range(2):
         status, _, result = s.http("web", "POST", "/api/login", {"username": user, "password": False})
         assert status == (429 if index else 400), (status, result)
-    assert request("POST", "/unban", {"ip": "127.0.0.1"})[0] == 200
+    assert_http_blocked(s, "web")
+    assert s.rpc("auth", op="security_unban", actor=admin, ip="127.0.0.1")["ok"]
     logs = "\n".join(path.read_text(encoding="utf-8") for path in (s.directory / "data/logs").glob("auth.jsonl*"))
     assert "127.0.0.1" in logs and "webmail" in logs and "api" in logs
     for value in (PASSWORD, "Synthetic-wrong-password!", readonly, writer, secret):
         assert value not in logs, "Authentication logs exposed a credential"
-    print("PASS HTTP socket IP attribution, shared bans, recovery session, policy revision/CSRF, scoped ban controls, API-key throttling and private audit logs", flush=True)
+    print("PASS HTTP socket IP attribution, shared connection bans, trusted recovery, policy revision/CSRF, scoped ban controls, API-key throttling and private audit logs", flush=True)
 
 
 if __name__ == "__main__":

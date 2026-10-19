@@ -73,7 +73,7 @@ private:
 };
 using Session = std::function<void(Connection&)>;
 void serve_tcp(const Config& config, const std::string& service, Session handler, bool internal = false,
-               std::function<bool()> stop_requested = {});
+               std::function<bool()> stop_requested = {}, bool check_ip_bans = true);
 using ListenerSession = std::function<void(Connection&, const TcpListener&)>;
 void serve_tcp_listeners(const Config& config, const std::string& service, ListenerSession handler,
                          std::function<bool()> stop_requested = {});
@@ -99,8 +99,9 @@ HttpResponse json_response(const Json& value, int status = 200);
 using HttpHandler = std::function<HttpResponse(const HttpRequest&)>;
 using HttpPreflight = std::function<std::optional<HttpResponse>(const HttpRequest&)>;
 void serve_http(const Config& config, const std::string& service, HttpHandler handler, bool internal = true,
-                HttpPreflight preflight = {}, std::function<bool()> stop_requested = {});
+                HttpPreflight preflight = {}, std::function<bool()> stop_requested = {}, bool check_ip_bans = true);
 void serve_rpc(const Config& config, const std::string& service, std::function<Json(const Json&)> handler);
-Json rpc(const Config& config, const std::string& service, const Json& request);
+Json rpc(const Config& config, const std::string& service, const Json& request,
+         std::optional<std::chrono::steady_clock::time_point> deadline = {});
 int service_main(const std::string& name, int argc, char** argv, std::function<void(const Config&)> run);
 }

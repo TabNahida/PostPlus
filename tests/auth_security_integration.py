@@ -32,6 +32,10 @@ def failure(s, ip, username="absent@localhost", protocol="imap"):
     return s.rpc("auth", op="security_failure", peer_ip=ip, protocol=protocol, username=username)
 
 
+def connection_check(s, ip, protocol="imap"):
+    return s.rpc("auth", op="security_check", peer_ip=ip, protocol=protocol)
+
+
 def blocked(result, permanent=False):
     assert not result["ok"] and result["code"] == "ip_banned", result
     assert result["permanent"] is permanent, result
@@ -50,6 +54,40 @@ def run(s):
     assert initial["policy"] == dict(enabled=True, window_seconds=300, failure_threshold=20,
                                      unknown_user_threshold=5, ban_seconds=900, allowlist=[]), initial
     assert initial["revision"] == 1 and initial["bans"] == []
+    # Admission is internal authenticated RPC, accepts only complete peer
+    # identities, and never spends password-failure or concurrent-hash budgets.
+    payload = dict(op="security_check", peer_ip="192.0.2.8", protocol="imap")
+    assert s.http("auth", "POST", "/rpc", payload)[0] == 401
+    assert s.http("auth", "POST", "/rpc", payload, {"Authorization": "Bearer wrong"})[0] == 401
+    for invalid in (dict(peer_ip=None), dict(peer_ip=False), dict(peer_ip=""),
+                    dict(peer_ip="hostname"), dict(peer_ip="127.0.0.1:25"),
+                    dict(peer_ip="::1%eth0"), dict(protocol=False), dict(protocol="unknown")):
+        status, _, result = s.http("auth", "POST", "/rpc", dict(payload, **invalid),
+                                   {"Authorization": f"Bearer {s.token}"})
+        assert status == 400, (invalid, status, result)
+    for missing in ("peer_ip", "protocol"):
+        incomplete = {key: value for key, value in payload.items() if key != missing}
+        assert s.http("auth", "POST", "/rpc", incomplete,
+                      {"Authorization": f"Bearer {s.token}"})[0] == 400
+    assert not s.rpc("auth", op="unknown_security_check")["ok"]
+    with sqlite3.connect(s.directory / "data/auth.sqlite3") as database:
+        now = int(time.time())
+        database.execute("INSERT INTO security_bans VALUES(?,?,?,'expired admission fixture',0,0)",
+                         ("192.0.2.8", now - 20, now - 10))
+        database.execute("INSERT INTO security_attempts VALUES(?,?,2,1,?)",
+                         ("192.0.2.8", now - 1000, now - 1000))
+        before_bans = database.execute("SELECT * FROM security_bans ORDER BY ip").fetchall()
+        before_attempts = database.execute("SELECT * FROM security_attempts ORDER BY ip").fetchall()
+    for _ in range(40):
+        for address in ("192.0.2.8", "::ffff:192.0.2.8", "2001:0db8:0:0:0:0:0:8"):
+            assert connection_check(s, address) == {"ok": True}
+    with sqlite3.connect(s.directory / "data/auth.sqlite3") as database:
+        assert database.execute("SELECT * FROM security_bans ORDER BY ip").fetchall() == before_bans
+        assert database.execute("SELECT * FROM security_attempts ORDER BY ip").fetchall() == before_attempts
+    # Also check that repeated admission calls did not consume password hashing
+    # limits and that normal authentication still cleans up its own state.
+    assert s.rpc("auth", op="verify", peer_ip="192.0.2.8", protocol="imap", username=USER, password=PASSWORD)["ok"]
+    print("PASS authenticated read-only connection admission validates peers without counters, hashes, or expiry sweeps", flush=True)
     assert not s.rpc("auth", op="security_get", actor=USER)["ok"]
     assert not s.rpc("auth", op="security_unban", actor=USER, ip="192.0.2.1")["ok"]
     assert not s.rpc("auth", op="security_ban", actor=USER, ip="192.0.2.1", permanent=True)["ok"]
@@ -66,7 +104,9 @@ def run(s):
     ip = "192.0.2.10"
     assert failure(s, ip)["error"] == "invalid credentials"
     assert failure(s, "::ffff:192.0.2.10", protocol="smtp")["error"] == "invalid credentials"
+    for _ in range(8): assert connection_check(s, ip) == {"ok": True}
     blocked(failure(s, ip, protocol="pop3"))
+    blocked(connection_check(s, "::ffff:" + ip, "smtp"))
     banned = view(s)["bans"][0]
     assert banned["ip"] == ip and banned["unknown_failures"] == 3 and banned["failures"] == 3, banned
     assert banned["reason"] == "unknown_account_attempts" and banned["permanent"] is False
@@ -74,12 +114,14 @@ def run(s):
     blocked(s.rpc("auth", op="api_key_verify", peer_ip=ip, protocol="api", key="invalid"))
     # A restart preserves both bans and the live policy without a DB version bump.
     s.stop("auth"); s.start("auth")
+    blocked(connection_check(s, ip, "admin"))
     blocked(s.rpc("auth", op="verify", peer_ip=ip, protocol="admin", username=ADMIN, password=PASSWORD))
     assert view(s)["policy"]["unknown_user_threshold"] == 3
     with sqlite3.connect(s.directory / "data/auth.sqlite3") as database:
         assert database.execute("PRAGMA user_version").fetchone()[0] == 4
     assert s.rpc("auth", op="verify", username=ADMIN, password=PASSWORD)["ok"]  # CLI recovery
     assert s.rpc("auth", op="security_unban", actor=ADMIN, ip="::ffff:192.0.2.10")["ok"]
+    assert connection_check(s, ip, "imap") == {"ok": True}
     assert s.rpc("auth", op="verify", peer_ip=ip, protocol="imap", username=USER, password=PASSWORD)["ok"]
     print("PASS durable canonical cross-protocol bans, admin authorization, conflicts, and CLI recovery", flush=True)
 
@@ -111,6 +153,7 @@ def run(s):
             result = failure(s, address)
             assert result.get("code") != "ip_banned", result
     assert s.rpc("auth", op="security_ban", actor=ADMIN, ip="2001:db8::7", seconds=2, reason="administrator test")["ok"]
+    blocked(connection_check(s, "2001:0db8:0:0:0:0:0:7", "pop3"))
     blocked(failure(s, "2001:0db8::7"))
     permanent_ip = "198.51.100.50"  # Explicit bans also override an automatic-ban allowlist.
     result = s.rpc("auth", op="security_ban", actor=ADMIN, ip="::ffff:" + permanent_ip,
@@ -119,14 +162,17 @@ def run(s):
     permanent_row = next(row for row in result["bans"] if row["ip"] == permanent_ip)
     assert permanent_row["permanent"] is True and permanent_row["expires_at"] is None, permanent_row
     time.sleep(2.1)
+    assert connection_check(s, "2001:db8::7", "pop3") == {"ok": True}
     assert failure(s, "2001:db8::7").get("code") != "ip_banned"
     assert any(row["ip"] == permanent_ip and row["permanent"] for row in view(s)["bans"])
     s.stop("auth"); s.start("auth")
     for protocol in ("webmail", "admin", "smtp", "imap", "pop3"):
+        blocked(connection_check(s, "::ffff:" + permanent_ip, protocol), permanent=True)
         blocked(s.rpc("auth", op="verify", peer_ip=permanent_ip, protocol=protocol,
                       username=USER, password=PASSWORD), permanent=True)
     blocked(s.rpc("auth", op="api_key_verify", peer_ip=permanent_ip, protocol="api", key="invalid"), permanent=True)
     policy(s, enabled=False)
+    blocked(connection_check(s, permanent_ip, "api"), permanent=True)
     blocked(failure(s, permanent_ip), permanent=True)
     policy(s, enabled=True)
     with sqlite3.connect(s.directory / "data/auth.sqlite3") as database:
@@ -139,6 +185,7 @@ def run(s):
         assert not result["ok"] and result["code"] == "invalid_security_policy", (invalid, result)
     blocked(failure(s, permanent_ip), permanent=True)  # Invalid edits cannot remove a permanent ban.
     assert s.rpc("auth", op="security_unban", actor=ADMIN, ip="::ffff:" + permanent_ip)["ok"]
+    assert connection_check(s, permanent_ip) == {"ok": True}
     assert s.rpc("auth", op="verify", peer_ip=permanent_ip, protocol="imap", username=USER, password=PASSWORD)["ok"]
     # Editing either ban mode replaces the previous mode without stale expiry state.
     assert s.rpc("auth", op="security_ban", actor=ADMIN, ip=permanent_ip, permanent=False, seconds=60)["ok"]

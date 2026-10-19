@@ -291,6 +291,7 @@ public:
         const auto operation = required_string(request, "op", 32);
         if (operation == "verify") return verify(request);
         if (operation == "api_key_verify") return verify_api_key(request);
+        if (operation == "security_check") return security_check(request);
         if (operation == "security_failure") return security_failure(request);
         if (operation == "security_get" || operation == "security_policy_set" || operation == "security_unban" || operation == "security_ban")
             return manage_security(request, operation);
@@ -448,7 +449,9 @@ private:
         if (peer.ip.empty()) return {};
         Statement query(db_, "SELECT expires_at FROM security_bans WHERE ip=? AND (expires_at=0 OR expires_at>?)");
         query.text(1, peer.ip); query.integer64(2, now);
-        if (query.step() != SQLITE_ROW) return {};
+        const auto code = query.step();
+        if (code == SQLITE_DONE) return {};
+        if (code != SQLITE_ROW) throw std::runtime_error("cannot check active IP ban");
         auth_audit(peer, "blocked", "ip_banned");
         return banned_response(query.integer64(0), now);
     }
@@ -540,6 +543,17 @@ private:
         log("auth", "login IP banned ip=" + peer.ip + " reason=" + why + " failures=" + std::to_string(failures) +
             " unknown_failures=" + std::to_string(unknown) + " expires_at=" + std::to_string(expires), "warn");
         return banned_response(expires, now);
+    }
+    Json security_check(const Json& request) {
+        // Connection admission must not reserve password work, look up an
+        // account, or prune the whole ban pool. The time-aware indexed lookup
+        // also permits an expired address immediately, before the next sweep.
+        required_string(request, "peer_ip", 64);
+        required_string(request, "protocol", 32);
+        const auto peer = auth_peer(request);
+        std::lock_guard guard(mutex_);
+        if (const auto banned = active_ban(peer, unix_seconds())) return *banned;
+        return {{"ok", true}};
     }
     Json security_failure(const Json& request) {
         auto peer = auth_peer(request);

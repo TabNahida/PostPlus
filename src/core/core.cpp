@@ -398,7 +398,7 @@ void Connection::start_tls_client(const std::string& hostname) {
 }
 namespace {
 void serve_listeners(const Config& config, const std::string& service, const std::vector<TcpListener>& listeners,
-                     ListenerSession handler, bool internal, std::function<bool()> stop_requested) {
+                     ListenerSession handler, bool internal, std::function<bool()> stop_requested, bool check_ip_bans = true) {
     asio::io_context io;
     const auto address = asio::ip::make_address(internal ? "127.0.0.1" : config.text(service == "admin" ? "admin_bind" : "bind", "127.0.0.1"));
     std::vector<std::unique_ptr<tcp::acceptor>> acceptors;
@@ -437,8 +437,28 @@ void serve_listeners(const Config& config, const std::string& service, const std
                 ++active;
                 asio::post(workers, [&,connection,index] {
                     try {
-                        if (listeners[index].implicit_tls) connection->start_tls_server(config);
-                        handler(*connection, listeners[index]);
+                        // Internal RPC and the unconfigured bootstrap wizard must
+                        // work without auth. Public services check the socket IP
+                        // before TLS, banners, request bytes or protocol handlers.
+                        bool allowed = true;
+                        if (!internal && check_ip_bans) {
+                            const auto peer = connection->socket().remote_endpoint().address().to_string();
+                            allowed = false;
+                            try {
+                                const auto result = rpc(config, "auth", {{"op", "security_check"}, {"peer_ip", peer},
+                                    {"protocol", service == "web" ? "webmail" : service}},
+                                    std::chrono::steady_clock::now() + std::chrono::seconds(2));
+                                allowed = result.at("ok").get<bool>();
+                                if (!allowed) log(service, "connection rejected ip=" + peer + " reason=" +
+                                    (result.value("code", "") == "ip_banned" ? "ip_banned" : "security_check_unavailable"), "warn");
+                            } catch (const std::exception&) {
+                                log(service, "connection rejected ip=" + peer + " reason=security_check_unavailable", "warn");
+                            }
+                        }
+                        if (allowed) {
+                            if (listeners[index].implicit_tls) connection->start_tls_server(config);
+                            handler(*connection, listeners[index]);
+                        }
                     }
                     catch (const std::exception&) { log(service, "session closed after I/O or protocol error", "debug"); }
                     --active;
@@ -455,9 +475,9 @@ void serve_listeners(const Config& config, const std::string& service, const std
     workers.join();
 }
 }
-void serve_tcp(const Config& config, const std::string& service, Session handler, bool internal, std::function<bool()> stop_requested) {
+void serve_tcp(const Config& config, const std::string& service, Session handler, bool internal, std::function<bool()> stop_requested, bool check_ip_bans) {
     serve_listeners(config, service, {{service, config.port(service), false}},
-        [handler=std::move(handler)](Connection& connection, const TcpListener&) { handler(connection); }, internal, std::move(stop_requested));
+        [handler=std::move(handler)](Connection& connection, const TcpListener&) { handler(connection); }, internal, std::move(stop_requested), check_ip_bans);
 }
 void serve_tcp_listeners(const Config& config, const std::string& service, ListenerSession handler, std::function<bool()> stop_requested) {
     serve_listeners(config, service, config.listeners(service), std::move(handler), false, std::move(stop_requested));
@@ -566,7 +586,7 @@ void reject_request(Connection& connection, const HttpRequest& request, const Ht
 HttpResponse json_response(const Json& value, int status) {
     return {status, "application/json; charset=utf-8", value.dump(-1, ' ', false, Json::error_handler_t::replace), {}};
 }
-void serve_http(const Config& config, const std::string& service, HttpHandler handler, bool internal, HttpPreflight preflight, std::function<bool()> stop_requested) {
+void serve_http(const Config& config, const std::string& service, HttpHandler handler, bool internal, HttpPreflight preflight, std::function<bool()> stop_requested, bool check_ip_bans) {
     serve_tcp(config, service, [&](Connection& connection) {
         if (!internal && !config.text("tls_certificate").empty()) connection.start_tls_server(config);
         try {
@@ -618,7 +638,7 @@ void serve_http(const Config& config, const std::string& service, HttpHandler ha
             connection.set_deadline(std::nullopt);
             send_response(connection, json_response({{"ok",false},{"error","service unavailable"}}, 503));
         }
-    }, internal, std::move(stop_requested));
+    }, internal, std::move(stop_requested), check_ip_bans);
 }
 void serve_rpc(const Config& config, const std::string& service, std::function<Json(const Json&)> handler) {
     serve_http(config, service, [handler](const HttpRequest& request) {
@@ -628,10 +648,12 @@ void serve_rpc(const Config& config, const std::string& service, std::function<J
         return json_response(wire_encode(handler(input)));
     });
 }
-Json rpc(const Config& config, const std::string& service, const Json& request) {
+Json rpc(const Config& config, const std::string& service, const Json& request,
+         std::optional<std::chrono::steady_clock::time_point> deadline) {
     int timeout = service == "transfer" ? (config.outbound_mode()=="direct" ? config.number("direct_timeout_seconds",120) : config.number("smarthost_timeout_seconds",30)) + 10 : config.number("timeout_seconds",30);
     if(service=="filter") timeout=std::max(timeout,(!config.text("clamav_host").empty()?config.number("clamav_timeout_seconds",15):0)+(config.flag("rspamd_enabled")?config.number("rspamd_timeout_seconds",5):0)+5);
     Connection connection{std::chrono::seconds(timeout)};
+    connection.set_deadline(deadline);
     connection.connect("127.0.0.1", config.port(service));
     const auto body = wire_encode(request).dump();
     connection.write("POST /rpc HTTP/1.1\r\nHost: localhost\r\nAuthorization: Bearer " + config.token() + "\r\nContent-Type: application/json\r\nContent-Length: " + std::to_string(body.size()) + "\r\nConnection: close\r\n\r\n");
