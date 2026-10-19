@@ -213,6 +213,8 @@ dialog .icon-button { flex-shrink: 0; width: 44px; height: 44px; }
 .mailbox-address input { width:0; min-width:70px; flex:1 1 45%; border:0; border-radius:0; margin:0; background:transparent; }
 .mailbox-address input:focus-visible { outline:none; }
 .mailbox-domain { align-self:center; max-width:65%; padding:10px 12px 10px 6px; font-size:13px; color:var(--muted); overflow-wrap:anywhere; }
+.mailbox-domain:has(.mailbox-domain-select) { padding:0 5px 0 0; }
+.mailbox-domain .mailbox-domain-select { width:100%; min-width:0; max-width:100%; margin:0; padding:10px 20px 10px 6px; border:0; background-color:transparent; font:inherit; color:var(--text); text-overflow:ellipsis; }
 .password-policy { margin-top:24px; }
 
 .server-operations { margin-top:28px; }

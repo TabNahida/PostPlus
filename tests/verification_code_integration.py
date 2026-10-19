@@ -128,6 +128,28 @@ def run(s):
     key, key_id = issued["key"], issued["api_key"]["id"]
     bearer = {"Authorization": "Bearer " + key}
     check(bearer, "006789", chinese)
+    link_url = "https://accounts.example.com/verify?token=private&mail=alice%40localhost"
+    link_message = append(message("<a href='https://accounts.example.com/verify?token=private&amp;mail=alice%40localhost'>Verify your email</a>"
+                                  "<a href='https://accounts.example.com/unsubscribe'>Unsubscribe</a>", html=True))
+    link_route = ROUTE + "?folder=INBOX&include_links=true"
+    original_flags = s.rpc("storage", op="list", username=alice)
+    status, headers, link_result = s.http("web", "GET", link_route, headers=bearer)
+    assert status == 200 and headers["Cache-Control"] == "no-store", (status, link_result)
+    assert link_result["found"] and link_result["code"] is None and link_result["message_id"] == link_message, link_result
+    assert link_result["link"] == {"url": link_url, "label": "Verify your email"}, link_result
+    assert "raw" not in link_result and link_result["expires_at"] - link_result["received_at"] == 900, link_result
+    assert s.http("web", "GET", link_route, headers=b)[2]["message_id"] == foreign
+    assert s.http("admin", "GET", link_route, headers=administrator)[0] == 404
+    assert s.http("web", "GET", link_route)[0] == 401
+    for query in ("include_links=false", "include_links=1", "include_links=true&username=" + bob,
+                  "include_links=true&folder=Junk", "include_links=true&include_links=true"):
+        assert s.http("web", "GET", ROUTE + "?" + query, headers=bearer)[0] == 400, query
+    check(bearer, "006789", chinese)  # Old clients retain the original response and newest-code semantics.
+    assert s.rpc("storage", op="list", username=alice) == original_flags
+    assert s.rpc("storage", op="delete", username=alice, ids=[link_message], permanent=True)["ok"]
+    status, _, both = s.http("web", "GET", link_route, headers=bearer)
+    assert status == 200 and both["code"] == "006789" and both["link"] is None, both
+    print("PASS opt-in verification links, old code API compatibility, scoped ownership, no-store and no Seen mutation", flush=True)
     trash_code = append(message("Verification code: 987654"), folder="Trash")
     check(bearer, "987654", trash_code, folder="Trash")
     check(bearer, "006789", chinese, folder="INBOX")
@@ -140,6 +162,7 @@ def run(s):
     status, _, edited = s.http("web", "PATCH", "/api/api-keys/" + key_id, {"permissions": ["mailbox:read"]}, a)
     assert status == 200 and edited["ok"], (status, edited)
     assert s.http("web", "GET", ROUTE, headers=bearer)[0] == 403
+    assert s.http("web", "GET", link_route, headers=bearer)[0] == 403
     status, _, edited = s.http("web", "PATCH", "/api/api-keys/" + key_id, {"permissions": ["codes:read"]}, a)
     assert status == 200 and edited["ok"]
     assert s.http("web", "DELETE", "/api/api-keys/" + key_id, headers=a)[0] == 200

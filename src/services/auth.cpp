@@ -190,7 +190,7 @@ public:
     explicit AuthStore(const Config& config)
         : rounds_(config.number("auth_pbkdf2_iterations", 600000)),
           max_password_(config.number("max_password_bytes", 1024)), dummy_salt_(salt()),
-          domain_(lower(trim(config.text("domain", "localhost")))) {
+          domain_(lower(trim(config.text("domain", "localhost")))), domains_(config.mail_domains()) {
         if (!valid_address("postmaster@" + domain_)) throw std::invalid_argument("invalid invitation domain");
         if (rounds_ < 600000 || rounds_ > 2000000)
             throw std::invalid_argument("auth_pbkdf2_iterations must be 600000..2000000");
@@ -871,15 +871,18 @@ private:
     static bool identifier(std::string_view value) {
         return value.size() == 32 && value.find_first_not_of("0123456789abcdef") == value.npos;
     }
-    bool valid_localpart(const std::string& value) const {
-        return !value.empty() && value.size() <= 64 && value.find('@') == std::string::npos && valid_address(value + "@" + domain_);
+    bool hosted_domain(const std::string& domain) const {
+        return std::find(domains_.begin(),domains_.end(),domain)!=domains_.end();
+    }
+    bool valid_localpart(const std::string& value, const std::string& domain) const {
+        return !value.empty() && value.size() <= 64 && value.find('@') == std::string::npos && valid_address(value + "@" + domain);
     }
     Json invitation_view(const Statement& query, std::int64_t now) const {
         return {{"id", query.string(0)}, {"name", query.string(1)}, {"owner", query.string(2)},
             {"domain", query.string(3)}, {"localpart", query.string(4)}, {"created_at", query.integer64(5)},
             {"expires_at", query.integer64(6)}, {"max_uses", query.integer(7)}, {"uses", query.integer(8)},
             {"revoked_at", query.is_null(9) ? Json() : Json(query.integer64(9))},
-            {"active", query.is_null(9) && query.integer64(6) > now && query.integer(8) < query.integer(7) && query.string(3) == domain_}};
+            {"active", query.is_null(9) && query.integer64(6) > now && query.integer(8) < query.integer(7) && hosted_domain(query.string(3))}};
     }
     Json invitation_metadata(const std::string& id, std::int64_t now) {
         Statement query(db_, "SELECT id,name,owner,domain,localpart,created_at,expires_at,max_uses,uses,revoked_at FROM invitations WHERE id=?");
@@ -889,7 +892,7 @@ private:
     }
     Json manage_invitations(const Json& request, const std::string& operation) {
         const auto owner = username_from(request);
-        std::string name, localpart, id;
+        std::string name, localpart, id, domain=domain_;
         std::int64_t days = 7, max_uses = 1;
         if (operation == "invite_create") {
             if (!request.contains("name") || !request.at("name").is_string())
@@ -905,12 +908,15 @@ private:
                     return invitation_error("invalid_invitation", "Invitation expiration or use limit is outside its allowed range.", field);
                 if (std::string_view(field) == "max_uses") max_uses = value.get<std::int64_t>(); else days = value.get<std::int64_t>();
             }
-            if (request.contains("domain") && (!request.at("domain").is_string() || lower(trim(request.at("domain").get<std::string>())) != domain_))
-                return invitation_error("invalid_invitation", "Invitations must use the configured mail domain.", "domain");
+            if (request.contains("domain")) {
+                if(!request.at("domain").is_string())return invitation_error("invalid_invitation", "Select a configured mail domain.", "domain");
+                domain=lower(trim(request.at("domain").get<std::string>()));
+                if(!hosted_domain(domain))return invitation_error("invalid_invitation", "Select a configured mail domain.", "domain");
+            }
             if (request.contains("localpart")) {
                 if (!request.at("localpart").is_string()) return invitation_error("invalid_invitation", "Enter a valid mailbox name.", "localpart");
                 localpart = lower(trim(request.at("localpart").get<std::string>()));
-                if (!localpart.empty() && !valid_localpart(localpart)) return invitation_error("invalid_invitation", "Enter a valid mailbox name.", "localpart");
+                if (!localpart.empty() && !valid_localpart(localpart,domain)) return invitation_error("invalid_invitation", "Enter a valid mailbox name.", "localpart");
             }
             if (!localpart.empty() && max_uses != 1)
                 return invitation_error("invalid_invitation", "A fixed mailbox invitation can be used only once.", "max_uses");
@@ -935,7 +941,7 @@ private:
                 invitations.push_back(invitation_view(query, now));
             }
             transaction.commit();
-            return {{"ok", true}, {"invitations", invitations}, {"domain", domain_}, {"max_active_invitations", 100}, {"max_stored_invitations", 1000}};
+            return {{"ok", true}, {"invitations", invitations}, {"domain", domain_}, {"domains",domains_}, {"max_active_invitations", 100}, {"max_stored_invitations", 1000}};
         }
         if (operation == "invite_revoke") {
             Statement revoke(db_, "UPDATE invitations SET revoked_at=COALESCE(revoked_at,?) WHERE id=?");
@@ -946,7 +952,7 @@ private:
             return {{"ok", true}, {"invitation", metadata}};
         }
         if (!localpart.empty()) {
-            Statement exists(db_, "SELECT 1 FROM users WHERE username=?"); exists.text(1, localpart + "@" + domain_);
+            Statement exists(db_, "SELECT 1 FROM users WHERE username=?"); exists.text(1, localpart + "@" + domain);
             if (exists.step() == SQLITE_ROW) return invitation_error("user_exists", "This mailbox already exists.", "localpart");
         }
         Statement count(db_, "SELECT COUNT(*) FROM invitations WHERE revoked_at IS NULL AND expires_at>? AND uses<max_uses");
@@ -962,7 +968,7 @@ private:
         const auto token = "pp_inv_" + random_hex(32); id = random_hex(16);
         Statement insert(db_, "INSERT INTO invitations(id,name,owner,digest,domain,localpart,created_at,expires_at,max_uses) VALUES(?,?,?,?,?,?,?,?,?)");
         insert.text(1, id); insert.text(2, name); insert.text(3, owner); insert.bytes(4, api_key_digest(token));
-        insert.text(5, domain_); insert.text(6, localpart); insert.integer64(7, now); insert.integer64(8, now + days * INT64_C(86400));
+        insert.text(5, domain); insert.text(6, localpart); insert.integer64(7, now); insert.integer64(8, now + days * INT64_C(86400));
         insert.integer64(9, max_uses); insert.done();
         auto metadata = invitation_metadata(id, now); transaction.commit();
         log("auth", "administrator " + owner + " created invitation " + id);
@@ -993,7 +999,7 @@ private:
             std::lock_guard guard(mutex_);
             const auto invite = invitation_for_token(token); if (!invite) return unavailable;
             if (operation == "invite_inspect") {
-                auto view = policy_view(); view["domain"] = domain_; view["localpart"] = invite->at("localpart");
+                auto view = policy_view(); view["domain"] = invite->at("domain"); view["localpart"] = invite->at("localpart");
                 view["expires_at"] = invite->at("expires_at"); return view;
             }
             if (request.contains("admin")) return invitation_error("invalid_invitation", "Invitations create ordinary mailboxes only.");
@@ -1010,13 +1016,13 @@ private:
                 if (!localpart.empty() && localpart != fixed) return invitation_error("invalid_invitation", "Use the mailbox name assigned to this invitation.", "localpart");
                 localpart = fixed;
             }
-            if (!valid_localpart(localpart)) return invitation_error("invalid_invitation", "Enter a valid mailbox name.", "localpart");
+            if (!valid_localpart(localpart,invite->at("domain").get<std::string>())) return invitation_error("invalid_invitation", "Enter a valid mailbox name.", "localpart");
         }
         auto salt_value = salt(); auto hash = password_hash(password, salt_value, rounds_);
         std::lock_guard guard(mutex_); Transaction transaction(db_);
         const auto invite = invitation_for_token(token); if (!invite) return unavailable;
         if (const auto failure = check_password(password)) return *failure;
-        const auto username = localpart + "@" + domain_;
+        const auto username = localpart + "@" + invite->at("domain").get<std::string>();
         Statement pending(db_, "SELECT 1 FROM account_deletions WHERE username=?"); pending.text(1, username);
         if (pending.step() == SQLITE_ROW)
             return invitation_error("account_cleanup_pending", "Finish deleting this account before reusing its address.", "localpart");
@@ -1176,6 +1182,7 @@ private:
     std::unique_ptr<DataDirectoryLock> data_lock_;
     int rounds_, max_password_;
     std::string dummy_salt_, domain_;
+    std::vector<std::string> domains_;
     std::mutex mutex_;
     struct Rate { std::chrono::steady_clock::time_point expires; unsigned count = 0; };
     std::map<std::string, Rate> attempts_;

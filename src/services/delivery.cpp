@@ -33,9 +33,8 @@ void process(const Config& config, const Json& job) {
         log("delivery", "quarantined queue item " + id, "warn");
         return;
     }
-    const auto local_domain = lower(config.text("domain","localhost"));
     std::string delivery_scope="remote_mta";
-    if (job.value("local_route",false) || recipient.substr(recipient.find('@') + 1) == local_domain) {
+    if (job.value("local_route",false) || config.local_address(recipient)) {
         const auto route = resolve_local_recipient(config,recipient,id);
         if (!route.value("exists",false)) throw std::runtime_error("local destination mailbox no longer exists");
         Json request{{"op","deliver"},{"username",route.at("destination")},{"raw",raw},{"delivery_id",id}};

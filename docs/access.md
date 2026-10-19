@@ -16,6 +16,12 @@ Decoded plain text and HTML are checked for confident digit/alphanumeric verific
 
 No match returns `{"ok":true,"found":false}`. Times are Unix seconds. `expires_at` is the lookup/display cutoff; actual validity is determined by the sender. The Webmail card offers copying, refreshes every 15 seconds while the page is visible, and clears expired results.
 
+In 0.5.0, add `include_links=true` to also recognize email/account verification, activation, sign-in and password-reset links. For example, `GET /api/verification-code?folder=INBOX&include_links=true` returns the newest message with a confident code or action link. Its response adds `link: {"url":"https://accounts.example.com/verify?token=...","label":"Verify your email"}` or `link:null`; `code` is `null` for a link-only result. Omitting this option preserves the original response and newest-code behavior. The same `codes:read` permission, ownership checks and lookup limits apply.
+
+Recognition uses decoded MIME text, visible anchor labels, nearby action wording and URL routes. It handles fullwidth digits, nonbreaking separators, individually spaced digits and common passcode labels. Unlabelled years, attachments, hidden/quoted content, competing equally confident links, unsubscribe/tracking routes, ordinary social footers and malformed URLs are excluded. Social services' actual account verification links remain eligible. Only absolute HTTP(S) links without embedded credentials are returned; redirects are never followed and no extraction step fetches a URL. Recognition is deliberately conservative and is not an authenticity or phishing verdict.
+
+Webmail displays the sender and complete destination with an **Open verification link** action. Opening requires a click, uses a separate tab without an opener or referrer, and expired links are removed alongside codes. Check the sender and destination before opening; real validity and any action performed remain controlled by the sender. API consumers should treat link tokens as private and apply their own navigation policy.
+
 ## Mailbox invitations
 
 Administration → **User accounts** → **Invite to mailbox** opens invitation creation, metadata and revocation in a dialog beside **Create user**. Closing it clears any one-time registration link, including a late creation reply.
@@ -35,10 +41,10 @@ If storage cleanup is unavailable, the account stays disabled and appears as **D
 | Method and path | Body / result | Key permission |
 | --- | --- | --- |
 | GET `/api/admin/invitations` | Metadata only; no reusable links. | `invites:read` |
-| POST `/api/admin/invitations` | `name`, optional `localpart`, `expires_in_days` (1–365, default 7), `max_uses` (1–100, default 1); returns 201 with one-time `registration_url` and metadata. | `invites:write` |
+| POST `/api/admin/invitations` | `name`, optional `domain` (a hosted suffix; defaults to primary), `localpart`, `expires_in_days` (1–365, default 7), `max_uses` (1–100, default 1); returns 201 with one-time `registration_url` and metadata. | `invites:write` |
 | DELETE `/api/admin/invitations/{id}` | Revokes unused capacity immediately. | `invites:write` |
 
-Invitations register ordinary accounts in the configured domain. An assigned localpart requires `max_uses:1`; blank allows invitees to choose. Links use the Webmail hostname and `/register#pp_inv_...`, keeping tokens out of URL requests/referrers. The page clears the fragment from history and posts JSON to public Webmail endpoints:
+Invitations register ordinary accounts in their selected hosted domain. Listing includes `domain` (primary) and `domains` (all hosted suffixes). Removing an invitation's domain makes it inactive without redirecting registration to a different domain. An assigned localpart requires `max_uses:1`; blank allows invitees to choose. Links use the Webmail hostname and `/register#pp_inv_...`, keeping tokens out of URL requests/referrers. The page clears the fragment from history and posts JSON to public Webmail endpoints:
 
 - POST `/api/public/invitations/inspect`: `{ "token": "pp_inv_..." }`; returns domain, assigned localpart, expiry and password policy.
 - POST `/api/public/invitations/redeem`: `{ "token": "pp_inv_...", "localpart": "friend", "password": "..." }`; creates the ordinary account and returns 201.
@@ -57,9 +63,9 @@ Administration → **User accounts** manages local inbox routing.
 
 Use an exact source address or prefix, such as `support@example.com` or `support`, for ordinary forwarding. The source can be an existing account or an alias without an account. An exact rule redirects delivery to its destination inbox; it does not keep an additional copy in the source inbox. Exact self-forwarding is rejected.
 
-Patterns optionally include the configured domain. `*` matches any string; `?` matches one character. Domain wildcards and regular expressions are unsupported. Wildcard rules apply only to unregistered addresses, preserving normal delivery to accounts without an exact forwarding rule. Overlapping patterns prefer most literal characters, fewest `*`, fewest `?`, then lowest rule ID.
+Patterns optionally include a hosted domain, for example `sales-*@example.net`. A prefix-only pattern applies to the primary domain. Rules never match across suffixes; each domain may have the same independent pattern. `*` matches any string; `?` matches one character. Domain wildcards and regular expressions are unsupported. Wildcard rules apply only to unregistered addresses, preserving normal delivery to accounts without an exact forwarding rule. Overlapping patterns prefer most literal characters, fewest `*`, fewest `?`, then lowest rule ID.
 
-Destinations must be existing local mailboxes. Routing is a single hop directly into the destination inbox; destination forwarding rules are not evaluated again. Chained or cyclic rules therefore cannot loop or unexpectedly move the message onward. External mailbox destinations are unsupported.
+Destinations must be existing mailboxes in any hosted domain, so forwarding from one hosted suffix to another is supported. Listing includes rules from every domain, including retained rules for removed suffixes so administrators can remove them. Routing is a single hop directly into the destination inbox; destination forwarding rules are not evaluated again. Chained or cyclic rules therefore cannot loop or unexpectedly move the message onward. External mailbox destinations are unsupported.
 
 SMTP and Webmail share routing, preserve original MIME recipients, pin the chosen inbox in the durable queue, and deduplicate equivalent destinations. Rule edits cannot reroute queued mail. Missing targets retry rather than silently dropping mail. An unknown address without a rule remains unknown. Unauthenticated external relay remains blocked.
 
@@ -76,7 +82,7 @@ Webmail **Mailbox API keys** manages the signed-in user's credentials using GET/
 | `mailbox:read` | Folders and messages; opening a message uses the normal Seen behavior. |
 | `mailbox:write` | Message moves/deletion and drafts. |
 | `mailbox:send` | Send as the key owner. |
-| `codes:read` | Latest verification code without message source or Seen changes. |
+| `codes:read` | Latest verification code or opt-in verification link without message source or Seen changes. |
 
 Mailbox keys cannot select another account or access administration. Administrator keys cannot access mailbox APIs. Every request rechecks owner, permissions, expiry and revocation; changes apply without restart or key rotation. Missing permissions return 403, invalid credentials return 401. Explicit Bearer credentials never fall back to cookies. Remote requests require HTTPS.
 

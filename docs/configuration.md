@@ -92,7 +92,8 @@ Relative filesystem paths resolve from the **configuration file's directory**, i
 
 | Field | Default | Meaning |
 | --- | --- | --- |
-| `domain` | `localhost` | Single local mailbox domain, such as `example.com`. It is the part after `@`, not necessarily the TLS hostname. Use an ASCII DNS name. Changing it does not rename accounts or migrate mailboxes. |
+| `domain` | `localhost` | Primary local mailbox domain, such as `example.com`. It is the default part after `@`, not necessarily the TLS hostname. Changing it does not rename accounts or migrate mailboxes. |
+| `additional_domains` | `[]` | Up to 49 additional ASCII mailbox domains. Exact domains only; names are normalized and duplicates removed. Complete email addresses identify independent accounts. |
 | `bind` | `127.0.0.1` | Address for SMTP, POP3, IMAP, and Webmail. Accepts an IPv4 or IPv6 address, not a hostname. `0.0.0.0` listens on all IPv4 interfaces. |
 | `admin_bind` | `127.0.0.1` | Independent administration listener address. Keep it on loopback for local or SSH-tunnel access. |
 | `data_dir` | `../data` beside the configuration directory | Authentication/storage databases and default logs. Read-only in the installed web settings. |
@@ -206,6 +207,14 @@ In first-run setup, choose direct delivery, enter the actual outbound public IP 
 
 For an existing installation, use **Server settings → Outgoing mail → Generate / load DKIM public record** and save direct mode with a public mail hostname. The offline command `postplus-ctl dkim --config config/postplus.json` also prepares a key for the saved mail domain/selector and prints only its public record; enabling direct mode through settings selects that prepared key. Manual configuration must set `dkim_private_key` to the generated file beside the configuration.
 
+### Multiple mailbox domains
+
+Keep `domain` as the primary suffix and add the others under **Server settings → General → Additional mail domains**, one per line. For manual configuration, use `"domain": "example.com", "additional_domains": ["example.net", "example.org"]`. Existing single-domain configurations work unchanged. Save and restart the affected services before creating accounts with a new suffix.
+
+Login, account creation and invitations offer a domain selector. `alice@example.com` and `alice@example.net` are separate accounts with separate credentials, messages and quotas. Adding a domain does not create aliases or copy accounts. Mail between hosted domains is local even when outgoing delivery is disabled. Invitations retain their selected domain; removing that domain disables those invitations until the domain is restored. Removing a suffix does not delete its accounts or messages, but stops new local delivery for that suffix.
+
+In **Network & DNS**, select each saved domain to obtain its MX, SPF, DKIM and DMARC records. All domains share `mail_hostname`, listeners and the server certificate. Publish an MX for every suffix pointing to that hostname; mail clients connect to the certificate-covered server hostname and authenticate with their complete address. In direct mode, the shared DKIM private key signs with the actual From domain. Publish the same public key at `dkim_selector._domainkey.<each-domain>`. Relay providers must authorize every sender domain too.
+
 Allow outbound TCP 25 and DNS UDP/TCP 53 to the resolver (1.1.1.1). Configure PTR at the hosting provider and use an IP permitted to send mail. DNS matches alone do not prove deliverability or inbox placement. Authenticated submission is required for external recipients. Received messages are not DKIM/SPF/DMARC verified, and automatic DSN/bounce generation, DANE and MTA-STS are not implemented. An interrupted connection after DATA can leave acceptance unknown; the queue retries such failures and cannot guarantee exactly-once Internet delivery.
 
 ## Outgoing SMTP relay
@@ -257,7 +266,15 @@ Default rules:
 ]
 ```
 
-Rules examine decoded MIME text and headers; each matching weighted rule contributes once. Inbound heuristics also add 2 points for HTML forms/inputs, 1 for a known shortened HTML link, and 3 for an executable attachment filename. An attachment filename alone does not establish that its content is malware. Ordinary spam remains readable in Junk with its score and reasons. Malformed MIME, configured blocked terms and detected malware remain in quarantine. Filtering preserves the original signed message bytes.
+Rules examine decoded MIME text and headers; each matching weighted rule contributes once. Matching normalizes repeated whitespace, nonbreaking spaces, soft hyphens and common invisible word separators. HTML matching decodes numeric/common text entities and removes markup, comments, script/style/title content and inert templates, so inline tags cannot split a spam phrase and non-content HTML does not add weighted scores. Blocked terms retain their original decoded-text matching and also match normalized text.
+
+Inbound heuristics also add 2 points for HTML forms/inputs, 1 for a known shortened HTML link, and 3 for an executable attachment filename (including Windows shortcuts, installers and script files). Shortened-link checks use the actual `href` host rather than matching URL substrings in comments, query strings or unrelated hostnames. An attachment filename alone does not establish that its content is malware. Ordinary spam remains readable in Junk with its score and reasons. Malformed MIME, configured blocked terms and detected malware remain in quarantine. Filtering preserves the original signed message bytes.
+
+To verify inbound Junk routing, send a message containing the standard harmless GTUBE signature below from a sender outside the allow list. It adds the configured threshold and marks the message as spam even when weighted rules are disabled. Base64/quoted-printable MIME bodies and HTML entities are decoded before the test. GTUBE does not reject or quarantine the message; authenticated submissions and explicit sender allow rules keep their normal spam exemption.
+
+```text
+XJS*C4JDBQADN1.NSBN3*2IDNEN*GTUBE-STANDARD-ANTI-UBE-TEST-EMAIL*C.34X
+```
 
 Only unauthenticated SMTP mail receives inbound spam scoring; TLS by itself is not sender authentication. Authenticated SMTP and Webmail submissions still receive MIME, blocked-term and malware checks. Sender policies use the SMTP envelope sender, never the display From header. Envelope addresses can be spoofed: an allow rule is an explicit administrator override, not an SPF/DKIM guarantee. Do not broadly allow trusted-looking domains.
 

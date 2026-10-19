@@ -51,6 +51,10 @@ int main(){try {
     check(record(result,"spf").at("observed")==Json::array({"v=spf1 include:relay.example.com -all"}),"TXT chunks were not joined or unrelated TXT was included");
     Config config;config.values={{"domain","example.com"},{"mail_hostname","mail.example.com"},{"bind","0.0.0.0"},{"outbound_mode","direct"},{"tls_certificate","cert.pem"},{"tls_private_key","key.pem"},{"ports",{{"smtp",2525},{"web",443},{"pop3s",0}}}};
     auto recommendations=dns_recommendations(config);
+    config.values["additional_domains"]=Json::array({"example.net"});
+    const auto secondary=dns_recommendations(config,{{"domain","EXAMPLE.NET"}});
+    check(secondary.at("domain")=="example.net" && record(secondary,"mx").at("name")=="example.net" && record(secondary,"a").at("name")=="mail.example.com","secondary DNS must use its own zone and shared saved hostname");
+    rejects([&]{dns_recommendations(config,{{"domain","unhosted.example.org"}});});
     check(record(recommendations,"spf").at("value")=="v=spf1 mx -all","direct recommendation needs a publishable SPF even before an IP is entered");
     check(record(recommendations,"dkim").at("value")=="" && record(recommendations,"dkim").at("status")=="not_configured","DNS page must not fabricate or create a signing key");
     check(record(recommendations,"srv_imaps").at("value")=="0 1 993 mail.example.com." && record(recommendations,"srv_autodiscover").at("value")=="0 1 443 mail.example.com.","SRV recommendations must use enabled saved listeners");

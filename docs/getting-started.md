@@ -259,7 +259,7 @@ Outbound TLS verifies certificate trust and hostname. Direct sending uses STARTT
 
 ### Spam rules and ClamAV
 
-Set blocked terms and the spam threshold in administration. Built-in matching is a baseline rule filter, not a trained spam classifier. Rejections go to quarantine; changing rules does not automatically release existing quarantined mail.
+Set blocked terms, the spam threshold and sender/domain allow or block rules in administration. Ordinary inbound spam goes to Junk with its score and reasons. Matching handles MIME encodings, HTML text entities, inline markup and common invisible separators. A harmless [GTUBE test message](configuration.md#mail-filtering) verifies inbound Junk routing. Built-in matching is a baseline rule filter, not a trained spam classifier; optional local Rspamd adds its configured checks. Malware, malformed MIME and explicit blocked-term matches go to quarantine; changing rules does not automatically release existing quarantined mail.
 
 For full antivirus scanning, separately install ClamAV, maintain its signatures, and make its `clamd` INSTREAM service reachable from PostPlus. Enter `clamav_host`, `clamav_port` (usually `3310`), and a suitable timeout. The built-in EICAR check is only a test-signature detector. Scanner outages defer delivery for retry; they are not treated as a successful clean scan. Check the delivery queue and filter logs after enabling scanning.
 

@@ -99,7 +99,7 @@ std::string relaxed_value(std::string_view value) {
     return out;
 }
 std::string canonical_header(const Header& field){return field.name+":"+relaxed_value(field.value);}
-void validate_from(const std::vector<Header>& fields,const std::string& domain) {
+std::string from_domain(const std::vector<Header>& fields) {
     const Header* from=nullptr;
     for(const auto& field:fields)if(field.name=="from"){if(from)invalid("DKIM requires exactly one From header");from=&field;}
     if(!from)invalid("DKIM requires exactly one From header");
@@ -120,7 +120,8 @@ void validate_from(const std::vector<Header>& fields,const std::string& domain) 
         if(quoted || escaped || comments)invalid("DKIM From contains an invalid display name");
         address=trim(address.substr(open+1,close-open-1));
     }
-    if(!valid_address(address) || lower(address.substr(address.rfind('@')+1))!=domain)invalid("DKIM From must be a valid mailbox in the configured domain");
+    if(!valid_address(address))invalid("DKIM From must be a valid mailbox in the configured domain");
+    return lower(address.substr(address.rfind('@')+1));
 }
 std::string relaxed_body(std::string_view body) {
     std::string out;out.reserve(body.size());std::size_t at=0,last_nonempty=0;
@@ -223,7 +224,8 @@ std::string load_dkim_private_key(const fs::path& path) {
 std::string dkim_sign(std::string_view raw,std::string_view domain_value,std::string_view selector_value,std::string_view pem) {
     if(!valid_dkim_record_name(domain_value,selector_value))invalid("DKIM requires a public domain and valid selector name");
     const auto domain=lower(std::string(domain_value)),selector=lower(std::string(selector_value));auto key=private_key(pem);
-    const auto message=normalized_message(raw);std::size_t body_start=0;const auto fields=headers(message,body_start);validate_from(fields,domain);
+    const auto message=normalized_message(raw);std::size_t body_start=0;const auto fields=headers(message,body_start);
+    if(from_domain(fields)!=domain)invalid("DKIM From must be a valid mailbox in the configured domain");
     std::vector<std::string> signed_names;std::string input,h;
     for(const auto& name:protected_names) {
         for(auto it=fields.rbegin();it!=fields.rend();++it)if(it->name==name){signed_names.push_back(name);input+=canonical_header(*it)+"\r\n";}
@@ -244,6 +246,9 @@ std::string sign_dkim(const Config& config,std::string_view raw) {
     if(mode!="direct" && mode!="relay")return std::string(raw);
     if(configured.empty())return std::string(raw);
     fs::path path=configured;if(path.is_relative() && !config.source.empty())path=config.source.parent_path()/path;
-    return dkim_sign(raw,config.text("domain"),config.text("dkim_selector","postplus"),load_dkim_private_key(path));
+    const auto message=normalized_message(raw);std::size_t body_start=0;
+    const auto domain=from_domain(headers(message,body_start));
+    if(!config.hosts_domain(domain))invalid("DKIM From must belong to a configured mail domain");
+    return dkim_sign(raw,domain,config.text("dkim_selector","postplus"),load_dkim_private_key(path));
 }
 }

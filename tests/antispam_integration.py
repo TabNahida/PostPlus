@@ -1,9 +1,11 @@
 #!/usr/bin/env python3
 """Offline inbound spam policy, scanner and durable Junk routing checks."""
 import argparse
+import base64
 from email.header import Header
 import http.server
 import json
+import quopri
 from pathlib import Path
 import secrets
 import smtplib
@@ -82,6 +84,49 @@ def check(s):
     assert scan(ignored_headers)["spam_score"] == 0
     encoded = "Subject: " + Header("lottery winner urgent money transfer", "utf-8").encode() + "\r\n\r\nBody\r\n"
     assert scan(encoded)["action"] == "spam", "Encoded subject bypassed scoring"
+    folded = "Content-Type: text/plain; charset=utf-8\r\n\r\nlot\u200btery\t\r\n winner; urgent\u00a0money transfer; fr\u00adee money"
+    assert scan(folded)["spam_score"] == 8, "Whitespace/invisible separators bypassed scoring"
+    html_headers = "Subject: Account notice\r\nContent-Type: text/html; charset=utf-8\r\n"
+    obscured_html = "<p>lot<!--comment-->tery<span> win</span>ner</p><p>urgent&nbsp;money&#x2002;transfer</p><p>fr&shy;ee mo&#x6e;ey</p>"
+    obscured = html_headers + "Content-Transfer-Encoding: quoted-printable\r\n\r\n" + quopri.encodestring(obscured_html.encode()).decode()
+    assert scan(obscured)["spam_score"] == 8, "Encoded HTML entities and inline tags bypassed scoring"
+    assert scan(html_headers + "\r\n<head><title>Newsletter</title><body>" + obscured_html)["spam_score"] == 8, "Optional closing head tag hid body scoring"
+    base64_spam = "Content-Type: text/plain\r\nContent-Transfer-Encoding: base64\r\n\r\n" + base64.b64encode(b"lottery winner urgent money transfer").decode()
+    assert scan(base64_spam)["spam_score"] == 6
+    harmless_html = ("<head><title>free money</title><style>.lottery winner { content: 'urgent money transfer'; }</style></head>"
+                     "<script>const example = '<form><input>lottery winner urgent money transfer</form>';</script>"
+                     "<!-- <form><input>lottery winner urgent money transfer -->"
+                     "<format>Ordinary newsletter</format><span title='<input>free money'>Hello</span>"
+                     "<a href='https://safe.example/?next=https://bit.ly/test'>Article</a>"
+                     "<a href='https://bit.ly.attacker.example/path'>Article</a>"
+                     "<a href='https://bit.ly@safe.example/path'>Article</a>")
+    assert scan(html_headers + "\r\n" + harmless_html)["spam_score"] == 0, "Markup or URL substrings caused a false positive"
+    for raw_element in ("script", "style", "title"):
+        raw_text_html = "<" + raw_element + ">const x = '<span';</" + raw_element + "><p>lottery winner urgent money transfer</p>"
+        assert scan(html_headers + "\r\n" + raw_text_html)["spam_score"] == 6, "Raw HTML element swallowed visible body"
+    nested_template = "<template><template>ignored</template>lottery winner urgent money transfer<form></form></template><p>Hello</p>"
+    assert scan(html_headers + "\r\n" + nested_template)["spam_score"] == 0, "Nested template content was treated as visible"
+    nested_script = "<template><script>const x = '</template>';</script>free money</template><p>lottery winner urgent money transfer</p>"
+    assert scan(html_headers + "\r\n" + nested_script)["spam_score"] == 6, "Raw element changed template nesting"
+    unknown_tags = "<script.foo>lottery winner urgent money transfer</script.foo><form!x>Offer</form!x><input_data>"
+    assert scan(html_headers + "\r\n" + unknown_tags)["spam_score"] == 6, "Unknown tag punctuation was mistaken for active HTML"
+    linked = html_headers + "\r\n<a HREF='https&#58;//b&#105;t.ly/test?foo=1&amp;bar=2'>Article</a>"
+    assert scan(linked)["spam_score"] == 1, "Encoded shortened href was not recognized"
+    gtube = "XJS*C4JDBQADN1.NSBN3*2IDNEN*GTUBE-STANDARD-ANTI-UBE-TEST-EMAIL*C.34X"
+    gtube_mail = "Subject: Spam filter test\r\n\r\n" + gtube
+    for gtube_message in (gtube_mail,
+                          "Content-Type: text/plain\r\nContent-Transfer-Encoding: base64\r\n\r\n" + base64.b64encode(gtube.encode()).decode(),
+                          html_headers + "\r\n<p>" + gtube.replace("GTUBE", "GT&#85;BE") + "</p>"):
+        verdict = scan(gtube_message)
+        assert verdict["action"] == "spam" and "GTUBE anti-spam test signature detected" in verdict["spam_reasons"], verdict
+    assert scan(gtube_mail, inbound=False)["action"] == "accept", "GTUBE changed authenticated submission exemption"
+    configure(spam_threshold=1000, spam_rules=[])
+    assert scan(gtube_mail)["action"] == "spam", "GTUBE depends on configured weighted rules"
+    s.config.pop("spam_rules")
+    configure(spam_threshold=5, blocked_terms=["lottery winner"])
+    assert scan(obscured)["action"] == "reject", "HTML obfuscation bypassed configured blocked terms"
+    assert scan(obscured, inbound=False)["action"] == "reject", "Submission bypassed normalized blocked terms"
+    configure(blocked_terms=[])
     heuristic = "MIME-Version: 1.0\r\nContent-Type: multipart/mixed; boundary=fixture\r\n\r\n--fixture\r\nContent-Type: text/html\r\n\r\n<form><input name=password></form><a href=https://bit.ly/test>Sign in</a>\r\n--fixture\r\nContent-Type: application/octet-stream\r\nContent-Disposition: attachment; filename=offer.exe\r\n\r\nnot an executable\r\n--fixture--\r\n"
     assert scan(heuristic)["action"] == "spam" and scan(heuristic)["spam_score"] == 6
     for attachment_headers in (
@@ -96,10 +141,14 @@ def check(s):
         filename_verdict = scan(encoded_name)
         assert filename_verdict["action"] == "spam" and filename_verdict["spam_score"] == 5, filename_verdict
         assert "Executable attachment filename" in filename_verdict["spam_reasons"]
+    for suffix, expected_score in (("lnk", 3), ("hta", 3), ("msi", 3), ("wsf", 3), ("exe.txt", 0)):
+        attachment = "Content-Type: application/octet-stream\r\nContent-Disposition: attachment; filename=invoice." + suffix + "\r\n\r\nPayload"
+        assert scan(attachment)["spam_score"] == expected_score, (suffix, scan(attachment))
     configure(spam_allow_senders=["trusted@example.net", "@trusted.example"], spam_block_senders=["blocked.example", "trusted@example.net"])
     assert scan(clean, sender="sale@blocked.example")["action"] == "spam"
     assert scan(clean, sender="sale@sub.blocked.example")["action"] == "accept", "Domain policies must match exactly"
     assert scan(spam, sender="person@trusted.example")["action"] == "accept"
+    assert scan(gtube_mail, sender="person@trusted.example")["action"] == "accept", "GTUBE bypassed explicit allow policy"
     assert scan(clean, sender="trusted@example.net")["action"] == "spam", "Block must take precedence"
     assert scan("From: person@trusted.example\r\n" + spam, sender="remote@example.net")["action"] == "spam"
     eicar = "Subject: Malware\r\n\r\nX5O!P%@AP[4\\PZX54(P^)7CC)7}$EICAR-STANDARD-ANTIVIRUS-TEST-FILE!$H+H*\r\n"
@@ -114,7 +163,7 @@ def check(s):
     assert bounded["action"] == "spam" and len(bounded["spam_reasons"][0].encode()) <= 256, bounded
     s.config.pop("spam_rules")
     configure()
-    print("PASS decoded MIME scoring, heuristics, exact sender policies, forged-header boundary and outbound malware protection", flush=True)
+    print("PASS normalized MIME/HTML scoring, GTUBE, conservative link/form signals, sender policies and outbound malware protection", flush=True)
 
     scanner = RspamdFixture()
     try:

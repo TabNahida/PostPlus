@@ -23,6 +23,13 @@ int main() {
         check(secure_equal("secret","secret") && !secure_equal("secret","secreT") && !secure_equal("secret","secrets"),"secret comparison");
         check(random_hex().size() == 32 && random_hex() != random_hex(),"random ID");
         Config legacy;legacy.values={{"domain","example.com"}};
+        check(legacy.mail_domains()==std::vector<std::string>{"example.com"},"legacy domain default changed");
+        Config multi;multi.values={{"domain"," Example.COM "},{"additional_domains",Json::array({"EXAMPLE.net","example.com","example.net"})}};
+        check(multi.mail_domains()==std::vector<std::string>{"example.com","example.net"},"mail domains must normalize and deduplicate");
+        check(multi.local_address("user@EXAMPLE.NET") && !multi.local_address("user@sub.example.net") && !multi.local_address("bad@@example.net"),"mail domain matching must be exact");
+        for(const auto& value:{Json("example.net"),Json::array({"bad domain"}),Json::array({12}),Json::array({"a..com"})}) {
+            multi.values["additional_domains"]=value;rejects([&]{multi.mail_domains();});
+        }
         for (const auto& field : settings_schema(Config{}))
             if (field.at("key")=="ports.web") check(field.at("default")==80,"empty configuration schema default");
         check(legacy.port("smtp")==25,"default SMTP must receive Internet mail on port 25");
@@ -56,6 +63,8 @@ int main() {
         check(legacy.outbound_mode()=="disabled","explicit outbound disable ignored");
         legacy.values.erase("outbound_mode");legacy.values["allow_insecure_auth"]=true;
         check(validate_settings(legacy,{{"log_level","debug"}}).outbound_mode()=="relay","partial settings save disabled legacy relay");
+        check(validate_settings(legacy,{{"additional_domains",Json::array({" Example.NET ","example.com","EXAMPLE.NET"})}}).values.at("additional_domains")==Json::array({"example.net"}),"saved additional domains must be canonical");
+        rejects([&]{validate_settings(legacy,{{"additional_domains",Json::array({"user@example.net"})}});});
         const auto spam_settings=validate_settings(legacy,{{"spam_allow_senders",Json::array({"Trusted@Example.net","@trusted.example"})},
             {"spam_block_senders",Json::array({"blocked.example"})},{"rspamd_enabled",true},{"rspamd_host","::1"}});
         check(spam_settings.flag("rspamd_enabled") && spam_settings.text("rspamd_host")=="::1","inbound spam settings rejected");

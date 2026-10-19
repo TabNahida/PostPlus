@@ -40,7 +40,7 @@ function scheduleVerificationRefresh(){
 document.addEventListener("visibilitychange",()=>{if(state.user&&!document.hidden)refreshVerificationCode();});
 const loginAddress=PostPlusAddress.create($("login-email"),$("login-domain"));
 let compositionLimit=10*1024*1024;
-const mailDomainReady=api("/api/public/config",{quiet:true}).then(data=>{loginAddress.setDomain(data.domain);if(Number.isSafeInteger(data.max_message_bytes) && data.max_message_bytes>=1024)compositionLimit=data.max_message_bytes;return true;}).catch(()=>false);
+const mailDomainReady=api("/api/public/config",{quiet:true}).then(data=>{loginAddress.setDomains(data.domains||[data.domain]);if(Number.isSafeInteger(data.max_message_bytes) && data.max_message_bytes>=1024)compositionLimit=data.max_message_bytes;return true;}).catch(()=>false);
 
 function showNotice(message, error = false) {
   clearTimeout(noticeTimer);
@@ -202,6 +202,8 @@ function renderFolderState() {
   $("draft-edit").hidden = readerFolder !== "Drafts";
   for(const mode of ["reply","reply-all","forward"])$("message-"+mode).hidden=readerFolder==="Drafts";
   $("message-archive").hidden = readerFolder === "Archive" || readerFolder === "Drafts";
+  $("message-junk").hidden = ["Sent","Drafts"].includes(readerFolder);
+  $("message-junk").replaceChildren(icon(readerFolder === "Junk" ? "inbox" : "shield-exclamation"),element("span","",t(readerFolder === "Junk" ? "Not junk" : "Mark as junk")));
   closeMoveMenu();
   const menu=$("message-move-menu");menu.replaceChildren();
   for (const name of folderNames()) if(name !== state.view) {
@@ -511,6 +513,7 @@ $("message-move-menu").addEventListener("keydown",event=>{
 });
 document.addEventListener("click",event=>{if(!$("message-move-control").contains(event.target))closeMoveMenu();});
 $("message-archive").addEventListener("click",()=>moveMessage("Archive"));
+$("message-junk").addEventListener("click",()=>moveMessage(selectedFolder() === "Junk" ? "INBOX" : "Junk"));
 $("message-delete").addEventListener("click",()=>{
   if(!state.selected) return;
   if(selectedFolder() !== "Trash") {moveMessage("Trash");return;}

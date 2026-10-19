@@ -10,7 +10,9 @@ With TLS and no explicit Web port, Webmail uses 443. [Mail client discovery](mai
 
 ## Sessions
 
-`GET /api/public/config` is available without a session on both web services. It returns `{"ok":true,"domain":"example.com","max_message_bytes":10485760}` for address inputs and the attachment size hint. API login and account creation still accept complete addresses.
+`GET /api/public/config` is available without a session on both web services. It returns `{"ok":true,"domain":"example.com","domains":["example.com","example.net"],"max_message_bytes":10485760}` for address inputs and the attachment size hint. `domain` remains the primary suffix; `domains` contains the normalized primary and additional suffixes. API login and account creation accept complete addresses, and accounts with the same local part on different domains remain independent.
+
+Administration DNS recommendations accept `GET /api/admin/dns?domain=example.net`; DNS checks accept an optional `domain` in `POST /api/admin/dns/check`. Only saved hosted domains are accepted, and the hostname, ports and probe targets still come from server settings. Both responses include the hosted `domains` list.
 
 `POST /api/login` accepts:
 
@@ -82,7 +84,7 @@ DKIM preparation returns `ok`, `domain`, `selector`, `name`, `type: "TXT"`, `val
 | GET `/api/admin/messages/{id}?username=user%40example.com` | Original and decoded message. Does not mark Seen. Inspection is audited without logging message contents. |
 | GET `/api/admin/quota?username=user%40example.com` | `bytes`, `messages`, effective `max_bytes`/`max_messages`, nullable override `quota_bytes`/`quota_messages`. |
 | POST `/api/admin/quota` | `username`, `quota_bytes` (null to inherit, integer 1..2^50 to override); applies immediately. |
-| POST `/api/admin/users` | `username`, `password`, `admin`. The address must use the configured domain. Returns 201. |
+| POST `/api/admin/users` | `username`, `password`, `admin`. The address must use a configured primary or additional domain. Returns 201. |
 | POST `/api/admin/password` | `username`, `password`. Invalidates that user's existing sessions in both administration and Webmail. |
 | GET `/api/admin/password-policy` | Current account policy, revision, byte limit, and character-count convention. |
 | POST `/api/admin/password-policy` | Full `policy` object and `revision`; saves immediately without a restart. |

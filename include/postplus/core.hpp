@@ -36,6 +36,10 @@ struct Config {
     // Preserve relay-only legacy installations until a mode is explicitly selected.
     std::string outbound_mode() const;
     std::string mail_hostname() const;
+    // Primary domain first, followed by normalized, distinct additional domains.
+    std::vector<std::string> mail_domains() const;
+    bool hosts_domain(std::string_view domain) const;
+    bool local_address(std::string_view address) const;
 };
 std::string lower(std::string text);
 std::string trim(std::string text);

@@ -24,6 +24,7 @@ window.PostPlusAdminAccess={mount(root,{api,notice,inviteActions,afterDelete}){
   inviteOpen.addEventListener("click",()=>{inviteDialog.showModal();invitations().catch(error=>failure(invite,error));});
   inviteClose.addEventListener("click",()=>inviteDialog.close());
   const name=input(invite.form,"Invitation name"),localpart=input(invite.form,"Mailbox name (optional)"),days=input(invite.form,"Expires after (days)","number","7"),uses=input(invite.form,"Maximum registrations","number","1");
+  const domainLabel=node("label","Mail domain"),domain=node("select");domain.setAttribute("aria-label",t("Mail domain"));domainLabel.append(domain);invite.form.append(domainLabel);
   name.required=true;name.maxLength=80;localpart.maxLength=64;days.min=uses.min="1";days.max="365";uses.max="100";days.step=uses.step="1";
   const create=node("button","Create invitation","button primary");create.type="submit";invite.form.append(create);
   const output=node("div",null,"invitation-output"),link=node("textarea"),copy=node("button","Copy invitation link","button secondary"),done=node("button","Done","button secondary"),once=node("p","The invitation link is shown once. Copy it before leaving this page.","field-hint");
@@ -34,6 +35,7 @@ window.PostPlusAdminAccess={mount(root,{api,notice,inviteActions,afterDelete}){
   async function invitations(){
     if(!active)return;const generation=version,load=++inviteVersion,data=await api("/api/admin/invitations");
     if(!active||generation!==version||load!==inviteVersion)return;
+    const selected=domain.value;domain.replaceChildren();for(const value of data.domains||[data.domain]){const option=node("option");option.value=value;option.textContent="@"+value;domain.append(option);}domain.value=(data.domains||[data.domain]).includes(selected)?selected:data.domain;
     invite.list.replaceChildren(node("h3","Existing invitations"));
     if(!data.invitations.length){invite.list.append(node("p","No invitations yet.","muted"));return;}
     const body=table(invite.list,["Invitation name","Mailbox","Registrations","Expires","Status","Actions"]);
@@ -44,7 +46,7 @@ window.PostPlusAdminAccess={mount(root,{api,notice,inviteActions,afterDelete}){
     }
   }
   invite.form.addEventListener("submit",async event=>{event.preventDefault();if(create.disabled)return;invite.error.hidden=true;clear();create.disabled=true;const generation=version,dialog=dialogVersion;
-    try{const body={name:name.value.trim(),localpart:localpart.value.trim(),expires_in_days:Number(days.value),max_uses:Number(uses.value)},result=await api("/api/admin/invitations",{method:"POST",body});
+    try{const body={name:name.value.trim(),localpart:localpart.value.trim(),domain:domain.value,expires_in_days:Number(days.value),max_uses:Number(uses.value)},result=await api("/api/admin/invitations",{method:"POST",body});
       if(!active||generation!==version||dialog!==dialogVersion){result.registration_url="";return;}link.value=result.registration_url;result.registration_url="";output.hidden=false;await invitations();
     }catch(error){failure(invite,error);}finally{create.disabled=false;}
   });

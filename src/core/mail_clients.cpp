@@ -34,7 +34,7 @@ std::string decode_query(std::string_view input) {
     return result;
 }
 bool local_email(const Config& config, const std::string& email) {
-    return valid_address(email) && lower(email.substr(email.find('@')+1)) == lower(config.text("domain", "localhost"));
+    return config.local_address(email);
 }
 HttpResponse failure(int status, const std::string& message) {
     return {status, "text/plain; charset=utf-8", message, {{"Cache-Control", "no-store"}}};
@@ -56,7 +56,7 @@ Json mail_client_settings(const Config& config) {
                 {"security", listener.implicit_tls ? "SSL/TLS" : tls ? "STARTTLS" : "none"}});
     const bool discovery = tls && config.port("web") == 443;
     const auto origin = settings_url(config, "web");
-    return {{"hostname", config.mail_hostname()}, {"tls", tls}, {"username", "full_email_address"},
+    return {{"hostname", config.mail_hostname()}, {"domains",config.mail_domains()}, {"tls", tls}, {"username", "full_email_address"},
         {"listeners", listeners}, {"discovery", {{"enabled", discovery}, {"aliases", false},
         {"autoconfig_url", origin + ".well-known/autoconfig/mail/config-v1.1.xml"},
         {"autodiscover_url", origin + "autodiscover/autodiscover.xml"}}}};
@@ -111,8 +111,9 @@ std::optional<HttpResponse> mail_client_discovery(const Config& config, const Ht
     const auto username = xml(email.empty() ? "%EMAILADDRESS%" : email);
     std::string body = "<?xml version=\"1.0\" encoding=\"UTF-8\"?>";
     if (autoconfig) {
-        body += "<clientConfig version=\"1.1\"><emailProvider id=\""+domain+"\"><domain>"+domain+
-            "</domain><displayName>PostPlus</displayName><displayShortName>PostPlus</displayShortName>";
+        body += "<clientConfig version=\"1.1\"><emailProvider id=\""+domain+"\">";
+        for(const auto& mail:config.mail_domains())body+="<domain>"+xml(mail)+"</domain>";
+        body+="<displayName>PostPlus</displayName><displayShortName>PostPlus</displayShortName>";
         for (const auto& protocol : {"imap", "pop3", "smtp"}) {
             const auto listener = preferred(settings.at("listeners"), protocol);
             if (listener.is_null()) continue;

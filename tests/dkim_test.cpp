@@ -131,6 +131,10 @@ int main() {
         fs::create_directory_symlink(directory,directory.parent_path()/(directory.filename().string()+"-link"));rejects([&]{load_dkim_private_key(directory.parent_path()/(directory.filename().string()+"-link")/"key.pem");});fs::remove(directory.parent_path()/(directory.filename().string()+"-link"));
 #endif
         Config config;config.source=directory/"config.json";config.values={{"domain","example.com"},{"outbound_mode","direct"},{"dkim_private_key","key.pem"}};check(verify(sign_dkim(config,original),key.txt_value),"config signing/default selector or relative path failed");config.values["dkim_private_key"]="";rejects([&]{sign_dkim(config,original);});config.values["outbound_mode"]="relay";check(sign_dkim(config,original)==original,"relay without key must preserve raw message");config.values["dkim_private_key"]="key.pem";check(verify(sign_dkim(config,original),key.txt_value),"optional relay signing failed");
+        config.values["additional_domains"]=Json::array({"example.net"});
+        const auto secondary=replace_once(original,"alice@example.com","alice@example.net"),signed_secondary=sign_dkim(config,secondary);
+        check(verify(signed_secondary,key.txt_value) && signed_secondary.find("d=example.net;")!=std::string::npos,"secondary domain must sign with matching d= and shared public key");
+        rejects([&]{sign_dkim(config,replace_once(original,"alice@example.com","alice@foreign.example.org"));});
         fs::remove_all(directory);std::cout<<"PASS independent DKIM RSA verification, DNS public key, relaxed/relaxed vectors, MIME/CRLF preservation, repeated-header oversigning, tampering, From-domain validation and private-file safety\n";return 0;
     }catch(const std::exception& error){if(!directory.empty()){std::error_code ignored;fs::remove_all(directory,ignored);}std::cerr<<error.what()<<'\n';return 1;}
 }

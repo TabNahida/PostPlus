@@ -28,7 +28,7 @@ void send(const Config& config, const Json& input) {
     const auto outbound = config.outbound_mode();
     if (outbound == "disabled") throw OutboundError("outbound_disabled","Outbound delivery is disabled.",true);
     if (outbound != "direct" && outbound != "relay") throw OutboundError("invalid_outbound_mode","Invalid outbound delivery mode.",true);
-    if (outbound=="direct" && !sender.empty() && lower(sender.substr(sender.rfind('@')+1))!=lower(config.text("domain"))) throw std::invalid_argument("direct sender must belong to the configured mail domain");
+    if (outbound=="direct" && !sender.empty() && !config.local_address(sender)) throw std::invalid_argument("direct sender must belong to a configured mail domain");
     if (outbound == "direct" || !config.text("dkim_private_key").empty()) raw = sign_dkim(config,raw);
     if (raw.size() > static_cast<std::size_t>(config.number("max_message_bytes",10485760))) throw std::length_error("signed message too large");
     if (outbound == "direct") { deliver_direct(config,sender,recipient,raw); return; }

@@ -26,6 +26,10 @@ int main() {
         check(response && response->status==200,"Thunderbird config request");
         check(response->body.find("<port>993</port>")!=std::string::npos && response->body.find("<port>587</port>")!=std::string::npos,"preferred encrypted client ports");
         check(response->body.find("alice+tag@fatutu.xyz")!=std::string::npos,"full email username");
+        config.values["additional_domains"]=Json::array({"example.net"});
+        request.path="/mail/config-v1.1.xml?emailaddress=alice%40example.net";
+        response=mail_client_discovery(config,request);
+        check(response->status==200 && response->body.find("<domain>example.net</domain>")!=std::string::npos && response->body.find("<username>alice@example.net</username>")!=std::string::npos,"secondary domain discovery must preserve full username");
         request.encrypted=false;
         check(mail_client_discovery(config,request)->status==403,"unencrypted discovery must fail");
         request.encrypted=true; request.path="/mail/config-v1.1.xml?emailaddress=alice%40other.xyz";

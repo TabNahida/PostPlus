@@ -24,15 +24,15 @@ class Element {
 function fixture(){
   const requests=[],timers=new Map();let time=1700000000000,timerId=0,language="en";
   class Clock extends Date {static now(){return time;}}
-  const translations={"Latest verification code":"最新验证码","Copy code":"复制验证码","Verification code":"验证码","No recent verification code.":"暂无近期验证码。","Verification code copied.":"验证码已复制。"};
-  const sandbox={window:{},navigator:{},Date:Clock,document:{createElement:tag=>new Element(tag)},setTimeout(callback){const id=++timerId;timers.set(id,callback);return id;},clearTimeout:id=>timers.delete(id),PostPlusI18n:{get language(){return language;},t:(key,args={})=>{let value=language==="zh-CN"?translations[key]||key:key;for(const [name,replacement]of Object.entries(args))value=value.replaceAll("{"+name+"}",String(replacement));return value;}}};
+  const translations={"Latest verification code or link":"最新验证码或验证链接","Copy code":"复制验证码","Verification code":"验证码","No recent verification code or link.":"暂无近期验证码或验证链接。","Verification code copied.":"验证码已复制。"};
+  const sandbox={window:{},navigator:{},URL,Date:Clock,document:{createElement:tag=>new Element(tag)},setTimeout(callback){const id=++timerId;timers.set(id,callback);return id;},clearTimeout:id=>timers.delete(id),PostPlusI18n:{get language(){return language;},t:(key,args={})=>{let value=language==="zh-CN"?translations[key]||key:key;for(const [name,replacement]of Object.entries(args))value=value.replaceAll("{"+name+"}",String(replacement));return value;}}};
   vm.runInNewContext(source,sandbox,{filename:"verification-code.js"});
   const element=new Element(),api=sandbox.window.PostPlusVerificationCode,component=api.create(element,{request:(url,options)=>new Promise((resolve,reject)=>requests.push({url,options,resolve,reject})),prefix:"test-code"});
   return {sandbox,element,component,requests,timers,id:name=>descendants(element).find(node=>node.id===`test-code-${name}`),record(changes={}){return {ok:true,found:true,code:"001234",message_id:"message-123",from:"Security <security@example.com>",subject:"Your verification code",received_at:time/1000-30,expires_at:time/1000+120,...changes};},advance(milliseconds){time+=milliseconds;},language(value){language=value;component.translate();}};
 }
 async function componentChecks(){
   const f=fixture();assert.equal(f.element.hidden,true);
-  let pending=f.component.load();assert.equal(f.requests.length,1);assert.equal(f.requests[0].url,"/api/verification-code?folder=INBOX");assert.equal(f.requests[0].options.quiet,true);
+  let pending=f.component.load();assert.equal(f.requests.length,1);assert.equal(f.requests[0].url,"/api/verification-code?folder=INBOX&include_links=true");assert.equal(f.requests[0].options.quiet,true);
   f.requests[0].resolve(f.record({subject:"<script>literal subject</script>",from:"<img src=tracker>"}));await pending;
   assert.equal(f.id("value").value,"001234");assert.equal(f.id("copy").disabled,false);assert.match(f.element.textContent,/<script>literal subject<\/script>/);assert.match(f.element.textContent,/<img src=tracker>/);assert.equal(f.timers.size,1);
   await f.id("copy").fire("click");assert.equal(f.id("value").selected,true);assert.equal(f.id("value").focused,true);assert.match(f.element.textContent,/Code selected/);
@@ -47,11 +47,24 @@ async function componentChecks(){
   for(const changes of [{expires_at:1},{code:"<script>123456</script>"},{code:"123456789012"},{found:false},{received_at:"yesterday"}]){pending=f.component.load();f.requests.at(-1).resolve(f.record(changes));await pending;assert.equal(f.id("copy").hidden,true);assert.equal(f.id("value").value,"");}
   pending=f.component.load();f.requests.at(-1).reject(new Error("<b>connection error</b>"));await pending;assert.match(f.element.textContent,/<b>connection error<\/b>/);assert.equal(f.id("copy").hidden,true);
   pending=f.component.load();const stale=f.requests.at(-1);f.component.reset();stale.resolve(f.record());await pending;assert.equal(f.element.hidden,true);assert.equal(f.id("value").value,"");assert.equal(f.timers.size,0);
-  pending=f.component.load("Trash");assert.equal(f.requests.at(-1).url,"/api/verification-code?folder=Trash");f.requests.at(-1).resolve(f.record({code:"543210"}));await pending;assert.match(f.element.textContent,/Trash/);
+  pending=f.component.load("Trash");assert.equal(f.requests.at(-1).url,"/api/verification-code?folder=Trash&include_links=true");f.requests.at(-1).resolve(f.record({code:"543210"}));await pending;assert.match(f.element.textContent,/Trash/);
   const oldFolder=f.component.load("INBOX"),oldRequest=f.requests.at(-1);pending=f.component.load("Trash");f.requests.at(-1).resolve(f.record({code:"876543"}));await pending;oldRequest.resolve(f.record({code:"123456"}));await oldFolder;assert.equal(f.id("value").value,"876543");
   const requestsBefore=f.requests.length;await f.component.load("Sent");assert.equal(f.element.hidden,true);assert.equal(f.requests.length,requestsBefore,"Unsupported folders reset without requests");
   pending=f.component.load();const disposed=f.requests.at(-1);f.component.dispose();disposed.resolve(f.record());await pending;assert.equal(f.element.children.length,0);assert.equal(f.timers.size,0);
   assert.doesNotMatch(source,/innerHTML|localStorage|sessionStorage|\/api\/messages/);
+}
+async function linkChecks(){
+  const f=fixture(),url="https://accounts.example.com/verify?token=private&code=123456";
+  let pending=f.component.load();f.requests.at(-1).resolve(f.record({code:null,link:{url,label:"<script>Verify</script>"}}));await pending;
+  assert.equal(f.id("value").hidden,true);assert.equal(f.id("copy").hidden,true);assert.equal(f.id("link").getAttribute("href"),url);assert.equal(f.id("destination").textContent,url);
+  assert.equal(f.id("link").textContent,"Open verification link");assert.equal(f.id("link").target,"_blank");assert.equal(f.id("link").rel,"noopener noreferrer");assert.equal(f.id("link").referrerPolicy,"no-referrer");
+  assert.equal(f.requests.length,1,"Discovery never fetches or navigates to the action URL");
+  f.advance(121000);let prevented=false;f.id("link").fire("click",{preventDefault(){prevented=true;}});assert.equal(prevented,true);assert.equal(f.id("link").getAttribute("href"),null);assert.equal(f.id("destination").textContent,"");
+  for(const unsafe of ["javascript:alert(1)","data:text/html,bad","//evil.example/verify","/verify","https://good.example@evil.example/verify","https://good.example\\@evil.example/verify","https://good.example/verify\n","https://good.example/verify%0aevil"]){
+    pending=f.component.load();f.requests.at(-1).resolve(f.record({code:null,link:{url:unsafe}}));await pending;assert.equal(f.id("link").getAttribute("href"),null,unsafe);
+  }
+  pending=f.component.load();f.requests.at(-1).resolve(f.record({link:{url}}));await pending;assert.equal(f.id("value").hidden,false);assert.equal(f.id("link").getAttribute("href"),url);
+  const previous=f.component.load(),stale=f.requests.at(-1);f.component.reset();stale.resolve(f.record({link:{url}}));await previous;assert.equal(f.id("link").getAttribute("href"),null);assert.equal(f.element.hidden,true);
 }
 async function badgeChecks(){
   const controls=new Map(),callbacks=new Map();let loads=0,resets=0;const folders=[];
@@ -87,4 +100,4 @@ async function badgeChecks(){
   vm.runInContext('signedOut()',sandbox);assert.equal(controls.get("custom-folders").children.length,0,"Logout clears private folder names");
   const html=fs.readFileSync(path.join(root,"web/index.html"),"utf8");assert.equal(html.split('src="/verification-code.js"').length-1,1);assert.equal(html.split('id="verification-code"').length-1,1);assert.ok(html.indexOf('src="/verification-code.js"')<html.indexOf('src="/app.js"'));
 }
-(async()=>{await componentChecks();await badgeChecks();console.log("Verification code UI checks passed: copy without Seen, expiry, safe source text, stale/logout replies, localization and folder badge semantics.");})().catch(error=>{console.error(error);process.exitCode=1;});
+(async()=>{await componentChecks();await linkChecks();await badgeChecks();console.log("Verification UI checks passed: codes, explicit safe-protocol links, expiry, stale/logout replies, localization and folder badges.");})().catch(error=>{console.error(error);process.exitCode=1;});

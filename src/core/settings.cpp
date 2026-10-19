@@ -37,6 +37,7 @@ Json fields() {
         result.push_back(std::move(entry));
     };
     add("domain","general","text","localhost","Mail domain","Domain used for local recipient addresses; changing it does not rename existing accounts.");
+    add("additional_domains","general","lines",Json::array(),"Additional mail domains","One domain per line, up to 49. Mailboxes use their complete address and remain separate across domains. Publish MX, SPF, DKIM and DMARC for each domain.");
     add("bind","network","text","127.0.0.1","Mail and Webmail listening address","Use 127.0.0.1 for local use or 0.0.0.0 to accept IPv4 connections from other computers.");
     add("admin_bind","network","text","127.0.0.1","Administration listening address","Keep 127.0.0.1 unless remote administration is needed; public access requires TLS.");
     const std::map<std::string,int> ports = {{"smtp",25},{"submission",587},{"smtps",465},{"pop3",110},{"pop3s",995},{"imap",143},{"imaps",993},{"web",80},{"admin",8081},{"auth",18081},{"storage",18082},{"filter",18083},{"transfer",18084}};
@@ -250,8 +251,9 @@ Json prepare_dkim(const Config& config,const Json& input) {
     const auto selector=lower(trim(input.value("selector",config.text("dkim_selector","postplus"))));
     if(!mail_domain(domain)) throw SettingsError("domain","Enter a public ASCII mail domain before generating DKIM.");
     if(!valid_dkim_selector(selector) || domain.size()+selector.size()+12>253) throw SettingsError("dkim_selector","Use a DKIM selector containing letters, digits, and hyphens, with at most 63 characters.");
-    if(domain!=lower(config.text("domain"))) selected.values.erase("dkim_private_key");
-    selected.values["domain"]=domain;
+    // All hosted domains publish the same key under their own selector name.
+    // A draft new primary domain retains the existing key-isolation behavior.
+    if(!config.hosts_domain(domain)) { selected.values.erase("dkim_private_key"); selected.values["domain"]=domain; }
     selected.values["dkim_selector"]=selector;
     const auto path=dkim_path(selected);
     // Exclusive private creation preserves a published key across retries and restarts.
@@ -396,6 +398,10 @@ Config validate_settings(const Config& existing,const Json& patch) {
     const auto domain=lower(trim(result.text("domain","localhost")));
     if (!valid_address("postmaster@"+domain)) throw SettingsError("domain","Enter a valid ASCII mail domain, such as example.com.");
     result.values["domain"]=domain;
+    try {
+        const auto domains=result.mail_domains();
+        result.values["additional_domains"]=std::vector<std::string>(domains.begin()+1,domains.end());
+    } catch(const std::exception&) { throw SettingsError("additional_domains","Enter at most 49 valid ASCII mail domains, one per line."); }
     const auto parent=result.source.empty() ? fs::current_path() : result.source.parent_path();
     for(const auto* field:{"tls_certificate","tls_private_key","dkim_private_key"}) {
         const auto value=trim(result.text(field));
@@ -449,6 +455,10 @@ Config validate_settings(const Config& existing,const Json& patch) {
         try { (void)load_dkim_private_key(result.text("dkim_private_key")); }
         catch(const std::exception&) { throw SettingsError("dkim_selector","Generate the server DKIM key and publish its DNS record before enabling direct delivery."); }
     }
+    if(mode=="direct" || (mode=="relay" && !result.text("dkim_private_key").empty()))
+        for(const auto& mail:result.mail_domains())
+            if(!valid_dkim_record_name(mail,result.text("dkim_selector","postplus")))
+                throw SettingsError("additional_domains","DKIM signing requires a public mail domain and valid selector for every mail domain.");
     for(const auto* key:{"max_mailbox_bytes","max_queue_bytes"})
         if(result.values.value(key,INT64_C(1073741824))<result.number("max_message_bytes",10485760)) throw SettingsError(key,"Storage byte limits must be at least the maximum message size.");
     return result;

@@ -587,8 +587,8 @@ private:
         transaction.commit();
         return {{"ok", true}, {"username", username}};
     }
-    std::string local_domain() const { return lower(config_.text("domain", "localhost")); }
-    bool local_address(const std::string& value) const { return value.substr(value.find('@') + 1) == local_domain(); }
+    std::string local_domain() const { return config_.mail_domains().front(); }
+    bool local_address(const std::string& value) const { return config_.local_address(value); }
     bool mailbox_exists(const std::string& username) const {
         const auto result = rpc(config_, "auth", {{"op", "exists"}, {"username", username}});
         if (!result.value("ok", false)) throw std::runtime_error("Recipient account service unavailable.");
@@ -596,38 +596,42 @@ private:
     }
     Json rule_row(Statement& query) const {
         return {{"id", query.integer(0)}, {"pattern", query.string(1)}, {"destination", query.string(2)},
-                {"domain", local_domain()}, {"created_at", query.integer(3)}};
+                {"domain", query.string(4)}, {"created_at", query.integer(3)}};
     }
     Json forwarding_list(const Json& request) {
         const auto limit = integer_field(request, "limit", 100, 1, 1000);
         const auto offset = integer_field(request, "offset", 0, 0, 10000);
-        Statement count(db_, "SELECT COUNT(*) FROM forwarding_rules WHERE domain=?"); count.text(1, local_domain()); count.row();
-        Statement query(db_, "SELECT id,pattern,destination,created_at FROM forwarding_rules WHERE domain=? ORDER BY id LIMIT ? OFFSET ?");
-        query.text(1, local_domain()); query.integer(2, limit); query.integer(3, offset);
+        Statement count(db_, "SELECT COUNT(*) FROM forwarding_rules"); count.row();
+        Statement query(db_, "SELECT id,pattern,destination,created_at,domain FROM forwarding_rules ORDER BY id LIMIT ? OFFSET ?");
+        query.integer(1, limit); query.integer(2, offset);
         Json rules = Json::array(); while (query.row()) rules.push_back(rule_row(query));
-        return {{"ok", true}, {"rules", std::move(rules)}, {"total", count.integer(0)}, {"domain", local_domain()}};
+        return {{"ok", true}, {"rules", std::move(rules)}, {"total", count.integer(0)}, {"domain", local_domain()}, {"domains",config_.mail_domains()}};
     }
     Json forwarding_create(const Json& request) {
-        const auto pattern = forwarding_pattern(field(request, "pattern", 254), local_domain());
+        const auto input=lower(trim(field(request, "pattern", 254)));
+        const auto at=input.find('@');
+        const auto domain=at==input.npos?local_domain():input.substr(at+1);
+        if(!config_.hosts_domain(domain))throw std::invalid_argument("Forwarding patterns must belong to a configured local domain.");
+        const auto pattern = forwarding_pattern(input, domain);
         const auto destination = address(request, "destination");
         if (!local_address(destination)) return {{"ok", false}, {"code", "nonlocal_destination"}, {"error", "Forwarding destination must be an existing mailbox in the configured local domain."}};
         if (!mailbox_exists(destination)) return {{"ok", false}, {"code", "unknown_destination"}, {"error", "Forwarding destination mailbox does not exist."}};
-        if (pattern.find_first_of("*?") == std::string::npos && pattern + "@" + local_domain() == destination)
+        if (pattern.find_first_of("*?") == std::string::npos && pattern + "@" + domain == destination)
             return {{"ok", false}, {"code", "self_forwarding"}, {"error", "An exact forwarding rule must use a different destination mailbox."}};
-        Statement duplicate(db_, "SELECT 1 FROM forwarding_rules WHERE domain=? AND pattern=?"); duplicate.text(1, local_domain()); duplicate.text(2, pattern);
+        Statement duplicate(db_, "SELECT 1 FROM forwarding_rules WHERE domain=? AND pattern=?"); duplicate.text(1, domain); duplicate.text(2, pattern);
         if (duplicate.row()) return {{"ok", false}, {"code", "duplicate_rule"}, {"error", "A forwarding rule for this pattern already exists."}};
         Statement count(db_, "SELECT COUNT(*) FROM forwarding_rules"); count.row();
         if (count.integer(0) >= 1000) return {{"ok", false}, {"code", "rule_limit"}, {"error", "At most 1000 forwarding rules are supported."}};
         const auto created = now();
         Statement insert(db_, "INSERT INTO forwarding_rules(domain,pattern,destination,created_at) VALUES(?,?,?,?)");
-        insert.text(1, local_domain()); insert.text(2, pattern); insert.text(3, destination); insert.integer(4, created); insert.done();
-        return {{"ok", true}, {"rule", {{"id", sqlite3_last_insert_rowid(db_)}, {"domain", local_domain()},
+        insert.text(1, domain); insert.text(2, pattern); insert.text(3, destination); insert.integer(4, created); insert.done();
+        return {{"ok", true}, {"rule", {{"id", sqlite3_last_insert_rowid(db_)}, {"domain", domain},
                 {"pattern", pattern}, {"destination", destination}, {"created_at", created}}}};
     }
     Json forwarding_delete(const Json& request) {
         const auto id = integer_field(request, "id", 0, 1, std::numeric_limits<std::int64_t>::max());
         if (!id) throw std::invalid_argument("forwarding rule ID is required");
-        Statement remove(db_, "DELETE FROM forwarding_rules WHERE domain=? AND id=?"); remove.text(1, local_domain()); remove.integer(2, id); remove.done();
+        Statement remove(db_, "DELETE FROM forwarding_rules WHERE id=?"); remove.integer(1, id); remove.done();
         return {{"ok", true}, {"deleted", sqlite3_changes(db_) == 1}};
     }
     Json resolution(const std::string& recipient, const std::string& destination, const Json& rule = nullptr) const {
@@ -644,6 +648,8 @@ private:
     }
     Json resolve_recipient(const Json& request) {
         const auto recipient = address(request, "recipient");
+        if (!local_address(recipient)) return resolution(recipient, "");
+        const auto domain=recipient.substr(recipient.find('@')+1);
         const auto queue_id = request.contains("queue_id") ? identifier(request, "queue_id") : std::string{};
         if (!queue_id.empty()) {
             Statement pinned(db_, "SELECT recipient,destination,rule_id,pattern FROM queue_routes WHERE queue_id=?"); pinned.text(1, queue_id);
@@ -651,7 +657,7 @@ private:
                 if (pinned.string(0) != recipient) throw std::invalid_argument("queued original recipient does not match route");
                 const auto destination = pinned.string(1);
                 Json rule = pinned.null(2) ? Json(nullptr) : Json{{"id", pinned.integer(2)}, {"pattern", pinned.string(3)},
-                    {"destination", destination}, {"domain", local_domain()}};
+                    {"destination", destination}, {"domain", domain}};
                 return resolution(recipient, local_address(destination) && mailbox_exists(destination) ? destination : "", rule);
             }
             Statement queued(db_, "SELECT recipient FROM queue WHERE id=?"); queued.text(1, queue_id);
@@ -660,7 +666,7 @@ private:
         if (!local_address(recipient)) return resolution(recipient, "");
         Json result = resolution(recipient, "");
         {
-            Statement query(db_, "SELECT id,pattern,destination,created_at FROM forwarding_rules WHERE domain=? ORDER BY id"); query.text(1, local_domain());
+            Statement query(db_, "SELECT id,pattern,destination,created_at,domain FROM forwarding_rules WHERE domain=? ORDER BY id"); query.text(1, domain);
             Json selected = nullptr; std::array<unsigned, 3> best{};
             const auto prefix = recipient.substr(0, recipient.find('@'));
             while (query.row()) {
@@ -725,7 +731,7 @@ private:
                     if (!rule.is_object()) throw std::invalid_argument("recipient route rule must be an object");
                     const auto rule_id = integer_field(rule, "id", 0, 1, std::numeric_limits<std::int64_t>::max());
                     if (!rule_id) throw std::invalid_argument("recipient route rule ID is required");
-                    const auto pattern = forwarding_pattern(field(rule, "pattern", 64), local_domain());
+                    const auto pattern = forwarding_pattern(field(rule, "pattern", 64), recipient.substr(recipient.find('@')+1));
                     if (!forwarding_matches(pattern, recipient.substr(0, recipient.find('@'))))
                         throw std::invalid_argument("recipient route rule does not match original recipient");
                     routes[recipient] = resolution(recipient, destination, {{"id", rule_id}, {"pattern", pattern}});

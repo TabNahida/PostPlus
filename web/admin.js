@@ -19,7 +19,7 @@ let restartJob=null,restartVersion=0,restartTimer=null,restartStarted=0,restartB
 let noticeTimer;
 const accountAddress=PostPlusAddress.create($("new-email"),$("new-email-domain"));
 const loginAddress=PostPlusAddress.create($("login-email"),$("login-domain"));
-const mailDomainReady=api("/api/public/config",{quiet:true}).then(data=>{accountAddress.setDomain(data.domain);loginAddress.setDomain(data.domain);return true;}).catch(()=>false);
+const mailDomainReady=api("/api/public/config",{quiet:true}).then(data=>{accountAddress.setDomains(data.domains||[data.domain]);loginAddress.setDomains(data.domains||[data.domain]);return true;}).catch(()=>false);
 
 function showNotice(message, error = false) {
   clearTimeout(noticeTimer);

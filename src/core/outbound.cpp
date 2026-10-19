@@ -127,8 +127,7 @@ std::vector<asio::ip::address> addresses(const DnsResolver& resolver,const std::
 }
 void deliver_direct(const Config& config,const std::string& sender,const std::string& recipient,std::string_view raw,OutboundOptions options) {
     if((!sender.empty() && !valid_address(sender)) || !valid_address(recipient))throw OutboundError("invalid_envelope","Invalid message envelope.",true);
-    const auto configured_domain=lower(config.text("domain"));
-    if(!sender.empty() && lower(sender.substr(sender.rfind('@')+1))!=configured_domain)
+    if(!sender.empty() && !config.local_address(sender))
         throw OutboundError("sender_domain_mismatch","Direct delivery requires the envelope sender to belong to the configured mail domain.",true);
     const auto domain=lower(recipient.substr(recipient.rfind('@')+1));
     if(!valid_public_dns_name(domain))throw OutboundError("dns_invalid_name","The recipient needs a public mail domain.",true);

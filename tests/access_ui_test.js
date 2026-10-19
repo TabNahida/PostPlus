@@ -53,12 +53,14 @@ async function keyChecks(){
   assert.equal(lateResponse.key,"");assert.equal(output.value,"");assert.equal(f.element.children.length,0,"Disposed key pane cannot reveal a late one-time key");
 }
 const invitation=(name="current")=>({id:1,name,localpart:"",domain:"example.com",uses:0,max_uses:1,active:true,expires_at:2000000000});
-const resolveAccess=(requests,inviteName="current",pattern="sales-*")=>{for(const request of requests)request.resolve(request.url.endsWith("/invitations")?{invitations:[invitation(inviteName)]}:{rules:[{id:1,pattern,domain:"example.com",destination:"owner@example.com"}]});};
+const resolveAccess=(requests,inviteName="current",pattern="sales-*")=>{for(const request of requests)request.resolve(request.url.endsWith("/invitations")?{invitations:[invitation(inviteName)],domain:"example.com",domains:["example.com","example.net"]}:{rules:[{id:1,pattern,domain:"example.com",destination:"owner@example.com"}]});};
 async function invitationChecks(){
   const f=fixture("admin-access.js");f.run();const component=f.sandbox.window.PostPlusAdminAccess.mount(f.element,{api:f.api,notice:f.notice});resolveAccess(f.requests);await tick();
   const form=f.find("Invitation name").parentNode.parentNode;f.find("Invitation name").value="  friend  ";f.find("Mailbox name (optional)").value="  member  ";
+  f.find("Mail domain").value="example.net";
   const pending=form.fire("submit"),request=f.requests.at(-1),response={registration_url:"https://mail.example.com/register#pp_inv_once"};
   assert.equal(request.options.method,"POST");assert.equal(request.options.body.name,"friend");assert.equal(request.options.body.localpart,"member");assert.equal(request.options.body.expires_in_days,7);assert.equal(request.options.body.max_uses,1);
+  assert.equal(request.options.body.domain,"example.net","Invitation submission retains the selected suffix");
   request.resolve(response);await tick();const output=f.find("Invitation link");assert.equal(response.registration_url,"");assert.match(output.value,/#pp_inv_once$/);f.requests.at(-1).resolve({invitations:[]});await pending;
   const panel=output.parentNode.parentNode,list=panel.children.find(node=>node.className==="invitation-list");
   assert.ok(panel.children.indexOf(output.parentNode)<panel.children.indexOf(list),"One-time link and its copy actions appear above invitation history");

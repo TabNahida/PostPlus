@@ -182,7 +182,7 @@ DnsLookup parse(const Bytes& packet,const Bytes& request,const std::string& name
             } else if(rr_type==type_cname || rr_type==type_ptr || rr_type==type_mx || rr_type==type_srv) {
                 auto cursor=position;
                 if(rr_type==type_mx) {if(size<3)malformed();value=std::to_string(number(packet,cursor))+" ";cursor+=2;}
-                if(rr_type==type_srv) {if(size<7)malformed();for(int index=0;index<3;++index){value+=std::to_string(number(packet,cursor))+" ";cursor+=2;}}
+                if(rr_type==type_srv) {if(size<7)malformed();for(int field_index=0;field_index<3;++field_index){value+=std::to_string(number(packet,cursor))+" ";cursor+=2;}}
                 value+=canonical(read_name(packet,cursor));if(cursor!=end)malformed();
             } else if(rr_type==type_txt) {
                 auto cursor=position;
@@ -292,12 +292,13 @@ bool native_connect(const asio::ip::address& address,int port,Clock::time_point 
 }
 Json expected_input(const Config& config,const Json& input) {
     if(!input.is_object())throw DnsError("invalid_dns_input","DNS checks require a JSON object.");
-    const std::set<std::string> allowed{"ipv4","ipv6","spf","dkim_name","dkim_type","dkim_value","dmarc"};
+    const std::set<std::string> allowed{"domain","ipv4","ipv6","spf","dkim_name","dkim_type","dkim_value","dmarc"};
     for(const auto& entry:input.items())if(!allowed.contains(entry.key()))throw DnsError("invalid_dns_input","Only expected public DNS values may be supplied. Hosts and ports come from saved settings.");
-    const auto domain=canonical(config.text("domain")),hostname=canonical(config.mail_hostname());
+    const auto domain=canonical(input.contains("domain")?field(input,"domain",253):config.text("domain")),hostname=canonical(config.mail_hostname());
+    if(!config.hosts_domain(domain))throw DnsError("invalid_dns_input","Select a configured mail domain.");
     if(!domain_name(domain) || !domain_name(hostname))throw DnsError("invalid_dns_input","Configure a public mail domain and mail server hostname first.");
     Json request={{"domain",domain},{"hostname",hostname},{"ipv4",""},{"ipv6",""},{"spf",""},{"dkim_name",""},{"dkim_type","TXT"},{"dkim_value",""},{"dmarc","v=DMARC1; p=none"}};
-    for(const auto& key:allowed)if(input.contains(key))request[key]=field(input,key,(key=="dkim_name"?253:key=="ipv4" || key=="ipv6"?64:4096));
+    for(const auto& key:allowed)if(key!="domain" && input.contains(key))request[key]=field(input,key,(key=="dkim_name"?253:key=="ipv4" || key=="ipv6"?64:4096));
     for(const auto* key:{"ipv4","ipv6"}) {
         const auto text=request.at(key).get<std::string>();if(text.empty())continue;
         std::error_code error;const auto address=asio::ip::make_address(text,error);
@@ -331,7 +332,7 @@ bool is_public_mail_address(const asio::ip::address& address){return public_addr
 bool valid_public_dns_name(std::string_view name){return domain_name(name);}
 Json dns_recommendations(const Config& config,const Json& input) {
     auto expected=expected_input(config,input);const auto domain=expected.at("domain").get<std::string>(),hostname=expected.at("hostname").get<std::string>();
-    Json result={{"ok",true},{"domain",domain},{"hostname",hostname},{"outbound_mode",config.outbound_mode()},{"expected",expected},{"records",Json::array()}};
+    Json result={{"ok",true},{"domain",domain},{"domains",config.mail_domains()},{"hostname",hostname},{"outbound_mode",config.outbound_mode()},{"expected",expected},{"records",Json::array()}};
     auto record=[&](const std::string& id,const std::string& name,const std::string& type,const std::string& value,bool required) {
         const auto host=name==domain?"@":name.ends_with("."+domain)?name.substr(0,name.size()-domain.size()-1):name;
         result["records"].push_back({{"id",id},{"name",name},{"host",host},{"type",type},{"value",value},{"required",required},

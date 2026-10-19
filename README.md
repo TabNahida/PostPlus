@@ -26,7 +26,8 @@
 - **Connect mail clients.** Send through SMTP and read through POP3 or the supported IMAP commands, with TLS support.
 - **Keep mail on disk.** Accounts, mailboxes, delivery queues, and retries survive restarts. Rejected mail is retained in quarantine.
 - **Choose who has an account.** Administrators create users or issue expiring invitation links for ordinary mailbox registration.
-- **Copy recent verification codes.** Webmail recognizes codes from recent Inbox or Trash mail without marking it read; integrations can use the owner-bound code API.
+- **Find recent verification codes and links.** Webmail recognizes codes and account verification links from recent Inbox or Trash mail without marking it read. Copy a code or inspect a link's destination before opening it; integrations can use the owner-bound API.
+- **Host several mail domains.** Add up to 49 extra domains, choose a suffix when creating accounts, and keep each full mailbox address independent. Publish the DNS records shown for each domain.
 - **Route mailbox prefixes.** Wildcard forwarding sends matching local addresses to an existing local inbox.
 - **Limit integration access.** Choose API key permissions independently for administration and personal mailbox APIs. See [mailbox features and permissions](docs/access.md).
 
@@ -165,8 +166,8 @@ tests/                 C++ tests, web checks, and integration suites
 
 - IMAP supports [documented mailbox workflows](docs/protocols.md), including persistent custom folders, subscriptions and flags, IDLE synchronization, ENVELOPE, BODYSTRUCTURE, MIME sections, APPEND, COPY and MOVE. IMAP/POP3 accept TLS password authentication with PLAIN/LOGIN; POP3 download transactions hold an exclusive maildrop lease.
 - Webmail reads plain text, isolated HTML, and attached forwarded messages across built-in and client-created folders. It composes plain or formatted messages, supports attachments, CC/BCC, replies, forwarding, saved drafts, search and per-recipient delivery history. Remote images load automatically in the isolated reader. Custom folder creation remains available through IMAP. A Sent copy records queue submission; remote server acceptance does not confirm inbox placement or reading.
-- Incoming spam is scored locally and placed in Junk; optional loopback Rspamd can supply additional verdicts. Sender allow/block rules use the SMTP envelope and do not authenticate sender identity. Full antivirus scanning requires ClamAV; neither engine is bundled.
-- Outbound delivery supports direct MX routing with DKIM signing or an SMTP relay. Incoming SPF/DKIM/DMARC verification, DSN generation, DANE, MTA-STS, multiple domains, and multi-host high availability are not implemented. Permanent delivery failures remain visible in the administration queue.
+- Incoming spam is scored locally and placed in Junk; optional loopback Rspamd can supply additional verdicts. Webmail can move messages to Junk or restore them to Inbox. Sender allow/block rules use the SMTP envelope and do not authenticate sender identity. Full antivirus scanning requires ClamAV; neither engine is bundled.
+- Outbound delivery supports direct MX routing with DKIM signing or an SMTP relay. Incoming SPF/DKIM/DMARC verification, DSN generation, DANE, MTA-STS, and multi-host high availability are not implemented. Permanent delivery failures remain visible in the administration queue.
 - SMTP queues mail transactionally. Local delivery is idempotent; retrying outbound mail after an interrupted acknowledgement can produce a duplicate.
 - Sessions use bounded worker pools, SQLite serializes writes, and delivery uses one worker. Capacity for hundreds or thousands of active users requires representative workload testing and further development.
 - Linux installations can use the bundled [systemd installer](docs/systemd.md) after setup for automatic startup and restart on failure. Automatic certificate renewal and DNS automation are not bundled.

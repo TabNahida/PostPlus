@@ -681,7 +681,7 @@ private:
         if (request.method == "GET" && request.path == "/health")
             return json_response({{"ok", true}, {"service", service_name}});
         if (request.method == "GET" && request.path == "/api/public/config")
-            return json_response({{"ok", true}, {"domain", config_.text("domain", "localhost")},{"max_message_bytes",config_.number("max_message_bytes",10485760)}});
+            return json_response({{"ok", true}, {"domain", config_.mail_domains().front()}, {"domains",config_.mail_domains()},{"max_message_bytes",config_.number("max_message_bytes",10485760)}});
         if (!admin_only)
             if (auto discovered = mail_client_discovery(config_, request)) return *discovered;
         if (request.method == "GET") {
@@ -722,7 +722,9 @@ private:
         if (api_key_management_route(path)) return manage_api_keys(request, session, path);
         if (request.method == "GET" && path == "/api/verification-code") {
             const auto folder = parameter("folder", "INBOX");
-            if (query.size() > 1 || (!query.empty() && !query.contains("folder")) || (folder != "INBOX" && folder != "Trash"))
+            const bool include_links = parameter("include_links") == "true";
+            if (query.size() > (query.contains("folder") ? 1u : 0u) + (query.contains("include_links") ? 1u : 0u) ||
+                (query.contains("include_links") && !include_links) || (folder != "INBOX" && folder != "Trash"))
                 throw ApiError(400, "Verification code lookup accepts only an Inbox or Trash folder.");
             const auto candidates = rpc(config_, "storage", {{"op","verification_candidates"},{"username",session.username},{"folder",folder},{"max_age_seconds",900},{"limit",30}});
             require_ok(candidates, "Unable to load verification codes.");
@@ -734,10 +736,13 @@ private:
                 try { part=mime::parse(candidate.at("raw").get<std::string>()); }
                 catch(const std::exception&) { continue; }
                 const auto code = extract_verification_code(part);
-                if (!code) continue;
-                return json_response({{"ok",true},{"found",true},{"code",code->code},{"message_id",candidate.at("id")},
+                const auto link = include_links ? extract_verification_link(part) : std::nullopt;
+                if (!code && !link) continue;
+                Json result = {{"ok",true},{"found",true},{"code",code ? Json(code->code) : Json(nullptr)},{"message_id",candidate.at("id")},
                     {"from",mime::decode_header(mime::header(part,"from"))},{"subject",mime::decode_header(mime::header(part,"subject"))},
-                    {"received_at",received},{"expires_at",received+900}});
+                    {"received_at",received},{"expires_at",received+900}};
+                if (include_links) result["link"] = link ? Json{{"url",link->url},{"label",link->label}} : Json(nullptr);
+                return json_response(result);
             }
             return json_response({{"ok",true},{"found",false}});
         }
@@ -854,7 +859,7 @@ private:
                     else if (request.method == "POST") {
                         const auto input=request_json(request);
                         for (const auto& item:input.items()) {
-                            if (item.key()!="name" && item.key()!="localpart" && item.key()!="expires_in_days" && item.key()!="max_uses")
+                            if (item.key()!="name" && item.key()!="localpart" && item.key()!="domain" && item.key()!="expires_in_days" && item.key()!="max_uses")
                                 throw ApiError(400,"Unexpected invitation field.");
                             command[item.key()]=item.value();
                         }
@@ -1026,7 +1031,10 @@ private:
                 (request.method == "POST" && path == "/api/admin/dns/check")) {
                 const auto saved=Config::from_file(config_.source);
                 try {
-                    if(request.method=="GET") return json_response(dns_recommendations(saved));
+                    if(request.method=="GET") {
+                        if(query.size()>1 || (!query.empty() && !query.contains("domain")))throw ApiError(400,"Select a configured mail domain.");
+                        return json_response(dns_recommendations(saved,query.empty()?Json::object():Json{{"domain",parameter("domain")}}));
+                    }
                     return json_response(DnsChecker().check_server(saved,request_json(request)));
                 } catch(const DnsError& error) {
                     return json_response({{"ok",false},{"code",error.code},{"error",error.what()}},400);
@@ -1142,7 +1150,7 @@ private:
             if (request.method == "POST" && request.path == "/api/admin/users") {
                 const auto input = request_json(request);
                 const auto username = username_field(input);
-                if (username.substr(username.find('@') + 1) != lower(config_.text("domain", "localhost")))
+                if (!config_.local_address(username))
                     throw ApiError(400, "Account addresses must use the configured server domain.");
                 const auto password = password_field(input);
                 auto result = rpc(config_, "auth", {{"op", "create"}, {"username", username}, {"password", password}, {"admin", input.value("admin", false)}});
@@ -1247,12 +1255,11 @@ HttpResponse Web::send_mail(const HttpRequest& request, const WebSession& sessio
     std::set<std::string> unique;
     std::vector<std::string> recipients;
     Json routes=Json::object();
-    const auto domain = lower(config_.text("domain", "localhost"));
     auto envelope=message.to;envelope.insert(envelope.end(),message.cc.begin(),message.cc.end());envelope.insert(envelope.end(),message.bcc.begin(),message.bcc.end());
     for (const auto& address : envelope) {
         auto recipient = address;
         if (!unique.insert(recipient).second) continue;
-        if (recipient.substr(recipient.find('@') + 1) == domain) {
+        if (config_.local_address(recipient)) {
             const auto route=resolve_local_recipient(config_,recipient);
             require_ok(route,"Unable to validate recipients.");
             if (!route.value("exists",false)) throw ApiError(400,"A local recipient account does not exist: "+recipient);

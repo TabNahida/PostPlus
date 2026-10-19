@@ -2,6 +2,17 @@
 // Only an explicit choice is persisted. A fresh browser always starts in English.
 window.PostPlusI18n = (() => {
   const chinese = {
+    "Additional mail domains":"附加邮箱域名",
+    "One domain per line, up to 49. Mailboxes use their complete address and remain separate across domains. Publish MX, SPF, DKIM and DMARC for each domain.":"每行填写一个域名，最多 49 个。邮箱使用完整地址，不同域名的邮箱相互独立。请为每个域名发布 MX、SPF、DKIM 和 DMARC 记录。",
+    "Enter at most 49 valid ASCII mail domains, one per line.":"请输入最多 49 个有效的 ASCII 邮箱域名，每行一个。",
+    "DKIM signing requires a public mail domain and valid selector for every mail domain.":"启用 DKIM 签名时，每个邮箱域名都必须是公共域名，并使用有效的选择器。",
+    "Select a configured mail domain.":"请选择已配置的邮箱域名。",
+    "Latest verification code or link":"最新验证码或验证链接",
+    "Open verification link":"打开验证链接",
+    "Check the sender and destination before opening.":"打开前请核对发件人和目标地址。",
+    "No recent verification code or link.":"暂无近期验证码或验证链接。",
+    "Mark as junk":"标记为垃圾邮件",
+    "Not junk":"不是垃圾邮件",
     "Attachment":"附件",
     "Reply":"回复",
     "Reply to all":"回复全部",

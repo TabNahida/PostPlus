@@ -149,7 +149,7 @@ Config Config::from_file(const std::filesystem::path& path) {
     if (config.number("max_message_bytes", 10485760) < 1024 || config.number("max_message_bytes", 10485760) > 100 * 1024 * 1024) throw std::invalid_argument("max_message_bytes must be 1024..104857600");
     if (config.number("max_connections", 32) < 1 || config.number("max_connections", 32) > 1024) throw std::invalid_argument("max_connections must be 1..1024");
     if (config.number("timeout_seconds", 30) < 1 || config.number("timeout_seconds", 30) > 300) throw std::invalid_argument("timeout_seconds must be 1..300");
-    if (!valid_address("postmaster@" + config.text("domain", "localhost"))) throw std::invalid_argument("invalid domain");
+    (void)config.mail_domains();
     const auto outbound = config.outbound_mode();
     if (outbound != "disabled" && outbound != "direct" && outbound != "relay") throw std::invalid_argument("outbound_mode must be disabled, direct, or relay");
     const auto hostname = config.mail_hostname();
@@ -158,7 +158,9 @@ Config Config::from_file(const std::filesystem::path& path) {
     if (outbound == "direct" && (!valid_dkim_domain(hostname) || !valid_dkim_domain(config.text("domain")) || config.text("dkim_private_key").empty())) throw std::invalid_argument("direct delivery requires public mail_hostname, domain and dkim_private_key");
     if (!valid_dkim_selector(config.text("dkim_selector","postplus"))) throw std::invalid_argument("invalid dkim_selector");
     if (outbound=="direct" && config.text("domain").size()+config.text("dkim_selector","postplus").size()+12>253) throw std::invalid_argument("DKIM record name is too long");
-    if (outbound=="relay" && !config.text("dkim_private_key").empty() && !valid_dkim_record_name(config.text("domain"),config.text("dkim_selector","postplus"))) throw std::invalid_argument("configured DKIM signing requires a public domain and valid selector");
+    if (outbound=="direct" || (outbound=="relay" && !config.text("dkim_private_key").empty()))
+        for (const auto& domain : config.mail_domains())
+            if (!valid_dkim_record_name(domain,config.text("dkim_selector","postplus"))) throw std::invalid_argument("configured DKIM signing requires public mail domains and a valid selector");
     if (!config.text("dkim_private_key").empty()) (void)load_dkim_private_key(config.text("dkim_private_key"));
     const auto budget = config.number("direct_timeout_seconds",120);
     if (budget < 1 || budget > 300) throw std::invalid_argument("direct_timeout_seconds must be 1..300");
@@ -176,6 +178,32 @@ std::string Config::outbound_mode() const { return text("outbound_mode", text("s
 std::string Config::mail_hostname() const {
     const auto domain = text("domain", "localhost");
     return text("mail_hostname", domain == "localhost" || lower(domain).starts_with("mail.") ? domain : "mail." + domain);
+}
+std::vector<std::string> Config::mail_domains() const {
+    std::vector<std::string> result;
+    auto append = [&](const std::string& input) {
+        const auto domain = lower(trim(input));
+        if (!valid_address("postmaster@" + domain)) throw std::invalid_argument("invalid mail domain");
+        if (std::find(result.begin(), result.end(), domain) == result.end()) result.push_back(domain);
+    };
+    append(text("domain", "localhost"));
+    if (values.contains("additional_domains")) {
+        const auto& additional = values.at("additional_domains");
+        if (!additional.is_array() || additional.size() > 49) throw std::invalid_argument("additional_domains must contain at most 49 domains");
+        for (const auto& domain : additional) {
+            if (!domain.is_string()) throw std::invalid_argument("additional_domains must contain domain strings");
+            append(domain.get<std::string>());
+        }
+    }
+    return result;
+}
+bool Config::hosts_domain(std::string_view input) const {
+    const auto domain = lower(std::string(input));
+    const auto domains = mail_domains();
+    return std::find(domains.begin(), domains.end(), domain) != domains.end();
+}
+bool Config::local_address(std::string_view address) const {
+    return valid_address(address) && hosts_domain(address.substr(address.rfind('@') + 1));
 }
 int Config::port(const std::string& service) const {
     static const std::map<std::string, int> defaults{{"auth",18081},{"storage",18082},{"filter",18083},{"transfer",18084},{"smtp",25},{"submission",587},{"smtps",465},{"pop3",110},{"pop3s",995},{"imap",143},{"imaps",993},{"web",80},{"admin",8081}};

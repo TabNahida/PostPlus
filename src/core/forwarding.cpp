@@ -41,7 +41,7 @@ std::array<unsigned, 3> forwarding_specificity(std::string_view pattern) {
 }
 Json resolve_local_recipient(const Config& config, const std::string& input, const std::string& queue_id) {
     const auto recipient = lower(trim(input));
-    if (!valid_address(recipient) || recipient.substr(recipient.find('@') + 1) != lower(config.text("domain", "localhost")))
+    if (!config.local_address(recipient))
         throw std::invalid_argument("Forwarding can resolve only recipients in the configured local domain.");
     Json request{{"op", "resolve_recipient"}, {"recipient", recipient}};
     if (!queue_id.empty()) request["queue_id"] = queue_id;
@@ -49,7 +49,7 @@ Json resolve_local_recipient(const Config& config, const std::string& input, con
     if (!response.value("ok", false)) throw std::runtime_error(response.value("error", "Recipient resolution unavailable."));
     if (response.value("exists", false)) {
         const auto destination = response.at("destination").get<std::string>();
-        if (!valid_address(destination) || destination.substr(destination.find('@') + 1) != lower(config.text("domain", "localhost")))
+        if (!config.local_address(destination))
             throw std::runtime_error("Recipient resolver returned a nonlocal destination.");
     }
     return response;

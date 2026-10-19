@@ -1,20 +1,41 @@
 "use strict";
-// Keep the configured mail domain visible while accepting saved full usernames.
+// Keep the chosen mail domain visible while accepting saved full usernames.
 window.PostPlusAddress = (() => {
   function create(input, suffix) {
-    let domain = "", fixedAddress = "", draftDomain = false;
+    let domain = "", domains = [], fixedAddress = "", draftDomain = false, selector = null;
     const validDomain = value => typeof value === "string" && value.length > 0 && value.length <= 253 && value.split(".").every(label => label.length > 0 && label.length <= 63 && /^[a-z0-9](?:[a-z0-9-]*[a-z0-9])?$/i.test(label));
     function displayDomain(value) {
       domain = value.toLowerCase();
-      if (!fixedAddress) suffix.textContent = domain ? "@" + domain : "";
+      render();
       normalize();
     }
-    function setDomain(value) {
-      if (!validDomain(value))
-        throw new Error(PostPlusI18n.t("The server returned an unreadable response."));
-      draftDomain = false;
-      displayDomain(value);
+    function render() {
+      if (fixedAddress || domains.length < 2 || draftDomain) {
+        selector = null;
+        suffix.textContent = fixedAddress ? fixedAddress.slice(fixedAddress.lastIndexOf("@")) : domain ? "@" + domain : "";
+        return;
+      }
+      if (!selector) {
+        selector = document.createElement("select");
+        selector.className = "mailbox-domain-select";
+        selector.setAttribute("aria-label",PostPlusI18n.t("Mail domain"));
+        for (const value of domains) {
+          const option = document.createElement("option"); option.value = value; option.textContent = "@" + value; selector.append(option);
+        }
+        selector.addEventListener("change",()=>{domain=selector.value;});
+        suffix.textContent = ""; suffix.append(selector);
+      }
+      selector.value = domain;
     }
+    function setDomains(values) {
+      if (!Array.isArray(values) || !values.length || values.length > 50 || values.some(value=>!validDomain(value)))
+        throw new Error(PostPlusI18n.t("The server returned an unreadable response."));
+      domains = [...new Set(values.map(value=>value.toLowerCase()))];
+      selector = null;
+      draftDomain = false;
+      displayDomain(domains.includes(domain)?domain:domains[0]);
+    }
+    function setDomain(value) { setDomains([value]); }
     function setDraftDomain(value) {
       draftDomain = true;
       displayDomain(value.trim());
@@ -22,6 +43,8 @@ window.PostPlusAddress = (() => {
     function normalize() {
       if (fixedAddress || !domain) return;
       const value = input.value.trim();
+      const at = value.lastIndexOf("@"), pasted = value.slice(at+1).toLowerCase();
+      if (at >= 0 && !draftDomain && domains.includes(pasted)) {domain=pasted;render();}
       if (value.toLowerCase().endsWith("@" + domain)) input.value = value.slice(0, -(domain.length + 1));
     }
     function address() {
@@ -39,10 +62,10 @@ window.PostPlusAddress = (() => {
       fixedAddress = value;
       input.readOnly = Boolean(value);
       input.value = value ? value.slice(0, value.lastIndexOf("@")) : "";
-      suffix.textContent = value ? value.slice(value.lastIndexOf("@")) : domain ? "@" + domain : "";
+      selector=null;render();
     }
     input.addEventListener("change", normalize);
-    return {setDomain, setDraftDomain, setAddress, address};
+    return {setDomain, setDomains, setDraftDomain, setAddress, address};
   }
   return {create};
 })();

@@ -146,7 +146,7 @@ void smtp(Connection& c, const Config& cfg, std::chrono::seconds data_timeout, b
                 if (!path(arg, "to:", recipient, suffix) || recipient.empty()) { reply("501 5.1.3 Invalid recipient\r\n"); continue; }
                 if (!suffix.empty()) { reply("555 5.5.4 Unsupported RCPT parameter\r\n"); continue; }
                 if (recipients.size() >= recipient_limit) { reply("452 4.5.3 Too many recipients\r\n"); continue; }
-                bool local = recipient.substr(recipient.rfind('@') + 1) == lower(cfg.text("domain", "localhost"));
+                bool local = cfg.local_address(recipient);
                 if (local) {
                     Json result;
                     try { result = recipient_routes.contains(recipient) ? recipient_routes.at(recipient) : resolve_local_recipient(cfg, recipient); }
@@ -154,7 +154,7 @@ void smtp(Connection& c, const Config& cfg, std::chrono::seconds data_timeout, b
                     if (!result.value("exists", false)) { reply("550 5.1.1 Unknown recipient\r\n"); continue; }
                     recipient_routes[recipient] = result;
                 } else if (username.empty() || cfg.outbound_mode()=="disabled" ||
-                    (cfg.outbound_mode()=="direct" && !sender.empty() && sender.substr(sender.rfind('@')+1)!=lower(cfg.text("domain")))) { reply("550 5.7.1 Relay denied\r\n"); continue; }
+                    (cfg.outbound_mode()=="direct" && !sender.empty() && !cfg.local_address(sender))) { reply("550 5.7.1 Relay denied\r\n"); continue; }
                 if (std::find(recipients.begin(), recipients.end(), recipient) == recipients.end()) recipients.push_back(recipient);
                 reply("250 2.1.5 Recipient accepted\r\n"); continue;
             }

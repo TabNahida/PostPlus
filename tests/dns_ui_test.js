@@ -49,6 +49,12 @@ async function administration(){
   pending.shift()({...recommendation,checked_at:"2026-10-14T12:00:00Z",resolver:"Public DNS",records:recommendation.records.map(record=>({...record,status:"matched",observed:[record.value]})),connectivity:[{service:"smtp",hostname:"mail.example.com",port:25,status:"reachable",addresses:[{address:"93.184.216.34",reachable:true}]}]});await checked;
   assert.equal(descendants(container).filter(item=>item.dataset.record).length,2,"Matching configured records stay visible");assert.match(container.textContent,/TCP connection succeeded/);assert.ok(descendants(container).some(item=>item.readOnly&&item.value==="93.184.216.34"));
   await id("ipv4").fire("input");assert.ok(descendants(container).filter(item=>item.dataset.record).every(item=>item.dataset.status==="stale"));
+  const refreshing=id("reload").fire("click");pending.shift()({...recommendation,domains:["example.com","example.net"]});await refreshing;
+  id("domain").value="example.net";const selecting=id("domain").fire("change");
+  assert.equal(requests.at(-1).path,"?domain=example.net","Each domain loads its own DNS records");
+  pending.shift()({...recommendation,domain:"example.net",domains:["example.com","example.net"]});await selecting;
+  const secondaryCheck=id("check").fire("click");assert.equal(requests.at(-1).options.body.domain,"example.net");
+  pending.shift()({...recommendation,domain:"example.net",domains:["example.com","example.net"],checked_at:"2026-10-14T12:00:00Z"});await secondaryCheck;
   const reloading=id("reload").fire("click");component.dispose();pending.shift()(recommendation);await reloading;assert.equal(container.children.length,0,"A stale reply cannot restore DNS after sign-out or settings reload");
   const settings=fs.readFileSync(path.join(root,"web/settings.js"),"utf8");assert.match(settings,/PostPlusAdminDns\.create/);assert.match(settings,/showDns:!options\.dnsRequest/);
   assert.match(fs.readFileSync(path.join(root,"web/admin.html"),"utf8"),/src="\/admin-dns\.js"/);

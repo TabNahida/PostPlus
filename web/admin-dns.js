@@ -12,6 +12,8 @@ window.PostPlusAdminDns = (() => {
     function node(tag,text,className){const item=document.createElement(tag);if(text){item.dataset.i18n=text;item.textContent=t(text);}if(className)item.className=className;return item;}
     root.replaceChildren();
     const intro=node("p","DNS uses the saved server settings. Publish these records at your DNS provider, then test them here without saving or restarting PostPlus.","field-hint"),summary=node("p",null,"dns-prerequisite"),edit=node("details",null,"dns-technical"),grid=node("div",null,"settings-grid admin-dns-fields");
+    const domainLabel=node("label","Mail domain"),domainSelect=node("select");domainSelect.id=`${prefix}-domain`;domainSelect.setAttribute("aria-label",t("Mail domain"));domainLabel.append(domainSelect);domainLabel.hidden=true;
+    domainSelect.addEventListener("change",()=>load(false));
     edit.append(node("summary","Expected DNS values (optional)"),node("p","Enter your actual public IPs to compare them with DNS and prepare an exact SPF policy. For a relay or an existing policy, enter the values you want to keep. These fields are only used for this check.","field-hint"),grid);
     for(const [name,label] of fields){
       const wrap=node("div",null,"setting-field"+(["spf","dkim_value","dmarc"].includes(name)?" wide":"")),caption=node("label",label),input=node(name==="dkim_type"?"select":["spf","dkim_value","dmarc"].includes(name)?"textarea":"input");
@@ -25,12 +27,12 @@ window.PostPlusAdminDns = (() => {
     reload.type=check.type="button";reload.id=`${prefix}-reload`;check.id=`${prefix}-check`;status.id=`${prefix}-status`;status.setAttribute("role","status");status.setAttribute("aria-live","polite");failure.setAttribute("role","alert");actions.append(reload,check);
     connections.append(node("h3","Public service connectivity"));
     const connectionRows=node("div",null,"mail-client-grid");connections.append(connectionRows,node("p","Connection tests run from this server to its published public addresses. A failure may be caused by firewall or NAT loopback rules; a success does not prove that another network can reach the server. These tests do not validate TLS certificates or mail delivery.","field-hint"));
-    root.append(intro,summary,edit,actions,status,failure,records,connections,node("p","Set PTR at your VPS or IP provider. Keep A/AAAA and MX in DNS-only mode. Merge authorized senders into one SPF record and publish only one DMARC policy. Existing matching records remain listed here.","field-hint"));
+    root.append(intro,domainLabel,summary,edit,actions,status,failure,records,connections,node("p","Set PTR at your VPS or IP provider. Keep A/AAAA and MX in DNS-only mode. Merge authorized senders into one SPF record and publish only one DMARC policy. Existing matching records remain listed here.","field-hint"));
     function copy(parent,label,value){const wrap=node("div",null,"dns-copy"),caption=node("span",label),input=node(value.length>160?"textarea":"input");if(input.tagName==="INPUT")input.type="text";else input.rows=2;input.value=value;input.readOnly=true;input.spellcheck=false;input.setAttribute("aria-label",t(label));input.addEventListener("click",()=>input.select());wrap.append(caption,input);parent.append(wrap);}
-    function expected(){return Object.fromEntries([...controls].map(([name,input])=>[name,input.value.trim()]));}
+    function expected(){return {domain:domainSelect.value,...Object.fromEntries([...controls].map(([name,input])=>[name,input.value.trim()]))};}
     function render(){
       if(disposed)return;
-      reload.disabled=busy;check.disabled=busy||!report;check.textContent=t(busy?"Checking DNS and connectivity…":"Test DNS and connectivity");for(const input of controls.values())input.disabled=busy;
+      domainSelect.disabled=busy;reload.disabled=busy;check.disabled=busy||!report||domainSelect.value!==report.domain;check.textContent=t(busy?"Checking DNS and connectivity…":"Test DNS and connectivity");for(const input of controls.values())input.disabled=busy;
       summary.textContent=report?t("Mail stays at @{domain}; the server address is {hostname}.",{domain:report.domain,hostname:report.hostname}):"";
       status.textContent=busy?t(report?"Checking public records and configured service ports…":"Loading DNS recommendations…"):stale?t("Expected values changed. Run the test again."):checked?t("DNS and connectivity checked at {time}.",{time:report.checked_at}):t("All recommended records are listed, including records already published. Enter expected values or run a test to see current public DNS.");
       failure.hidden=!error;failure.textContent=error?(error.message||PostPlusI18n.error(error.data||error)):"";records.replaceChildren();
@@ -50,7 +52,7 @@ window.PostPlusAdminDns = (() => {
     function validate(data){if(!data?.ok||typeof data.domain!=="string"||typeof data.hostname!=="string"||!data.expected||!Array.isArray(data.records)||data.records.some(record=>!record||typeof record.id!=="string"||typeof record.name!=="string"||typeof record.type!=="string"||typeof record.value!=="string"||!statuses[record.status]||!Array.isArray(record.observed)||record.observed.some(value=>typeof value!=="string")))throw new Error(t("The server returned an unreadable response."));return data;}
     async function load(test){
       if(disposed||busy)return;const current=++revision;busy=true;error=null;render();
-      try{const data=validate(await request(test?"/check":"",test?{method:"POST",body:expected()}:{method:"GET"}));if(disposed||current!==revision)return;report=data;checked=test;stale=false;if(!test){spfEdited=false;for(const [name,input] of controls)input.value=typeof data.expected[name]==="string"?data.expected[name]:"";}}
+      try{const data=validate(await request(test?"/check":domainSelect.value?"?domain="+encodeURIComponent(domainSelect.value):"",test?{method:"POST",body:expected()}:{method:"GET"}));if(disposed||current!==revision)return;report=data;checked=test;stale=false;domainSelect.replaceChildren();for(const value of data.domains||[data.domain]){const option=node("option");option.value=value;option.textContent=value;domainSelect.append(option);}domainSelect.value=data.domain;domainLabel.hidden=(data.domains||[data.domain]).length<2;if(!test){spfEdited=false;for(const [name,input] of controls)input.value=typeof data.expected[name]==="string"?data.expected[name]:"";}}
       catch(problem){if(!disposed&&current===revision)error=problem;}
       finally{if(!disposed){busy=false;render();}}
     }

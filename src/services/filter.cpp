@@ -15,6 +15,7 @@ namespace postplus {
 namespace {
 struct Rule { std::string term; double weight; };
 enum class ScanResult { clean, infected };
+struct HtmlSignals { std::string text; bool form = false, shortened_link = false; };
 
 class Filter {
 public:
@@ -100,15 +101,17 @@ public:
             return verdict("reject", "malformed MIME message", 0);
         }
         std::vector<std::string_view> payloads{raw};
-        std::string searchable;
-        collect(message, payloads, searchable);
+        std::string searchable, rule_text;
+        bool html_form = false, shortened_link = false;
+        collect(message, payloads, searchable, rule_text, html_form, shortened_link);
         for (const auto payload : payloads) {
             if (payload.find(eicar_) != std::string_view::npos)
                 return verdict("reject", "EICAR antivirus test signature detected", 0);
         }
         searchable = lower(std::move(searchable));
+        rule_text = lower(std::move(rule_text));
         for (const auto& term : blocked_)
-            if (searchable.find(term) != std::string::npos)
+            if (searchable.find(term) != std::string::npos || matches_term(rule_text, term))
                 return verdict("reject", "configured blocked term detected", 0);
         double score = 0;
         Json reasons = Json::array();
@@ -116,18 +119,24 @@ public:
         const bool blocked_sender = inbound && matches(block_, sender);
         const bool allowed_sender = inbound && !blocked_sender && matches(allow_, sender);
         if (inbound && !allowed_sender) {
+            if (rule_text.find(lower(std::string(gtube_))) != std::string::npos ||
+                std::any_of(payloads.begin(), payloads.end(), [](std::string_view payload) { return payload.find(gtube_) != payload.npos; })) {
+                score += spam_threshold_;
+                reasons.push_back("GTUBE anti-spam test signature detected");
+                spam = true;
+            }
             if (blocked_sender) {
                 score += spam_threshold_;
                 reasons.push_back("Envelope sender matches administrator block policy");
                 spam = true;
             }
             for (const auto& rule : rules_) {
-                if (searchable.find(rule.term) != std::string::npos) {
+                if (matches_term(rule_text, rule.term)) {
                     score += rule.weight;
                     if (reasons.size() < 128) reasons.push_back("Weighted term: " + reason_term(rule.term));
                 }
             }
-            heuristic(message, score, reasons);
+            heuristic(message, html_form, shortened_link, score, reasons);
             if (reasons.size() > 128) reasons.erase(reasons.begin() + 128, reasons.end());
             if (rspamd_enabled_) {
                 try {
@@ -211,18 +220,183 @@ private:
         const auto at = sender.rfind('@');
         return policy.contains(sender) || (at != std::string::npos && policy.contains(sender.substr(at + 1)));
     }
-    static void heuristic(const mime::Part& part, double& score, Json& reasons) {
-        bool executable = false, form = false, shortened_link = false;
-        std::function<void(const mime::Part&)> inspect = [&](const mime::Part& item) {
-            if (item.content_type == "text/html") {
-                const auto html = lower(mime::decode_text(item));
-                form = form || html.find("<form") != std::string::npos || html.find("<input") != std::string::npos;
-                for (const auto* url : {"bit.ly/", "tinyurl.com/", "t.co/", "is.gd/"})
-                    shortened_link = shortened_link || html.find(url) != std::string::npos;
+    static std::string normalize_text(std::string_view input) {
+        std::string output;
+        output.reserve(input.size());
+        for (std::size_t at = 0; at < input.size();) {
+            const auto tail = input.substr(at);
+            // Ignore common invisible word separators used to obscure terms.
+            if (tail.starts_with("\xE2\x80\x8B") || tail.starts_with("\xE2\x80\x8C") ||
+                tail.starts_with("\xE2\x80\x8D") || tail.starts_with("\xE2\x81\xA0") || tail.starts_with("\xEF\xBB\xBF")) { at += 3; continue; }
+            if (tail.starts_with("\xC2\xAD")) { at += 2; continue; }
+            const auto ch = static_cast<unsigned char>(input[at]);
+            const bool unicode_space = (tail.size() >= 3 && tail[0] == '\xE2' && tail[1] == '\x80' &&
+                ((static_cast<unsigned char>(tail[2]) >= 0x80 && static_cast<unsigned char>(tail[2]) <= 0x8a) ||
+                 tail[2] == '\xA8' || tail[2] == '\xA9' || tail[2] == '\xAF')) ||
+                tail.starts_with("\xE2\x81\x9F") || tail.starts_with("\xE3\x80\x80");
+            if (std::isspace(ch) || tail.starts_with("\xC2\xA0") || unicode_space) {
+                if (!output.empty() && output.back() != ' ') output += ' ';
+                at += unicode_space ? 3 : tail.starts_with("\xC2\xA0") ? 2 : 1;
+            } else { output += input[at++]; }
+        }
+        return trim(output);
+    }
+    static bool matches_term(std::string_view text, std::string_view term) {
+        const auto normalized = normalize_text(term);
+        return !normalized.empty() && text.find(normalized) != text.npos;
+    }
+    static std::string html_entities(std::string_view input) {
+        std::string output;
+        output.reserve(input.size());
+        for (std::size_t at = 0; at < input.size();) {
+            if (input[at] != '&') { output += input[at++]; continue; }
+            const auto offset = input.substr(at, 17).find(';');
+            if (offset == input.npos) { output += input[at++]; continue; }
+            const auto end = at + offset;
+            const auto entity = input.substr(at + 1, end - at - 1);
+            unsigned point = 0;
+            if (entity == "nbsp" || entity == "ensp" || entity == "emsp" || entity == "thinsp") point = ' ';
+            else if (entity == "Tab") point = '\t';
+            else if (entity == "NewLine") point = '\n';
+            else if (entity == "amp") point = '&';
+            else if (entity == "lt") point = '<';
+            else if (entity == "gt") point = '>';
+            else if (entity == "quot") point = '"';
+            else if (entity == "apos") point = '\'';
+            else if (entity == "colon") point = ':';
+            else if (entity == "sol") point = '/';
+            else if (entity == "period") point = '.';
+            else if (entity == "shy") point = 0xad;
+            else if (entity == "ZeroWidthSpace" || entity == "zwnj" || entity == "zwj") point = 0x200b;
+            else if (entity.starts_with('#')) {
+                std::size_t index = 1;
+                unsigned base = 10;
+                if (index < entity.size() && (entity[index] == 'x' || entity[index] == 'X')) { base = 16; ++index; }
+                for (; index < entity.size(); ++index) {
+                    const auto ch = entity[index];
+                    const unsigned digit = ch >= '0' && ch <= '9' ? ch - '0' :
+                        ch >= 'a' && ch <= 'f' ? ch - 'a' + 10 : ch >= 'A' && ch <= 'F' ? ch - 'A' + 10 : base;
+                    if (digit >= base || point > (0x10ffff - digit) / base) { point = 0; break; }
+                    point = point * base + digit;
+                }
             }
+            if (!point || point > 0x10ffff || (point >= 0xd800 && point <= 0xdfff)) {
+                output.append(input.substr(at, end - at + 1));
+            } else if (point <= 0x7f) output += static_cast<char>(point);
+            else if (point <= 0x7ff) {
+                output += static_cast<char>(0xc0 | (point >> 6)); output += static_cast<char>(0x80 | (point & 63));
+            } else if (point <= 0xffff) {
+                output += static_cast<char>(0xe0 | (point >> 12)); output += static_cast<char>(0x80 | ((point >> 6) & 63));
+                output += static_cast<char>(0x80 | (point & 63));
+            } else {
+                output += static_cast<char>(0xf0 | (point >> 18)); output += static_cast<char>(0x80 | ((point >> 12) & 63));
+                output += static_cast<char>(0x80 | ((point >> 6) & 63)); output += static_cast<char>(0x80 | (point & 63));
+            }
+            at = end + 1;
+        }
+        return output;
+    }
+    static bool shortened_url(std::string_view input) {
+        const auto value = lower(trim(html_entities(input)));
+        std::size_t start = value.starts_with("https://") ? 8 : value.starts_with("http://") ? 7 : value.starts_with("//") ? 2 : 0;
+        if (!start) return false;
+        auto host = value.substr(start, value.find_first_of("/?#", start) - start);
+        if (const auto at = host.rfind('@'); at != host.npos) host.erase(0, at + 1);
+        if (const auto colon = host.find(':'); colon != host.npos) host.resize(colon);
+        if (host.ends_with('.')) host.pop_back();
+        return host == "bit.ly" || host == "tinyurl.com" || host == "t.co" || host == "is.gd";
+    }
+    static HtmlSignals html_signals(std::string_view input) {
+        HtmlSignals result;
+        const auto lowered = lower(std::string(input));
+        std::string raw_element;
+        std::size_t template_depth = 0;
+        auto name_char = [](unsigned char ch) { return !std::isspace(ch) && ch != '/' && ch != '>'; };
+        for (std::size_t at = 0; at < input.size();) {
+            if (!raw_element.empty()) {
+                // JavaScript/CSS/title text is not HTML markup. In particular,
+                // a literal '<' or quote cannot swallow the following body.
+                const auto marker = "</" + raw_element;
+                auto close = lowered.find(marker, at);
+                while (close != lowered.npos) {
+                    const auto after = close + marker.size();
+                    if (after < input.size() && (std::isspace(static_cast<unsigned char>(input[after])) || input[after] == '>' || input[after] == '/')) break;
+                    close = lowered.find(marker, after);
+                }
+                if (close == lowered.npos) break;
+                at = close;
+                raw_element.clear();
+            }
+            if (input.substr(at).starts_with("<!--")) {
+                const auto end = input.find("-->", at + 4);
+                at = end == input.npos ? input.size() : end + 3;
+                continue;
+            }
+            if (input[at] != '<') {
+                const auto next = input.find('<', at);
+                const auto end = next == input.npos ? input.size() : next;
+                if (!template_depth) result.text.append(input.substr(at, end - at));
+                at = end;
+                continue;
+            }
+            std::size_t name_at = at + 1;
+            const bool closing = name_at < input.size() && input[name_at] == '/';
+            if (closing) ++name_at;
+            if (name_at == input.size() || !((input[name_at] >= 'a' && input[name_at] <= 'z') || (input[name_at] >= 'A' && input[name_at] <= 'Z'))) {
+                if (!template_depth) result.text += input[at];
+                ++at; continue;
+            }
+            std::size_t name_end = name_at;
+            while (name_end < input.size() && name_char(static_cast<unsigned char>(input[name_end]))) ++name_end;
+            if (name_end == name_at) { if (!template_depth) result.text += input[at]; ++at; continue; }
+            const auto name = lowered.substr(name_at, name_end - name_at);
+            std::size_t end = name_end;
+            char quote = 0;
+            for (; end < input.size(); ++end) {
+                const auto ch = input[end];
+                if (quote) { if (ch == quote) quote = 0; }
+                else if (ch == '\'' || ch == '"') quote = ch;
+                else if (ch == '>') break;
+            }
+            if (end == input.size()) break;
+            if (name == "template") {
+                if (!closing) ++template_depth;
+                else if (template_depth) --template_depth;
+            } else if (!closing && (name == "title" || name == "script" || name == "style")) {
+                raw_element = name;
+            } else if (!template_depth) {
+                if (!closing && (name == "form" || name == "input")) result.form = true;
+                if (!closing && (name == "a" || name == "area")) {
+                    for (std::size_t pos = name_end; pos < end;) {
+                        while (pos < end && (std::isspace(static_cast<unsigned char>(input[pos])) || input[pos] == '/')) ++pos;
+                        const auto begin = pos;
+                        while (pos < end && !std::isspace(static_cast<unsigned char>(input[pos])) && input[pos] != '=' && input[pos] != '/') ++pos;
+                        const auto attribute = lowered.substr(begin, pos - begin);
+                        while (pos < end && std::isspace(static_cast<unsigned char>(input[pos]))) ++pos;
+                        if (pos == end || input[pos] != '=') continue;
+                        ++pos;
+                        while (pos < end && std::isspace(static_cast<unsigned char>(input[pos]))) ++pos;
+                        const auto delimiter = pos < end && (input[pos] == '\'' || input[pos] == '"') ? input[pos++] : '\0';
+                        const auto value_begin = pos;
+                        while (pos < end && (delimiter ? input[pos] != delimiter : !std::isspace(static_cast<unsigned char>(input[pos])))) ++pos;
+                        if (attribute == "href") result.shortened_link = result.shortened_link || shortened_url(input.substr(value_begin, pos - value_begin));
+                        if (delimiter && pos < end) ++pos;
+                    }
+                }
+                for (const auto* block : {"br", "p", "div", "li", "tr", "td", "th", "table", "section", "article", "h1", "h2", "h3", "hr"})
+                    if (name == block) { result.text += ' '; break; }
+            }
+            at = end + 1;
+        }
+        result.text = html_entities(result.text);
+        return result;
+    }
+    static void heuristic(const mime::Part& part, bool form, bool shortened_link, double& score, Json& reasons) {
+        bool executable = false;
+        std::function<void(const mime::Part&)> inspect = [&](const mime::Part& item) {
             try {
                 const auto filename = lower(mime::attachment_filename(item));
-                for (const auto* suffix : {".exe", ".com", ".scr", ".bat", ".cmd", ".ps1", ".js", ".vbs"})
+                for (const auto* suffix : {".exe", ".com", ".scr", ".bat", ".cmd", ".ps1", ".js", ".vbs", ".msi", ".hta", ".lnk", ".wsf", ".jse", ".vbe"})
                     executable = executable || filename.ends_with(suffix);
             } catch (const std::exception&) {}
             for (const auto& child : item.parts) inspect(child);
@@ -232,27 +406,38 @@ private:
         if (shortened_link) { score += 1; reasons.push_back("HTML contains a shortened link"); }
         if (executable) { score += 3; reasons.push_back("Executable attachment filename"); }
     }
-    static void collect(const mime::Part& part, std::vector<std::string_view>& payloads, std::string& searchable) {
+    static void collect(const mime::Part& part, std::vector<std::string_view>& payloads, std::string& searchable,
+                        std::string& rule_text, bool& form, bool& shortened_link) {
         for (const auto& [name, value] : part.headers) {
             const auto header_name = lower(name);
             // Internet senders control these fields. Only our RPC metadata and
             // local scanner response can establish filtering policy.
             if (header_name == "authentication-results" || header_name == "arc-authentication-results" ||
                 header_name.starts_with("x-spam") || header_name == "dkim-signature" || header_name == "received") continue;
-            searchable += name; searchable += ": ";
-            try { searchable += mime::decode_header(value); }
-            catch (const std::exception&) { searchable += value; }
+            std::string decoded;
+            try { decoded = mime::decode_header(value); }
+            catch (const std::exception&) { decoded = value; }
+            searchable += name; searchable += ": "; searchable += decoded;
             searchable += '\n';
+            rule_text += normalize_text(decoded); rule_text += '\n';
         }
         if (!part.body.empty()) {
             payloads.emplace_back(part.body);
             // Arbitrary attachment bytes still enter the malware scanner, while
             // text bodies and headers are the input to the spam policy.
             if (part.content_type.starts_with("text/") || part.content_type.empty()) {
-                searchable += mime::decode_text(part); searchable += '\n';
+                const auto decoded = mime::decode_text(part);
+                searchable += decoded; searchable += '\n';
+                if (part.content_type == "text/html") {
+                    const auto html = html_signals(decoded);
+                    rule_text += normalize_text(html.text);
+                    form = form || html.form;
+                    shortened_link = shortened_link || html.shortened_link;
+                } else rule_text += normalize_text(decoded);
+                rule_text += '\n';
             }
         }
-        for (const auto& child : part.parts) collect(child, payloads, searchable);
+        for (const auto& child : part.parts) collect(child, payloads, searchable, rule_text, form, shortened_link);
     }
     Json scan_rspamd(std::string_view raw, const Json& request) const {
         Connection connection{std::chrono::seconds(rspamd_timeout_)};
@@ -364,6 +549,7 @@ private:
         return result;
     }
     static constexpr std::string_view eicar_ = "X5O!P%@AP[4\\PZX54(P^)7CC)7}$EICAR-STANDARD-ANTIVIRUS-TEST-FILE!$H+H*";
+    static constexpr std::string_view gtube_ = "XJS*C4JDBQADN1.NSBN3*2IDNEN*GTUBE-STANDARD-ANTI-UBE-TEST-EMAIL*C.34X";
     int max_bytes_;
     std::string clamav_host_;
     int clamav_port_, clamav_timeout_, spam_threshold_;
