@@ -21,6 +21,7 @@
 [data-theme="dark"] .domain-state.is-pending { background:#493e29; color:#eed5a7; }
 .domain-row-actions { white-space:nowrap; }
 .domain-row-actions .table-action { margin-right:14px; }
+.domain-hostname { color:var(--muted); font-size:12px; overflow-wrap:anywhere; }
 .domain-pagination { display:flex; align-items:center; gap:12px; margin-top:22px; }
 .domain-pagination>p { flex:1; font-size:12px; }
 .portal-policy-grid { display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); gap:24px; }
@@ -33,14 +34,31 @@
 .portal-dns-note h3 { font-size:14px; }
 .portal-dns-note p { line-height:1.8; margin:10px 0 0; }
 .domain-policy-actions { display:flex; justify-content:flex-end; gap:12px; margin-top:24px; }
-.domain-dialog { width:min(940px,calc(100vw - 40px)); max-height:90dvh; }
+.portal-policy-form>[role="status"] { margin:0 0 24px; font-size:13px; line-height:1.8; }
+.domain-dialog { width:min(940px,calc(100vw - 40px)); max-height:90dvh; overflow:hidden; }
+.domain-dialog[open] { display:flex; flex-direction:column; }
+.domain-dialog .dialog-header,.domain-dialog .dialog-footer { flex-shrink:0; }
 .domain-dialog>.form-error { margin:0 28px 20px; }
 .domain-dialog .dialog-header h2 { overflow-wrap:anywhere; }
-.domain-dialog .dialog-body { padding:24px 28px; max-height:calc(90dvh - 170px); overflow:auto; overscroll-behavior:contain; }
+.domain-dialog .dialog-body { padding:24px 28px; min-height:0; flex:1 1 auto; overflow:auto; overscroll-behavior:contain; }
 .domain-wizard-steps { display:flex; list-style:none; gap:22px; padding:0 0 22px; margin:0 0 26px; border-bottom:1px solid var(--line); color:var(--muted); font-size:12px; }
 .domain-wizard-steps .current { color:var(--ink); font-weight:600; }
 .domain-dialog #new-mail-domain { max-width:500px; }
 .domain-dialog .field-hint { line-height:1.8; }
+.domain-detail-tabs { gap:24px; margin-bottom:24px; }
+.domain-detail-tabs .domain-tab { font-size:13px; }
+#domain-detail-panel-webmail>.domain-field { max-width:560px; margin-top:24px; }
+#domain-detail-panel-webmail>.button { margin-top:14px; }
+#domain-tls-hostname { width:100%; margin-bottom:8px; }
+.domain-certificate-state { padding:14px 16px; background:var(--surface); border:1px solid var(--line); border-radius:8px; font-size:13px; line-height:1.7; margin:14px 0 24px; }
+.domain-certificate-actions { display:flex; gap:12px; margin:24px 0 14px; justify-content:flex-end; }
+.domain-acme { margin-top:24px; }
+.domain-acme .acme-panel { margin:0; }
+.domain-fallback,.domain-dkim { border-top:1px solid var(--line); margin-top:28px; padding-top:24px; }
+.domain-fallback>summary,.domain-dkim>summary { cursor:pointer; font-size:14px; font-weight:600; }
+.domain-fallback>.button,.domain-dkim>.button { margin-top:18px; }
+.domain-dkim .domain-field { max-width:500px; margin:20px 0; }
+@media(max-width:550px) { .domain-detail-tabs { gap:16px; } .domain-detail-tabs .domain-tab { font-size:12px; } .domain-certificate-actions { flex-direction:column; } }
 .domain-dns-root { margin-top:26px; }
 .domain-dns-root .dns-technical { margin:22px 0; padding:20px; border:1px solid var(--line); border-radius:8px; }
 .domain-dns-root .dns-technical>summary { cursor:pointer; }
@@ -49,5 +67,5 @@
 .domain-dns-root .dns-connectivity { margin-top:24px; }
 .domain-remove-name { font-weight:600; font-size:18px; overflow-wrap:anywhere; }
 #domain-remove-dialog { max-width:570px; }
-@media(max-width:800px) { .portal-policy-grid { grid-template-columns:1fr; } .domain-panel table { min-width:650px; } }
+@media(max-width:800px) { .portal-policy-grid { grid-template-columns:1fr; } .domain-panel table { min-width:780px; } }
 @media(max-width:550px) { .domain-intro h2 { font-size:23px; } .domain-tabs { gap:22px; } .domain-panel .section-heading { align-items:flex-start; gap:16px; } .domain-panel .section-heading>.button { white-space:nowrap; } .portal-policy-card { padding:20px; } .domain-policy-actions { flex-direction:column-reverse; } .domain-pagination { flex-wrap:wrap; } .domain-pagination>p { flex-basis:100%; margin:0; } .domain-dialog { width:calc(100vw - 18px); } .domain-dialog .dialog-body { padding:20px 16px; } .domain-dialog .dialog-footer { gap:10px; flex-wrap:wrap; } .domain-wizard-steps { gap:14px; font-size:11px; } .domain-dns-root .dns-technical { padding:16px 12px; } .domain-dns-root .dns-check-actions .button { width:100%; } }

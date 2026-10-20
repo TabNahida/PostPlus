@@ -2,7 +2,7 @@
 window.PostPlusAcme = (() => {
   const t=(...args)=>PostPlusI18n.t(...args);
   function node(tag,text,className) {const item=document.createElement(tag);if(text){item.dataset.i18n=text;item.textContent=t(text);}if(className)item.className=className;return item;}
-  function create(root,{request,domain="",onCertificate,onDomainChange,onRunningChange,prefix="acme",lockDomain=false}) {
+  function create(root,{request,domain="",onCertificate,onDomainChange,onRunningChange,prefix="acme",lockDomain=false,lockedDomainHint="The certificate uses the mail server hostname from step 1. Change that hostname there before requesting a certificate."}) {
     const panel=node("details",null,"acme-panel");panel.append(node("summary","Get a certificate from Let's Encrypt"));
     panel.append(node("p","Point your domain's DNS to this server and forward public TCP port 80 to PostPlus for HTTP-01 validation.","field-hint"));
     const help=node("details",null,"dns-technical");help.append(node("summary","HTTP-01 certificate details"));
@@ -12,7 +12,7 @@ window.PostPlusAcme = (() => {
     function field(label,name,type,value) {const wrap=node("div"),text=node("label",label),input=node("input");text.htmlFor=`${prefix}-${name}`;input.id=text.htmlFor;input.type=type;input.value=value;input.autocomplete="off";wrap.append(text,input);grid.append(wrap);return input;}
     const host=field("Certificate domain","domain","text",domain),email=field("Certificate contact email","email","email","");
     host.readOnly=lockDomain;
-    if(lockDomain)form.append(node("p","The certificate uses the mail server hostname from step 1. Change that hostname there before requesting a certificate.","field-hint"));
+    if(lockDomain)form.append(node("p",lockedDomainHint,"field-hint"));
     let domainEdited=false;
     host.addEventListener("input",()=>{domainEdited=true;onDomainChange?.(host.value);});
     form.append(grid);const directoryLabel=node("label","Certificate environment"),directory=node("select");directory.id=`${prefix}-directory`;directoryLabel.htmlFor=directory.id;

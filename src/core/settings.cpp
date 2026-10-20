@@ -3,6 +3,7 @@
 #include <postplus/maintenance.hpp>
 #include <postplus/restart.hpp>
 #include <postplus/dkim.hpp>
+#include <postplus/domains.hpp>
 #include <asio/ssl.hpp>
 #include <openssl/evp.h>
 #include <openssl/ssl.h>
@@ -37,7 +38,7 @@ Json fields() {
         result.push_back(std::move(entry));
     };
     add("domain","general","text","localhost","Mail domain","Domain used for local recipient addresses; changing it does not rename existing accounts.");
-    add("admin_hostname","portals","text","","Administration hostname","Only this hostname can open administration. Leave blank to use the first mail domain.");
+    add("admin_hostname","portals","text","","Administration hostname","Set a hostname to enable portal isolation. Leave blank to preserve legacy hostname access.");
     add("webmail_shared_hostname","portals","text","","Shared Webmail hostname","Optional hostname where accounts from all hosted domains can sign in. Each mail domain otherwise accepts only its own accounts.");
     add("bind","network","text","127.0.0.1","Mail and Webmail listening address","Use 127.0.0.1 for local use or 0.0.0.0 to accept IPv4 connections from other computers.");
     add("admin_bind","network","text","127.0.0.1","Administration listening address","Keep 127.0.0.1 unless remote administration is needed; public access requires TLS.");
@@ -254,7 +255,9 @@ Json prepare_dkim(const Config& config,const Json& input) {
     if(!valid_dkim_selector(selector) || domain.size()+selector.size()+12>253) throw SettingsError("dkim_selector","Use a DKIM selector containing letters, digits, and hyphens, with at most 63 characters.");
     // All hosted domains publish the same key under their own selector name.
     // A draft new primary domain retains the existing key-isolation behavior.
-    if(!config.hosts_domain(domain)) { selected.values.erase("dkim_private_key"); selected.values["domain"]=domain; }
+    const auto entries=config.values.find("domain_registry");
+    const bool registered=entries!=config.values.end() && entries->is_object() && entries->contains(domain);
+    if(!config.hosts_domain(domain) && !registered) { selected.values.erase("dkim_private_key"); selected.values["domain"]=domain; }
     selected.values["dkim_selector"]=selector;
     const auto path=dkim_path(selected);
     // Exclusive private creation preserves a published key across retries and restarts.
@@ -300,8 +303,18 @@ Json settings_schema(const Config& config) {
 std::string settings_url(const Config& config,const std::string& service) {
     const bool tls=!config.text("tls_certificate").empty();
     auto host=config.text(service=="admin" ? "admin_hostname" : "webmail_shared_hostname");
-    if(host.empty()) host=config.text("domain","localhost");
     const auto bind=config.text(service=="admin" ? "admin_bind" : "bind","127.0.0.1");
+    if(host.empty()) {
+        const auto domain=config.text("domain","localhost");
+        const auto bound=webmail_hostname(config,domain);
+        if(!trim(config.text("admin_hostname")).empty() || (service!="admin" && bound!=domain))
+            host=service=="admin" ? domain : bound;
+        else {
+            // Match pre-isolation URL selection, including first-run certificates
+            // issued for mail_hostname rather than the mailbox suffix.
+            host=(bind=="0.0.0.0" || bind=="::") ? config.mail_hostname() : bind;
+        }
+    }
     if(config.flag("allow_insecure_auth") && (bind=="127.0.0.1" || bind=="::1")) host=bind;
     if(tls && (host=="127.0.0.1" || host=="::1")) host="localhost";
     if (host.find(':')!=std::string::npos) host="["+host+"]";
@@ -328,7 +341,7 @@ Json settings_view(const Config& config) {
     }
     values["outbound_mode"]=current.outbound_mode();
     values["mail_hostname"]=current.mail_hostname();
-    values["admin_hostname"]=current.text("admin_hostname").empty()?current.text("domain","localhost"):current.text("admin_hostname");
+    values["admin_hostname"]=current.text("admin_hostname");
     if (!current.values.contains("ports") || !current.values.at("ports").contains("web"))
         values["ports"]["web"]=current.port("web");
     const bool available=supervisor_restart_available(config);
@@ -412,6 +425,7 @@ Config validate_settings(const Config& existing,const Json& patch) {
         if(!host.empty() && !valid_address("postmaster@"+host)) throw SettingsError(key,"Enter a valid ASCII hostname without a scheme, port or path.");
         result.values[key]=host;
     }
+    validate_webmail_hostnames(result);
     const auto parent=result.source.empty() ? fs::current_path() : result.source.parent_path();
     for(const auto* field:{"tls_certificate","tls_private_key","dkim_private_key"}) {
         const auto value=trim(result.text(field));

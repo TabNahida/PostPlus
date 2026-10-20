@@ -126,8 +126,10 @@ function translated(key, file) {
 }
 const settingsSource=fs.readFileSync(path.join(root,"src/core/settings.cpp"),"utf8");
 for(const match of settingsSource.matchAll(/SettingsError\([^,]+,\s*"([^"]+)"(?=\s*[,\)])/g))translated(match[1],"settings validation");
-const domainsSource=fs.readFileSync(path.join(root,"src/core/domains.cpp"),"utf8");
-for(const match of domainsSource.matchAll(/SettingsError\([^,]+,\s*"([^"]+)"(?=\s*[,\)])/g))translated(match[1],"domain validation");
+for(const filename of ["domains.cpp","domain_tls.cpp"]){
+  const domainsSource=fs.readFileSync(path.join(root,"src/core",filename),"utf8");
+  for(const match of domainsSource.matchAll(/SettingsError\([^,]+,\s*"([^"]+)"(?=\s*[,\)])/g))translated(match[1],"domain validation");
+}
 for (const file of ["index.html", "admin.html", "setup.html"]) {
   const html = fs.readFileSync(path.join(root, "web", file), "utf8");
   assert.match(html, /<html\b[^>]*\blang="en"(?:\s|>)/, `${file} must render in English before scripts run`);

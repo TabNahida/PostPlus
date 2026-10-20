@@ -23,13 +23,29 @@ def login(s, service, host, username):
 def run(s):
     s.config.update(domain="example.com", mail_hostname="mail.example.com", additional_domains=["example.net"],
                     webmail_shared_hostname="", outbound_mode="disabled")
-    s.config.pop("admin_hostname", None)  # Existing installations default to their first domain.
+    s.config.pop("admin_hostname", None)  # Legacy upgrades must remain reachable.
     s.save()
     for service in ("auth", "storage", "web", "admin"):
         s.start(service)
     for username in ("administrator@example.net", "same@example.com", "same@example.net"):
         assert s.rpc("auth", op="create", username=username, password=PASSWORD,
                      admin=username.startswith("administrator"))["ok"]
+
+    for legacy_host in ("mail.example.com", "old-proxy.example.org", "example.com"):
+        for service in ("web", "admin"):
+            assert request(s, service, "GET", "/api/public/config", legacy_host)[2]["domains"] == ["example.com", "example.net"]
+        assert login(s, "web", legacy_host, "same@example.net")
+        assert login(s, "admin", legacy_host, "administrator@example.net")
+    legacy_admin = login(s, "admin", "old-proxy.example.org", "administrator@example.net")
+    legacy_settings = request(s, "admin", "GET", "/api/admin/config", "old-proxy.example.org", headers=legacy_admin)[2]
+    assert legacy_settings["values"]["admin_hostname"] == "", "Settings must not silently enable hostname isolation on upgrade"
+    for service in ("web", "admin"):
+        s.stop(service)
+    s.config["admin_hostname"] = "example.com"
+    s.save()
+    for service in ("web", "admin"):
+        s.start(service)
+    print("PASS legacy 0.5.0 upgrade preserves unconfigured proxy hostnames and cross-domain login", flush=True)
 
     for host in ("example.com", "EXAMPLE.COM.", "example.com:443"):
         status, _, public = request(s, "web", "GET", "/api/public/config", host)
@@ -89,10 +105,18 @@ def run(s):
     assert status == 200, (status, preview)
     payload = dict(domain="new.example.org", revision=catalog["revision"])
     assert request(s, "admin", "POST", "/api/admin/domains", "example.com", payload, reader)[0] == 403
+    assert request(s, "admin", "POST", "/api/admin/domains/update", "example.com",
+                   dict(domain="example.com", revision=catalog["revision"], webmail_hostname="mail.example.com"), reader)[0] == 403
+    status, _, certificates = request(s, "admin", "GET", "/api/admin/domains/tls?domain=example.com", "example.com", headers=reader)
+    assert status == 200 and "mail.example.com" in [entry["hostname"] for entry in certificates["hostnames"]], certificates
+    certificate_request = dict(domain="example.com", hostname="unconfigured.example.org", revision=catalog["revision"],
+                               tls_certificate="", tls_private_key="")
+    assert request(s, "admin", "POST", "/api/admin/domains/tls", "example.com", certificate_request, reader)[0] == 403
     status, _, write_key = request(s, "admin", "POST", "/api/admin/api-keys", "example.com",
                                    dict(name="Domain writer", permissions=["config:write"]), administrator)
     assert status == 201, write_key
     writer = {"Authorization": "Bearer " + write_key["key"]}
+    assert request(s, "admin", "POST", "/api/admin/domains/tls", "example.com", certificate_request, writer)[0] == 400
     status, _, added = request(s, "admin", "POST", "/api/admin/domains", "example.com", payload, writer)
     assert status == 201 and added["record"]["status"] == "pending", added
     assert request(s, "web", "GET", "/", "new.example.org")[0] == 421
@@ -107,6 +131,7 @@ def run(s):
     s.save()
     s.start("admin")
     assert login(s, "admin", "example.com", "administrator@example.net")
+    assert login(s, "admin", "legacy-admin.example.org", "administrator@example.net")
 
     for service in ("web", "admin"):
         s.stop(service)
@@ -150,6 +175,30 @@ def run(s):
     assert request(s, "web", "GET", "/api/public/config", "example.com")[0] == 200
     assert request(s, "web", "POST", "/api/login", "example.com", dict(username="same@example.com", password=PASSWORD))[0] == 403
     print("PASS dedicated admin hostname, shared Webmail login and explicit loopback development access", flush=True)
+
+    status, _, catalog = request(s, "admin", "GET", "/api/admin/domains", "manage.example.org", headers=retained)
+    assert status == 200, catalog
+    status, _, bound = request(s, "admin", "POST", "/api/admin/domains/update", "manage.example.org",
+                              dict(domain="example.com", revision=catalog["revision"], webmail_hostname="mail.example.com"), retained)
+    assert status == 200 and bound["record"]["webmail_hostname"] == "mail.example.com", bound
+    for service in ("web", "admin"):
+        s.stop(service)
+    s.config.update(webmail_hostnames={"example.com": "mail.example.com"}, webmail_shared_hostname="", allow_insecure_auth=True)
+    s.save()
+    for service in ("web", "admin"):
+        s.start(service)
+    assert request(s, "web", "GET", "/api/public/config", "example.com")[0] == 421
+    public = request(s, "web", "GET", "/api/public/config", "mail.example.com")[2]
+    assert public["domain"] == "example.com" and public["domains"] == ["example.com"], public
+    mailbox = login(s, "web", "mail.example.com", "same@example.com")
+    assert request(s, "web", "GET", "/api/session", "mail.example.com", headers=mailbox)[0] == 200
+    administrator = login(s, "admin", "manage.example.org", "administrator@example.net")
+    status, _, invitation = request(s, "admin", "POST", "/api/admin/invitations", "manage.example.org",
+                                    dict(name="Bound portal", domain="example.com", localpart="boundinvite"), administrator)
+    assert status == 201 and urlsplit(invitation["registration_url"]).hostname == "mail.example.com", invitation
+    assert request(s, "web", "POST", endpoint + "redeem", "mail.example.com",
+                   dict(token=urlsplit(invitation["registration_url"]).fragment, password=PASSWORD))[0] == 201
+    print("PASS independent mailbox suffix / Webmail hostname binding, login and invitation URLs", flush=True)
 
 
 def main():

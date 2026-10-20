@@ -10,7 +10,9 @@ void check(bool condition, const char* message) { if (!condition) throw std::run
 int main() {
     try {
         Config config; config.values={{"domain","fatutu.xyz"},{"bind","0.0.0.0"},{"admin_bind","::"}};
-        check(settings_url(config,"web")=="http://fatutu.xyz/","public Webmail URL must use the first mail domain and standard port");
+        check(settings_url(config,"web")=="http://mail.fatutu.xyz/","legacy public URLs must retain the mail hostname");
+        config.values["admin_hostname"]="fatutu.xyz";
+        check(settings_url(config,"web")=="http://fatutu.xyz/","explicit portal policy must use the mailbox domain by default");
         config.values["tls_certificate"]="certificate.pem"; config.values["tls_private_key"]="key.pem";
         check(settings_url(config,"web")=="https://fatutu.xyz/","TLS Webmail URL");
         check(settings_url(config,"admin")=="https://fatutu.xyz:8081/","administration defaults to the first domain");
@@ -18,6 +20,11 @@ int main() {
         config.values["webmail_shared_hostname"]="login.fatutu.xyz";
         check(settings_url(config,"admin")=="https://admin.fatutu.xyz:8081/" && settings_url(config,"web")=="https://login.fatutu.xyz/","configured portal URL hostnames");
         config.values.erase("admin_hostname");config.values.erase("webmail_shared_hostname");
+        check(settings_url(config,"admin")=="https://mail.fatutu.xyz:8081/","unconfigured administration must retain its legacy certificate hostname");
+        config.values["webmail_hostnames"]={{"fatutu.xyz","mail.fatutu.xyz"}};
+        check(settings_url(config,"web")=="https://mail.fatutu.xyz/","bound Webmail hostname must be used in public URLs");
+        config.values.erase("webmail_hostnames");
+        config.values["admin_hostname"]="fatutu.xyz";
         config.values["ports"]["web"]=8443;
         check(settings_url(config,"web")=="https://fatutu.xyz:8443/","explicit Web port");
         check(!mail_client_settings(config).at("discovery").at("enabled").get<bool>(),"discovery needs standard HTTPS port");

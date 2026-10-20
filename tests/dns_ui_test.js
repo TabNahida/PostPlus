@@ -56,7 +56,7 @@ async function administration(){
   const secondaryCheck=id("check").fire("click");assert.equal(requests.at(-1).options.body.domain,"example.net");
   pending.shift()({...recommendation,domain:"example.net",domains:["example.com","example.net"],checked_at:"2026-10-14T12:00:00Z"});await secondaryCheck;
   const reloading=id("reload").fire("click");component.dispose();pending.shift()(recommendation);await reloading;assert.equal(container.children.length,0,"A stale reply cannot restore DNS after sign-out or settings reload");
-  const settings=fs.readFileSync(path.join(root,"web/settings.js"),"utf8");assert.match(settings,/PostPlusAdminDns\.create/);assert.match(settings,/showDns:!options\.dnsRequest/);
+  const settings=fs.readFileSync(path.join(root,"web/settings.js"),"utf8");assert.match(settings,/PostPlusAdminDns\.create/);assert.match(settings,/showDns:options\.showDns!==false&&!options\.dnsRequest/);
   assert.match(fs.readFileSync(path.join(root,"web/admin.html"),"utf8"),/src="\/admin-dns\.js"/);
 }
 async function main(){

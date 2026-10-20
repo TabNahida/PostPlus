@@ -452,6 +452,7 @@ def legacy_setup(binaries, directory):
         assert status==200 and result["ok"], (status,result)
         saved = json.loads(path.read_text())
         assert saved["max_recipients"]==12 and saved["log_level"]=="warn" and saved["setup_complete"] is True
+        assert not saved.get("admin_hostname"), "Completing a legacy configuration must preserve compatibility access"
         assert Path(saved["data_dir"])==(directory / "legacy-mail")
         backups = list(path.parent.glob(path.name+".backup-*"))
         assert len(backups)==1 and backups[0].read_bytes()==original
@@ -596,6 +597,7 @@ def run(binaries, directory):
         assert result["admin_url"] == f"http://127.0.0.1:{ports['admin']}/"
         saved_bytes = config_path.read_bytes()
         config = json.loads(saved_bytes)
+        assert not config.get("admin_hostname"), "Setup must not enable hostname isolation without an explicit hostname"
         assert b"admin_password" not in saved_bytes and PASSWORD.encode() not in saved_bytes
         assert "service_token" not in config and Path(config["data_dir"]).is_absolute()
         assert Path(config["web_root"]).is_absolute() and config["delivery_lock_port"] == ports["delivery_lock"]

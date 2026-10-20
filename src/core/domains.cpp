@@ -9,6 +9,44 @@
 #include <set>
 
 namespace postplus {
+std::string webmail_hostname(const Config& config,std::string_view domain) {
+    const auto name=lower(trim(std::string(domain)));
+    const auto found=config.values.find("webmail_hostnames");
+    if(found!=config.values.end() && found->is_object()) {
+        const auto host=found->find(name);
+        if(host!=found->end() && host->is_string() && !host->get_ref<const std::string&>().empty())return lower(trim(host->get<std::string>()));
+    }
+    return name;
+}
+std::string portal_domain(const Config& config,std::string_view hostname) {
+    const auto host=lower(trim(std::string(hostname)));std::string result;
+    for(const auto& domain:config.mail_domains())if(webmail_hostname(config,domain)==host) {
+        // Malformed in-memory configurations must not make an ambiguous host
+        // authenticate as whichever domain happened to be listed first.
+        if(!result.empty())return {};result=domain;
+    }
+    return result;
+}
+void validate_webmail_hostnames(const Config& config) {
+    const auto found=config.values.find("webmail_hostnames");
+    if(found==config.values.end())return;
+    if(!found->is_object())throw SettingsError("webmail_hostnames","Webmail hostname bindings must be an object.");
+    const auto active=config.mail_domains();std::set<std::string> domains(active.begin(),active.end());
+    const auto entries=config.values.find("domain_registry");
+    if(entries!=config.values.end() && entries->is_object())for(const auto& item:entries->items())
+        if(item.value().is_object() && item.value().value("status",std::string{})=="pending")domains.insert(item.key());
+    for(const auto& item:found->items()) {
+        if(!domains.contains(item.key()) || item.key()!=lower(trim(item.key())))
+            throw SettingsError("webmail_hostnames","Bind Webmail hostnames only to existing mail domains.");
+        if(!item.value().is_string())throw SettingsError("webmail_hostnames","Each Webmail hostname must be text.");
+        const auto host=item.value().get<std::string>();
+        if(host!=lower(trim(host)) || !valid_address("postmaster@"+host))
+            throw SettingsError("webmail_hostnames","Enter a valid lowercase ASCII Webmail hostname without a scheme, port or path.");
+    }
+    std::set<std::string> hosts;
+    for(const auto& domain:domains)if(!hosts.insert(webmail_hostname(config,domain)).second)
+        throw SettingsError("webmail_hostname","Each mail domain needs a different Webmail hostname. This hostname is already assigned to another domain.",409);
+}
 namespace {
 struct Snapshot {Config config;std::string raw,revision;};
 std::string digest(std::string_view input) {
@@ -76,7 +114,45 @@ Json dns_input(const Json& request,const std::string& domain) {
 }
 std::string dns_fingerprint(const Config& config,const std::string& domain,const Json& input) {
     const auto guide=dns_recommendations(candidate(config,domain),input);
-    return digest(Json{{"expected",guide.at("expected")},{"outbound_mode",config.outbound_mode()}}.dump());
+    return digest(Json{{"expected",guide.at("expected")},{"outbound_mode",config.outbound_mode()},
+        {"webmail_hostname",webmail_hostname(config,domain)}}.dump());
+}
+void portal_dns(Json& result,const Config& config,const std::string& domain,const DnsOptions* options=nullptr,
+                std::chrono::steady_clock::time_point deadline={}) {
+    struct Portal {std::string hostname,purpose;};std::vector<Portal> portals;
+    std::set<std::string> included{config.mail_hostname()};
+    const auto append=[&](std::string hostname,const std::string& purpose) {
+        hostname=lower(trim(std::move(hostname)));
+        if(!hostname.empty() && included.insert(hostname).second)portals.push_back({std::move(hostname),purpose});
+    };
+    result["webmail_hostname"]=webmail_hostname(config,domain);append(webmail_hostname(config,domain),"webmail");
+    const bool primary=domain==config.text("domain","localhost");
+    for(const auto& item:{std::pair{"admin_hostname","admin"},std::pair{"webmail_shared_hostname","shared-webmail"}}) {
+        const auto hostname=lower(trim(config.text(item.first)));
+        if(primary || hostname==domain || hostname.ends_with("."+domain))append(hostname,item.second);
+    }
+    for(const auto& portal:portals)for(const auto& pair:{std::pair{"ipv4",DnsType::a},std::pair{"ipv6",DnsType::aaaa}}) {
+        const auto& hostname=portal.hostname;
+        const bool ipv4=pair.second==DnsType::a;const auto value=result.at("expected").at(pair.first).get<std::string>();
+        const auto owner=hostname==domain?"@":hostname.ends_with("."+domain)?hostname.substr(0,hostname.size()-domain.size()-1):hostname;
+        Json item={{"id",portal.purpose+(ipv4?"-a":"-aaaa")},{"name",hostname},{"host",owner},{"type",ipv4?"A":"AAAA"},
+            {"value",value},{"purpose",portal.purpose},{"required",false},{"expected",value.empty()?Json::array():Json::array({value})},
+            {"observed",Json::array()},{"status",value.empty()?"not_configured":"unchecked"},
+            {"message","Point this portal hostname to this service or its HTTPS reverse proxy. This record does not change the mail server MX hostname."}};
+        if(options)try {
+            const auto lookup=DnsResolver(*options).lookup(hostname,pair.second,deadline);item["observed"]=lookup.values;
+            bool matched=!lookup.values.empty(),public_only=true;
+            for(const auto& observed:lookup.values) {
+                std::error_code error;const auto address=asio::ip::make_address(observed,error);
+                public_only=public_only && !error && is_public_mail_address(address);
+                matched=matched && (value.empty() || observed==value);
+            }
+            item["status"]=lookup.values.empty()?(ipv4 || !value.empty()?"missing":"skipped"):!public_only?"mismatch":matched?(value.empty()?"published":"matched"):"mismatch";
+            item["code"]=!public_only?"dns_private_address":lookup.values.empty()?"dns_missing":matched?(value.empty()?"dns_published":"dns_matched"):"dns_mismatch";
+        }catch(const DnsError& error){item["status"]="error";item["code"]=error.code;}
+        catch(const std::exception&){item["status"]="error";item["code"]="dns_unavailable";}
+        result["records"].push_back(std::move(item));
+    }
 }
 bool can_activate(const Config& config,const std::string& domain,const Json& item) {
     if(!item.contains("dns") || !item.at("dns").is_object())return false;
@@ -90,6 +166,7 @@ Json record(const Config& config,const std::string& domain,const Json& item) {
     const bool primary=domain==config.text("domain","localhost");
     const auto dns=item.value("dns",Json::object());
     Json result={{"domain",domain},{"primary",primary},{"status",config.hosts_domain(domain)?"active":"pending"},
+        {"webmail_hostname",webmail_hostname(config,domain)},{"webmail_hostname_overridden",webmail_hostname(config,domain)!=domain},
         {"dns_status",dns.value("status",std::string("unchecked"))},{"checked_at",dns.value("checked_at",std::string{})},
         {"can_activate",!config.hosts_domain(domain) && can_activate(config,domain,item)},{"can_remove",!primary}};
     auto expectations=item.value("dns_input",Json::object());expectations.erase("domain");result["dns"]=std::move(expectations);
@@ -101,6 +178,7 @@ void store(Snapshot& state,const Json& entries) {
     state.config.values["mail_domains"]=state.config.mail_domains();
     state.config.values.erase("additional_domains");
     state.config.values["domain_registry"]=entries;
+    validate_webmail_hostnames(state.config);
     replace_config_file(state.config.source,state.raw,state.config.values.dump(2)+"\n");
 }
 Json response(const Config& running,const Config& saved,const std::string& domain,const Json& item) {
@@ -134,14 +212,31 @@ Json domains_add(const Config& running,const Json& request) {
     entries[domain]={{"status","pending"}};store(state,entries);
     log("admin","administrator added pending mail domain "+domain);return response(running,state.config,domain,entries.at(domain));
 }
+Json domains_update(const Config& running,const Json& request) {
+    fields(request,{"revision","domain","webmail_hostname"});const auto domain=domain_field(request,false);
+    if(!request.contains("webmail_hostname") || !request.at("webmail_hostname").is_string())
+        throw SettingsError("webmail_hostname","Enter a Webmail hostname or leave it empty to use the mail domain.");
+    const auto hostname=lower(trim(request.at("webmail_hostname").get<std::string>()));
+    if(!hostname.empty() && (!valid_public_dns_name(hostname) || !valid_address("postmaster@"+hostname)))
+        throw SettingsError("webmail_hostname","Enter a public ASCII hostname without a scheme, port or path.");
+    auto state=snapshot(running);editable(running,state,request);const auto entries=registry(state.config);
+    if(!entries.contains(domain))throw SettingsError("domain","Add this mail domain before binding its Webmail hostname.",404);
+    auto bindings=state.config.values.value("webmail_hostnames",Json::object());
+    if(!bindings.is_object())throw SettingsError("webmail_hostnames","Webmail hostname bindings must be an object.",409);
+    if(hostname.empty() || hostname==domain)bindings.erase(domain);else bindings[domain]=hostname;
+    if(bindings.empty())state.config.values.erase("webmail_hostnames");else state.config.values["webmail_hostnames"]=std::move(bindings);
+    store(state,entries);
+    log("admin","administrator updated Webmail hostname for "+domain);return response(running,state.config,domain,entries.at(domain));
+}
 Json domains_preview(const Config& running,const Json& request) {
     fields(request,{"domain","dns"});const auto domain=domain_field(request);const auto state=snapshot(running);
-    return dns_recommendations(candidate(state.config,domain),dns_input(request,domain));
+    auto result=dns_recommendations(candidate(state.config,domain),dns_input(request,domain));portal_dns(result,state.config,domain);return result;
 }
 Json domains_check(const Config& running,const Json& request,DnsOptions options) {
     fields(request,{"revision","domain","dns"});const auto domain=domain_field(request);auto state=snapshot(running);editable(running,state,request);
     auto entries=registry(state.config);if(!entries.contains(domain))throw SettingsError("domain","Add this domain before saving its DNS check.",404);
-    const auto input=dns_input(request,domain);auto checked=DnsChecker(std::move(options)).check_server(candidate(state.config,domain),input);
+    const auto input=dns_input(request,domain);const auto deadline=std::chrono::steady_clock::now()+options.timeout;
+    auto checked=DnsChecker(options).check_server(candidate(state.config,domain),input);portal_dns(checked,state.config,domain,&options,deadline);
     bool mx=false,address=false,warnings=false;
     for(const auto& item:checked.at("records")) {
         const auto id=item.at("id").get<std::string>(),status=item.value("status",std::string{});
@@ -173,6 +268,10 @@ Json domains_remove(const Config& running,const Json& request) {
     if(domain==state.config.text("domain","localhost"))throw SettingsError("domain","The first mail domain cannot be removed.",409);
     auto entries=registry(state.config);if(!entries.contains(domain))throw SettingsError("domain","This domain was not found.",404);
     entries.erase(domain);auto domains=state.config.mail_domains();domains.erase(std::remove(domains.begin(),domains.end(),domain),domains.end());state.config.values["mail_domains"]=domains;
+    if(state.config.values.contains("webmail_hostnames")) {
+        state.config.values["webmail_hostnames"].erase(domain);
+        if(state.config.values["webmail_hostnames"].empty())state.config.values.erase("webmail_hostnames");
+    }
     store(state,entries);const auto active=supervisor_running_config(running).value_or(running);
     log("admin","administrator removed mail domain "+domain);
     return {{"ok",true},{"revision",digest(state.config.values.dump(2)+"\n")},{"restart_required",!restart_plan(active,state.config,"changed").empty()},

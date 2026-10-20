@@ -12,7 +12,7 @@ from password_policy_integration import login
 def run(s):
     legacy = [f"tenant-{number:03d}.example.net" for number in range(160)]
     s.config.update(domain="example.com", additional_domains=legacy,
-                    outbound_mode="disabled", mail_hostname="mail.example.com")
+                    outbound_mode="disabled", mail_hostname="mail.example.com", admin_hostname="example.com")
     s.save()
     for service in ("auth", "storage", "web", "admin"):
         s.start(service)

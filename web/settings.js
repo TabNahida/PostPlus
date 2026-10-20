@@ -135,7 +135,7 @@ window.PostPlusSettings = (() => {
         legacy.hidden=!PostPlusMailClients.legacyPorts(clientConfig().ports);legacy.setAttribute("role","status");
         button.type="button";button.id=`${prefix}-standard-ports`;hint.setAttribute("role","status");hint.setAttribute("aria-live","polite");preset.append(legacy,node("p","field-hint","Public defaults are SMTP 25, POP3 110, IMAP 143, and Webmail 80 (443 with TLS). On Unix, grant PostPlus permission to bind privileged ports."),button,hint);networkSection.insertBefore(preset,networkSection.children[2]);
         const clients=node("section","mail-clients");clients.append(node("h3","","Connect mail apps"));const guide=node("div");clients.append(guide);networkSection.append(clients);
-        clientPanel=PostPlusMailClients.create(guide,{readConfig:clientConfig,prefix:`${prefix}-clients`,showDns:!options.dnsRequest});
+        clientPanel=PostPlusMailClients.create(guide,{readConfig:clientConfig,prefix:`${prefix}-clients`,showDns:options.showDns!==false&&!options.dnsRequest});
         button.addEventListener("click",()=>{
           const config=clientConfig(),secure=Boolean(config.tls_certificate?.trim()&&config.tls_private_key?.trim());
           for(const [name,value] of Object.entries(PostPlusMailClients.standardPorts(secure))){const control=controls.get("ports."+name);if(control&&!control.field.readonly){control.input.value=String(value);control.input.removeAttribute("aria-invalid");}}

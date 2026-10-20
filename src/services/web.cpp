@@ -7,6 +7,7 @@
 #include "postplus/mail_clients.hpp"
 #include "postplus/dns.hpp"
 #include "postplus/domains.hpp"
+#include "postplus/domain_tls.hpp"
 #include "postplus/access.hpp"
 #include "postplus/forwarding.hpp"
 #include "postplus/verification_code.hpp"
@@ -519,23 +520,26 @@ private:
         const auto host = portal_host(request);
         // Supervisor readiness is deliberately local and exposes no account data.
         if (request.method == "GET" && request.path == "/health" && request.peer_loopback && loopback_host(host)) return;
+        // Upgrades from before explicit portal configuration retain their
+        // existing hostname access until an administrator opts in.
+        if (trim(config_.text("admin_hostname")).empty()) return;
         if (local_development(request, host)) return;
         const auto path = lower(request.path.substr(0, request.path.find('?')));
         if (!admin_only && host == lower(config_.mail_hostname()) &&
             (path == "/mail/config-v1.1.xml" || path == "/.well-known/autoconfig/mail/config-v1.1.xml" ||
              path == "/autodiscover/autodiscover.xml")) return;
         auto administrator = lower(trim(config_.text("admin_hostname")));
-        if (administrator.empty()) administrator = config_.mail_domains().front();
         const auto shared = lower(trim(config_.text("webmail_shared_hostname")));
-        const bool allowed = admin_only ? host == administrator : config_.hosts_domain(host) || (!shared.empty() && host == shared);
+        const bool allowed = admin_only ? host == administrator : !portal_domain(config_, host).empty() || (!shared.empty() && host == shared);
         if (!allowed) throw ApiError(421, "This hostname is not configured for this portal.", 0, "portal_host_mismatch");
     }
 
     std::vector<std::string> login_domains(const HttpRequest& request) const {
         const auto host = portal_host(request);
-        if (admin_only || local_development(request, host) || host == lower(trim(config_.text("webmail_shared_hostname"))))
+        if (admin_only || trim(config_.text("admin_hostname")).empty() || local_development(request, host) || host == lower(trim(config_.text("webmail_shared_hostname"))))
             return config_.mail_domains();
-        return {host};
+        const auto domain = portal_domain(config_, host);
+        return domain.empty() ? std::vector<std::string>{} : std::vector<std::string>{domain};
     }
 
     void require_account_domain(const HttpRequest& request, const std::string& username) const {
@@ -1155,6 +1159,10 @@ private:
             }
             if (path == "/api/admin/domains" || path.starts_with("/api/admin/domains/")) {
                 try {
+                    if (request.method == "GET" && path == "/api/admin/domains/tls") {
+                        if (query.size() != 1 || !query.contains("domain")) throw ApiError(400, "Select a configured mail domain.");
+                        return json_response(domain_tls_view(config_, parameter("domain")));
+                    }
                     if (request.method == "GET" && path == "/api/admin/domains") {
                         Json filters = Json::object();
                         for (const auto& [key, value] : query) {
@@ -1178,6 +1186,8 @@ private:
                     if (supervisor_restart_busy(config_)) throw ApiError(409, "Wait for the service restart to finish before changing domains.");
                     Json result;
                     if (path == "/api/admin/domains") result = domains_add(config_, input);
+                    else if (path == "/api/admin/domains/tls") result = save_domain_tls(config_, input);
+                    else if (path == "/api/admin/domains/update") result = domains_update(config_, input);
                     else if (path == "/api/admin/domains/check") result = domains_check(config_, input);
                     else if (path == "/api/admin/domains/activate") result = domains_activate(config_, input);
                     else if (path == "/api/admin/domains/remove") result = domains_remove(config_, input);

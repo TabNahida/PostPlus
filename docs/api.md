@@ -10,9 +10,11 @@ With TLS and no explicit Web port, Webmail uses 443. [Mail client discovery](mai
 
 ## Sessions
 
-`GET /api/public/config` is available without a session on each permitted portal hostname. It returns `{"ok":true,"domain":"example.com","domains":["example.com"],"max_message_bytes":10485760}` for address inputs and the attachment size hint. A domain-specific Webmail host exposes only that domain; the shared Webmail host and administration expose active hosted domains. API login and account creation accept complete addresses, and accounts with the same local part on different domains remain independent.
+`GET /api/public/config` is available without a session on each permitted portal hostname. It returns `{"ok":true,"domain":"example.com","domains":["example.com"],"max_message_bytes":10485760}` for address inputs and the attachment size hint. With hostname isolation enabled, a domain-specific Webmail host exposes only its mailbox domain; the shared Webmail host and administration expose active hosted domains. Compatibility mode also exposes active hosted domains. API login and account creation accept complete addresses, and accounts with the same local part on different domains remain independent.
 
-Administration accepts only `admin_hostname` (default: primary `domain`). Webmail accepts each active domain for its own mailbox accounts, or the optional `webmail_shared_hostname` for all active domains. Unknown hostnames are rejected. `Host` determines the portal; `Forwarded` and `X-Forwarded-Host` do not override it. Password login, invitation inspection/redemption and mailbox Bearer keys enforce the same account-domain policy. Browser sessions are also bound to their login hostname, so copying a session cookie to another hostname cannot reuse it. Local development access requires an actual loopback connection, loopback Host, and `allow_insecure_auth`; loopback health probes are allowed without granting account access.
+In 0.5.2, missing or empty `admin_hostname` selects compatibility mode: hostname allowlists and per-host mailbox-domain isolation are disabled, preserving pre-0.5.1 access. This applies to upgrades and first-run setup; setup does not automatically set an administration hostname or enable shared Webmail. A nonempty `admin_hostname` enables isolation and restricts administration to that hostname. Each active domain then accepts its own accounts at `webmail_hostnames[domain]`, falling back to the mail domain itself, while the optional `webmail_shared_hostname` accepts all active domains. For example, `{"a.com":"mail.a.com"}` binds Webmail for `@a.com` accounts to `mail.a.com`.
+
+With isolation enabled, an unconfigured portal hostname returns HTTP 421 with `code: "portal_host_mismatch"`; a mailbox account used on another domain's portal returns 403 with `code: "mailbox_domain_mismatch"`. `Host` determines the portal; `Forwarded` and `X-Forwarded-Host` do not override it. Password login, invitation inspection/redemption and mailbox Bearer keys enforce the same account-domain policy. Browser sessions remain bound to their login hostname, including in compatibility mode. Authentication, role, CSRF and TLS rules still apply in compatibility mode. The local-development isolation exception requires an actual loopback connection, loopback Host, and `allow_insecure_auth`; loopback health probes are allowed without granting account access.
 
 Administration DNS recommendations accept `GET /api/admin/dns?domain=example.net`; DNS checks accept an optional `domain` in `POST /api/admin/dns/check`. Only saved hosted domains are accepted, and the hostname, ports and probe targets still come from server settings. Both responses include the hosted `domains` list.
 
@@ -28,7 +30,8 @@ It returns `ok`, `username`, `admin`, `csrf`, and `expires_in`, and sets the `pp
 
 ## Hosted domain management
 
-Domain management is available on the designated administration hostname. All
+Domain management is available on the administration service, using its
+designated hostname when hostname restrictions are enabled. All
 browser requests require an administrator session; POST requests also require
 CSRF. Bearer keys use the permissions below. Domain edits use the configuration
 revision returned by the list or latest mutation. A stale revision returns 409.
@@ -37,16 +40,20 @@ revision returned by the list or latest mutation. A stale revision returns 409.
 | --- | --- | --- |
 | GET `/api/admin/domains` | Optional `q` (case-insensitive substring, at most 253 bytes), `offset` (zero or greater), `limit` (1–200, default 25) | `config:read` |
 | POST `/api/admin/domains` | `{"revision":"…","domain":"example.net"}`; registers a pending domain, returns 201 | `config:write` |
+| POST `/api/admin/domains/update` | `{"revision":"…","domain":"example.net","webmail_hostname":"mail.example.net"}`; updates the domain's independent Webmail hostname | `config:write` |
 | POST `/api/admin/domains/preview` | `{"domain":"example.net","dns":{}}`; returns expected DNS records without saving | `config:read` |
 | POST `/api/admin/domains/check` | `{"revision":"…","domain":"example.net","dns":{}}`; saves server-generated verification evidence | `config:write` |
 | POST `/api/admin/domains/activate` | `{"revision":"…","domain":"example.net"}` | `config:write` |
 | POST `/api/admin/domains/remove` | `{"revision":"…","domain":"example.net"}`; preserves accounts and mail | `config:write` |
+| GET `/api/admin/domains/tls?domain=example.net` | Hostnames, roles and effective certificate paths for an active or pending domain | `config:read` |
+| POST `/api/admin/domains/tls` | `revision`, `domain`, `hostname`, `tls_certificate`, `tls_private_key`; saves or clears one hostname's certificate override | `config:write` |
 
 The list returns `items`, filtered `total`, unfiltered `total_domains`,
 `active_count`, `offset`, `limit`, `revision`, and `restart_required`. The primary
 domain appears first; other domains sort lexicographically. Each item contains
 `domain`, `primary`, `status` (`active` or `pending`), `dns_status`, `checked_at`,
-`can_activate`, `can_remove`, and saved `dns` expectations. Empty search results
+`can_activate`, `can_remove`, `webmail_hostname`,
+`webmail_hostname_overridden`, and saved `dns` expectations. Empty search results
 are a successful empty page. There is no domain-count cap; configuration must
 fit within the existing 1 MiB file limit.
 
@@ -60,19 +67,99 @@ when the relevant DNS expectations or server configuration change. Other DNS
 diagnostics remain visible warnings, so activation is not a deliverability or
 certificate guarantee.
 
-Pending domains do not change running mail routing. Activation/removal return
+The DNS report distinguishes mail `hostname` from `webmail_hostname` and adds
+advisory browser A/AAAA records for the bound Webmail hostname. Configured
+administration and shared-Webmail names appear on the primary domain and a
+matching hosted suffix; duplicate names are omitted. These portal records
+have `required: false` and do not gate mail activation. The [DNS API reference](dns.md#administration-api)
+describes record IDs, expectations and the older diagnostic endpoints.
+
+Pending domains do not change running mail routing. Activation, removal,
+Webmail binding changes and hostname certificate saves return
 `restart_required`; API clients then call `POST /api/admin/restart` with
 `{"mode":"changed"}` and `services:write`, or restart independently launched
 services manually. The administration UI uses this same restart API. The
 primary domain cannot be removed. Generic configuration updates cannot edit
-the hosted-domain array or registry, or change the primary domain after setup.
+the hosted-domain array, registry, Webmail binding map or hostname TLS map,
+or change the primary domain after setup.
 
 Login policy is configured through the existing revisioned
 `POST /api/admin/config`, with `values.admin_hostname` and
-`values.webmail_shared_hostname`. An empty administration hostname uses the
-primary domain; an empty shared hostname disables shared Webmail. These changes
+`values.webmail_shared_hostname`. An empty administration hostname selects
+compatibility mode; an empty shared hostname disables shared Webmail. These changes
 follow the ordinary configuration-save restart behavior. DNS and TLS coverage
-for each public hostname must be configured separately.
+for each public hostname are managed in the domain's DNS and TLS tabs.
+The UI's restriction checkbox prefills the first mail domain only after an
+administrator enables it; saving the nonempty value activates the policy.
+
+In compatibility mode, generated `admin_url` and `web_url` use the legacy bind
+address, or `mail_hostname` for wildcard binds (`0.0.0.0`/`::`). An explicit
+shared Webmail hostname or independent Webmail binding takes precedence for
+Webmail links. The explicit local-development URL rules still apply. These
+generated links do not enable hostname isolation by themselves.
+
+### Independent Webmail hostname
+
+`POST /api/admin/domains/update` accepts exactly `revision`, `domain` and
+`webmail_hostname`. The domain must already exist, either active or pending.
+The hostname is trimmed and lowercased and must be a public ASCII DNS hostname
+without scheme, port or path. Send an empty string (or the mail domain itself)
+to clear the override. The effective hostname cannot equal another active or
+pending domain's effective Webmail hostname; conflicts return 409. An unknown
+mail domain returns 404; invalid fields return 400.
+
+The response contains `ok`, a new `revision`, the updated domain `record`, and
+`restart_required`. The binding is stored in `webmail_hostnames`; it does not
+rename accounts or change the mail MX hostname. Pending-domain bindings reserve
+the hostname without granting login access. Changing a binding invalidates
+that domain's previous DNS activation evidence, so check DNS again before
+activating. Removing the mail domain removes its binding while retaining
+accounts, mail and TLS certificate configuration.
+
+### Hostname certificates
+
+`GET /api/admin/domains/tls` requires exactly the `domain` query parameter.
+It returns `ok`, `domain`, `revision`, and a `hostnames` array. Each item has
+`hostname`, `roles`, `configured`, `inherited`, `tls_certificate`, and
+`tls_private_key`. Roles are `domain`, `webmail`, `mail`, `admin`, and
+`shared_webmail`; a hostname can have several roles. The list includes the
+domain and its bound Webmail hostname, plus shared service hostnames under the
+primary domain or their matching hosted suffix. `inherited: true` means the
+paths come from the global default. `configured` reports that certificate
+paths exist in configuration, not proof that a browser trusts the certificate.
+Paths refer to server files; certificate/private-key contents are not returned.
+
+Save a selected hostname's pair with:
+
+```json
+{
+  "revision": "revision-returned-by-GET",
+  "domain": "a.com",
+  "hostname": "mail.a.com",
+  "tls_certificate": "/srv/certs/mail.a.com/fullchain.pem",
+  "tls_private_key": "/srv/certs/mail.a.com/privkey.pem"
+}
+```
+
+The hostname must appear in that domain's TLS list. Both paths are required;
+relative paths resolve from the configuration directory. A nonempty pair must
+be readable PEM with a matching unencrypted key, cover the selected hostname,
+and have current validity dates. Send both paths as empty strings to remove
+the hostname's override and inherit the default. Clearing only one path is
+invalid. Saving returns the refreshed GET shape plus `hostname` and
+`restart_required`; it atomically saves configuration without scheduling a
+restart itself. Use the restart API as described above. Stale revisions return
+409, unknown domains return 404, and validation failures return 400.
+
+Overrides are stored in `domain_tls`, keyed by exact hostname. The TLS listener
+uses the client's SNI hostname to select the pair. Unknown names and clients
+without SNI use global `tls_certificate`/`tls_private_key`. The first saved
+hostname pair supplies that default only if none exists. Every existing global
+pair is preserved when a hostname override is saved, renewed or cleared,
+including an override for `mail_hostname`. Clearing an override also retains
+certificate files. Change or renew the global pair explicitly through the
+existing configuration API; the primary domain's TLS panel provides these
+default-certificate controls.
 
 ## Mailbox
 
@@ -134,7 +221,7 @@ DKIM preparation returns `ok`, `domain`, `selector`, `name`, `type: "TXT"`, `val
 | GET `/api/admin/messages/{id}?username=user%40example.com` | Original and decoded message. Does not mark Seen. Inspection is audited without logging message contents. |
 | GET `/api/admin/quota?username=user%40example.com` | `bytes`, `messages`, effective `max_bytes`/`max_messages`, nullable override `quota_bytes`/`quota_messages`. |
 | POST `/api/admin/quota` | `username`, `quota_bytes` (null to inherit, integer 1..2^50 to override); applies immediately. |
-| POST `/api/admin/users` | `username`, `password`, `admin`. The address must use a configured primary or additional domain. Returns 201. |
+| POST `/api/admin/users` | `username`, `password`, `admin`. The address must use an active hosted mail domain. Returns 201. |
 | POST `/api/admin/password` | `username`, `password`. Invalidates that user's existing sessions in both administration and Webmail. |
 | GET `/api/admin/password-policy` | Current account policy, revision, byte limit, and character-count convention. |
 | POST `/api/admin/password-policy` | Full `policy` object and `revision`; saves immediately without a restart. |
@@ -224,7 +311,7 @@ The following paths use the `/api/admin/acme` prefix in administration, or `/api
 | GET `/status?job_id=...` | Current/latest job state and progress; success includes `result.tls_certificate`, `result.tls_private_key`, `result.expires_at`, `result.staging`. |
 | POST `/cancel` | `{ "job_id": "..." }`; requests cancellation. |
 
-Issuance does not save server settings or restart services. On an existing installation, save the returned file paths through the settings API; the supervisor then automatically restarts affected services. Standalone service executables require a manual restart. During first-run setup, include the paths in the setup submission; successful setup starts the services with that configuration. Private keys never leave the server. Terms are checked again before issuance and changed terms require fresh consent. See [certificate deployment prerequisites](configuration.md#lets-encrypt-certificates).
+Issuance does not save server settings or restart services. On an existing installation, **Domains → Manage domain → TLS certificates** selects the request hostname and fills the returned paths. Save them through `POST /api/admin/domains/tls`, then apply any required restart through `/api/admin/restart`; the domain UI performs this sequence. The global fallback remains editable through the configuration API. Standalone service executables require a manual restart. During first-run setup, include the paths in the setup submission; successful setup starts the services with that configuration. Private keys never leave the server. Terms are checked again before issuance and changed terms require fresh consent. See [certificate deployment prerequisites](configuration.md#lets-encrypt-certificates).
 
 Both browser services check each authenticated request against the current credential version through authentication RPC. A password change through administration or the CLI invalidates older sessions on their next authenticated request, without requiring a service restart. A change to administrator status likewise invalidates a session whose stored role no longer matches. Credential-version values stay inside the service processes and are not returned to the browser.
 
@@ -410,7 +497,7 @@ POST fields:
 
 Public listening requires TLS with insecure authentication disabled. The auth port must differ from the active setup port because setup temporarily launches auth to provision the administrator. The API uses `ports.delivery_lock`; the saved configuration uses top-level `delivery_lock_port`.
 
-For a new configuration, setup commits without replacing a competing destination. For completion of an eligible existing configuration, it verifies the original contents are unchanged, retains the same data directory, and creates a private backup before replacement. Established configurations enter this completion path only when marked `setup_required: true` by the offline reset workflow; successful setup clears that marker.
+For a new configuration, setup configures one mail domain and commits without replacing a competing destination. It does not automatically fill `admin_hostname` or enable shared Webmail, so a missing/empty administration hostname remains in compatibility mode. Completion of an eligible existing configuration preserves its portal-policy choice rather than synthesizing an administration hostname; it verifies the original contents are unchanged, retains the same data directory, and creates a private backup before replacement. Established configurations enter this completion path only when marked `setup_required: true` by the offline reset workflow; successful setup clears that marker.
 
 A failed provisioning/commit may leave an administrator in the data directory; retry with the same credentials. Existing users are accepted only after successful password verification and an administrator-role check. Setup errors return `ok: false`, a stable `code`, and an English `error` string; the UI translates known error codes. General configuration changes after setup use `/api/admin/config` on the administrator listener.
 

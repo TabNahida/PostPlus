@@ -3,6 +3,8 @@
 #include <postplus/trust.hpp>
 #include <postplus/dkim.hpp>
 #include <postplus/data_lock.hpp>
+#include <postplus/domains.hpp>
+#include <postplus/domain_tls.hpp>
 #include <asio/ssl.hpp>
 #include <openssl/crypto.h>
 #include <openssl/evp.h>
@@ -144,6 +146,7 @@ Config Config::from_file(const std::filesystem::path& path) {
     if (config.text("data_dir").empty()) config.values["data_dir"] = (config.source.parent_path() / "../data").lexically_normal().string();
     if (config.text("log_dir").empty()) config.values["log_dir"] = (std::filesystem::path(config.text("data_dir")) / "logs").string();
     if (config.text("tls_certificate").empty() != config.text("tls_private_key").empty()) throw std::invalid_argument("both TLS certificate and private key are required");
+    normalize_domain_tls(config);
     if (config.values.contains("ports") && !config.values.at("ports").is_object()) throw std::invalid_argument("ports must be a JSON object");
     for (const auto* name : {"auth", "storage", "filter", "transfer", "smtp", "submission", "smtps", "pop3", "pop3s", "imap", "imaps", "web", "admin"})
         (void)config.port(name);
@@ -158,6 +161,7 @@ Config Config::from_file(const std::filesystem::path& path) {
         if (!host.empty() && !valid_address("postmaster@" + host)) throw std::invalid_argument(std::string("invalid ") + key);
         if (config.values.contains(key)) config.values[key] = host;
     }
+    validate_webmail_hostnames(config);
     const auto outbound = config.outbound_mode();
     if (outbound != "disabled" && outbound != "direct" && outbound != "relay") throw std::invalid_argument("outbound_mode must be disabled, direct, or relay");
     const auto hostname = config.mail_hostname();
@@ -284,6 +288,16 @@ class ConnectionTimeout final : public std::runtime_error {
 public:
     using std::runtime_error::runtime_error;
 };
+std::unique_ptr<asio::ssl::context> server_tls_context(const std::string& certificate,const std::string& key) {
+    auto context=std::make_unique<asio::ssl::context>(asio::ssl::context::tls_server);
+    SSL_CTX_set_min_proto_version(context->native_handle(),TLS1_2_VERSION);
+    SSL_CTX_set_options(context->native_handle(),SSL_OP_NO_RENEGOTIATION);
+    context->set_password_callback([](std::size_t,asio::ssl::context::password_purpose){return std::string{};});
+    context->use_certificate_chain_file(certificate);
+    context->use_private_key_file(key,asio::ssl::context::pem);
+    if(SSL_CTX_check_private_key(context->native_handle())!=1)throw std::runtime_error("TLS certificate and private key do not match");
+    return context;
+}
 }
 struct Connection::Impl {
     asio::io_context io;
@@ -296,8 +310,23 @@ struct Connection::Impl {
     std::atomic<bool> stopping = false;
     std::string buffer;
     std::unique_ptr<asio::ssl::context> tls_context;
+    std::unique_ptr<asio::ssl::context> sni_context;
+    const Json* server_tls_entries=nullptr;
     std::unique_ptr<asio::ssl::stream<tcp::socket&>> tls;
     explicit Impl(std::chrono::seconds value) : timeout(value) {}
+    static int select_server_certificate(SSL* ssl,int* alert,void* argument) noexcept {
+        auto& connection=*static_cast<Impl*>(argument);
+        const auto* requested=SSL_get_servername(ssl,TLSEXT_NAMETYPE_host_name);
+        if(!requested || !connection.server_tls_entries)return SSL_TLSEXT_ERR_NOACK;
+        try {
+            auto hostname=lower(requested);if(hostname.ends_with('.'))hostname.pop_back();
+            const auto entry=connection.server_tls_entries->find(hostname);
+            if(entry==connection.server_tls_entries->end())return SSL_TLSEXT_ERR_NOACK;
+            connection.sni_context=server_tls_context(entry->at("tls_certificate").get<std::string>(),entry->at("tls_private_key").get<std::string>());
+            if(!SSL_set_SSL_CTX(ssl,connection.sni_context->native_handle()))throw std::runtime_error("cannot select TLS certificate");
+            return SSL_TLSEXT_ERR_OK;
+        }catch(const std::exception&){*alert=SSL_AD_INTERNAL_ERROR;return SSL_TLSEXT_ERR_ALERT_FATAL;}
+    }
     template<class Start> void wait(Start start) {
         if (stopping.load()) throw std::runtime_error("service stopping");
         io.restart();
@@ -416,12 +445,18 @@ void Connection::write(std::string_view bytes) {
 }
 void Connection::start_tls_server(const Config& config) {
     if (encrypted() || !impl_->buffer.empty()) throw std::runtime_error("invalid TLS transition");
-    impl_->tls_context = std::make_unique<asio::ssl::context>(asio::ssl::context::tls_server);
-    SSL_CTX_set_min_proto_version(impl_->tls_context->native_handle(), TLS1_2_VERSION);
-    impl_->tls_context->use_certificate_chain_file(config.text("tls_certificate"));
-    impl_->tls_context->use_private_key_file(config.text("tls_private_key"), asio::ssl::context::pem);
+    impl_->tls_context = server_tls_context(config.text("tls_certificate"),config.text("tls_private_key"));
+    if(const auto entries=config.values.find("domain_tls");entries!=config.values.end() && entries->is_object() && !entries->empty()) {
+        impl_->server_tls_entries=&*entries;
+        SSL_CTX_set_tlsext_servername_callback(impl_->tls_context->native_handle(),Impl::select_server_certificate);
+        SSL_CTX_set_tlsext_servername_arg(impl_->tls_context->native_handle(),impl_.get());
+    }
     impl_->tls = std::make_unique<asio::ssl::stream<tcp::socket&>>(impl_->socket, *impl_->tls_context);
-    impl_->wait([&](auto done) { impl_->tls->async_handshake(asio::ssl::stream_base::server, done); });
+    // Only the synchronous handshake accesses the caller's configuration.
+    // The selected context remains owned until the connection is destroyed.
+    try {impl_->wait([&](auto done) { impl_->tls->async_handshake(asio::ssl::stream_base::server, done); });}
+    catch(...){impl_->server_tls_entries=nullptr;throw;}
+    impl_->server_tls_entries=nullptr;
 }
 void Connection::start_tls_client(const std::string& hostname) {
     if (encrypted() || !impl_->buffer.empty()) throw std::runtime_error("invalid TLS transition");

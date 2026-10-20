@@ -9,7 +9,6 @@ let settingsEditor = null;
 let settingsLoading = false;
 let settingsSaving = false;
 let backupVersion=0,backupTimer=null,shutdownPending=false;
-let acmeControl=null;
 let updateControl=null,updateBusy=false;
 let passwordPolicyData=null, passwordPolicyVersion=0, userDialogVersion=0, policySaving=false;
 let apiKeysData=null,apiKeysVersion=0,apiKeyDialogVersion=0,apiKeyCreating=false,apiKeyRevoking=false,apiKeyRevokeTarget=null;
@@ -104,7 +103,6 @@ function signedOut() {
   settingsData = null;
   settingsEditor?.dispose();
   settingsEditor = null;
-  acmeControl?.dispose();acmeControl=null;$("admin-acme").replaceChildren();
   clearInspection();
   quotaUsername="";
   $("login-email").focus();
@@ -511,12 +509,11 @@ async function loadSettings() {
     if (state.user !== user) return;
     settingsData = data;
     if(!updateControl){updateControl=PostPlusUpdate.create($("admin-update"),{prefix:"admin-update",request:(path,options)=>api(path,{...options,quiet:true}),canChange:()=>Boolean(state.user?.admin&&!settingsSaving&&!restartBusy&&!shutdownPending),adminUrl:()=>settingsData?.admin_url||location.href,onBusy:updateControls});updateControl.load();}
-    if (!acmeControl) acmeControl=PostPlusAcme.create($("admin-acme"),{request:(path,options)=>api("/api/admin/acme"+path,options),domain:data.values.domain,prefix:"admin-acme",onCertificate:async paths=>{if($("settings-form").hidden)await loadSettings();if(!settingsEditor || $("settings-form").hidden)throw new Error(t("Load server settings before applying certificate paths."));for(const [key,value] of Object.entries(paths)){const input=$("config-"+key);if(input){input.value=value;input.closest("details").open=true;}}settingsEditor.translate();settingsEditor.notify?.();}});
     $("settings-pending").hidden = !data.restart_required;
     $("restart-open").disabled=data.restart_available===false;
     maintenanceStatus("settings-apply-hint",data.restart_available===false ? "This standalone service saves settings without restarting. Restart the affected services manually after saving." : "Saving validates the configuration and restarts only affected services. Other services continue running.");
     settingsEditor?.dispose();
-    settingsEditor = PostPlusSettings.create($("settings-fields"),data.schema.map(field=>field.key==="domain"?{...field,readonly:true,help:"The first mail domain is fixed. Add and manage hosted domains on the Domains page."}:field),data.values,{prefix:"config",exclude:new Set(["additional_domains","mail_domains","admin_hostname","webmail_shared_hostname"]),secretStatus:data.secret_status,mailClients:true,onChange:updateSettingsCount,dnsRequest:(path,options)=>api('/api/admin/dns'+path,options),generateDkim:body=>api("/api/admin/dkim",{method:"POST",body})});
+    settingsEditor = PostPlusSettings.create($("settings-fields"),data.schema.map(field=>field.key==="domain"?{...field,readonly:true,help:"The first mail domain is fixed. Add and manage hosted domains on the Domains page."}:field),data.values,{prefix:"config",exclude:new Set(["additional_domains","mail_domains","admin_hostname","webmail_shared_hostname","webmail_hostnames","domain_tls","tls_certificate","tls_private_key","dkim_selector","dkim_private_key"]),secretStatus:data.secret_status,mailClients:true,onChange:updateSettingsCount,showDns:false});
     $("settings-success").hidden = true;
     $("settings-form").hidden = false;
     setLink("open-webmail",data.web_url);
@@ -687,7 +684,6 @@ document.addEventListener("postplus:language", () => {
   securityControl?.translate();
   domainControl?.translate();
   renderPasswordHint();
-  acmeControl?.translate();
   renderInspection();
   renderApiKeys();
   renderRestart();
