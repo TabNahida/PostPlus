@@ -11,6 +11,11 @@ using namespace postplus;
 namespace {
 namespace fs=std::filesystem;
 template<class T,auto Free>using Owned=std::unique_ptr<T,decltype(Free)>;
+// Older supported Apple libc++ versions do not provide std::jthread.
+struct JoinThread {
+    std::thread& thread;
+    ~JoinThread(){if(thread.joinable())thread.join();}
+};
 void check(bool value,const char* message){if(!value)throw std::runtime_error(message);}
 template<class F>void rejects(int status,F call){try{call();}catch(const SettingsError& error){check(error.status==status,"unexpected TLS error status");return;}throw std::runtime_error("invalid TLS configuration accepted");}
 void write(const fs::path& path,const std::string& value){std::ofstream file(path,std::ios::binary|std::ios::trunc);file<<value;check(file.good(),"cannot write TLS fixture");}
@@ -38,7 +43,8 @@ Json certificate(const fs::path& directory,const std::string& hostname,long dura
 std::string peer_hostname(const Config& config,const std::string& requested,bool expected_failure=false) {
     asio::io_context io;tcp::acceptor listener(io,{asio::ip::address_v4::loopback(),0});
     const auto endpoint=listener.local_endpoint();std::exception_ptr server_error;
-    std::jthread server([&]{try{Connection connection(std::chrono::seconds(5));listener.accept(connection.socket());connection.start_tls_server(config);connection.write("ok\r\n");}catch(...){server_error=std::current_exception();}});
+    std::thread server([&]{try{Connection connection(std::chrono::seconds(5));listener.accept(connection.socket());connection.start_tls_server(config);connection.write("ok\r\n");}catch(...){server_error=std::current_exception();}});
+    JoinThread join_server{server};
     std::string hostname;std::exception_ptr client_error;
     try {
         asio::ssl::context context(asio::ssl::context::tls_client);context.set_verify_mode(asio::ssl::verify_none);
