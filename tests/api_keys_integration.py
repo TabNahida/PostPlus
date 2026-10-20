@@ -253,7 +253,10 @@ def http_connection(s, host, *, encrypted=False, method="GET", path="/api/admin/
     else:
         connection = http.client.HTTPConnection(host, s.ports["admin"], timeout=10)
     try:
-        connection.request(method, path, None if body is None else json.dumps(body), {"Content-Type": "application/json", **(headers or {})})
+        # The transport fixture hosts the localhost admin portal. Preserve that
+        # authority even when connecting through a non-loopback interface so
+        # these assertions continue to exercise transport enforcement.
+        connection.request(method, path, None if body is None else json.dumps(body), {"Content-Type": "application/json", "Host": "localhost", **(headers or {})})
         response = connection.getresponse()
         result = json.loads(response.read())
         return response.status, dict(response.getheaders()), result
@@ -284,8 +287,8 @@ def transport(binaries, directory):
         s.config["allow_insecure_auth"] = False
         s.save()
         s.start("admin")
-        assert s.http("admin", "GET", "/api/admin/users", headers=bearer(key))[0] == 200
-        assert s.http("admin", "POST", "/api/login", dict(username=admin, password=PASSWORD))[0] == 403
+        assert s.http("admin", "GET", "/api/admin/users", headers={**bearer(key), "Host": "localhost"})[0] == 200
+        assert s.http("admin", "POST", "/api/login", dict(username=admin, password=PASSWORD), {"Host": "localhost"})[0] == 403
         assert http_connection(s, address, headers=bearer(key))[0] == 403
         s.stop("admin")
         s.config.update(tls_certificate=str(ROOT / "tests/fixtures/localhost-test-only.crt"),

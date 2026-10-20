@@ -27,7 +27,7 @@
 - **Keep mail on disk.** Accounts, mailboxes, delivery queues, and retries survive restarts. Rejected mail is retained in quarantine.
 - **Choose who has an account.** Administrators create users or issue expiring invitation links for ordinary mailbox registration.
 - **Find recent verification codes and links.** Webmail recognizes codes and account verification links from recent Inbox or Trash mail without marking it read. Copy a code or inspect a link's destination before opening it; integrations can use the owner-bound API.
-- **Host several mail domains.** Add up to 49 extra domains, choose a suffix when creating accounts, and keep each full mailbox address independent. Publish the DNS records shown for each domain.
+- **Host many independent mail domains.** Add domains through a DNS verification wizard, find them in a searchable, paginated list, and keep each full mailbox address independent. Administration has one designated hostname; Webmail uses each mailbox domain, with an optional shared login hostname.
 - **Route mailbox prefixes.** Wildcard forwarding sends matching local addresses to an existing local inbox.
 - **Limit integration access.** Choose API key permissions independently for administration and personal mailbox APIs. See [mailbox features and permissions](docs/access.md).
 

@@ -63,7 +63,11 @@ int main() {
         check(legacy.outbound_mode()=="disabled","explicit outbound disable ignored");
         legacy.values.erase("outbound_mode");legacy.values["allow_insecure_auth"]=true;
         check(validate_settings(legacy,{{"log_level","debug"}}).outbound_mode()=="relay","partial settings save disabled legacy relay");
-        check(validate_settings(legacy,{{"additional_domains",Json::array({" Example.NET ","example.com","EXAMPLE.NET"})}}).values.at("additional_domains")==Json::array({"example.net"}),"saved additional domains must be canonical");
+        legacy.values["additional_domains"]=Json::array({" Example.NET ","example.com","EXAMPLE.NET"});
+        const auto migrated=validate_settings(legacy,Json::object());
+        check(migrated.values.at("mail_domains")==Json::array({"example.com","example.net"}) && !migrated.values.contains("additional_domains"),"legacy domain migration must be canonical");
+        rejects([&]{validate_settings(legacy,{{"additional_domains",Json::array({"example.net"})}});});
+        rejects([&]{validate_settings(legacy,{{"mail_domains",Json::array({"example.net"})}});});
         rejects([&]{validate_settings(legacy,{{"additional_domains",Json::array({"user@example.net"})}});});
         const auto spam_settings=validate_settings(legacy,{{"spam_allow_senders",Json::array({"Trusted@Example.net","@trusted.example"})},
             {"spam_block_senders",Json::array({"blocked.example"})},{"rspamd_enabled",true},{"rspamd_host","::1"}});

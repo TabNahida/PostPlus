@@ -126,6 +126,8 @@ function translated(key, file) {
 }
 const settingsSource=fs.readFileSync(path.join(root,"src/core/settings.cpp"),"utf8");
 for(const match of settingsSource.matchAll(/SettingsError\([^,]+,\s*"([^"]+)"(?=\s*[,\)])/g))translated(match[1],"settings validation");
+const domainsSource=fs.readFileSync(path.join(root,"src/core/domains.cpp"),"utf8");
+for(const match of domainsSource.matchAll(/SettingsError\([^,]+,\s*"([^"]+)"(?=\s*[,\)])/g))translated(match[1],"domain validation");
 for (const file of ["index.html", "admin.html", "setup.html"]) {
   const html = fs.readFileSync(path.join(root, "web", file), "utf8");
   assert.match(html, /<html\b[^>]*\blang="en"(?:\s|>)/, `${file} must render in English before scripts run`);
@@ -137,13 +139,16 @@ for (const file of ["index.html", "admin.html", "setup.html"]) {
   }
   for (const match of html.matchAll(/data-i18n-(?:aria-label|title|placeholder)="([^"]+)"/g)) translated(match[1], file);
 }
-for (const file of ["app.js", "admin.js", "admin-security.js", "setup.js", "settings.js", "size.js", "acme.js", "dns.js", "preferences.js", "address.js", "mail-reader.js", "mail-clients.js", "update.js", "mail-tools.js"]) {
+for (const file of ["app.js", "admin.js", "admin-security.js", "admin-domains.js", "setup.js", "settings.js", "size.js", "acme.js", "dns.js", "preferences.js", "address.js", "mail-reader.js", "mail-clients.js", "update.js", "mail-tools.js"]) {
   const script = fs.readFileSync(path.join(root, "web", file), "utf8");
   new vm.Script(script, {filename:file});
   for (const match of script.matchAll(/\bt\("([^"]+)"/g)) translated(match[1], file);
   if(file==="acme.js") for(const match of script.matchAll(/\bnode\("[^"]+","([^"]+)"/g)) translated(match[1], file);
   if(file==="admin-security.js") {
     for(const pattern of [/\bnode\("[^"]+","([^"]+)"/g,/\bbutton\("([^"]+)"/g,/\bfield\([^,]+,"[^"]+","([^"]+)"/g])for(const match of script.matchAll(pattern))translated(match[1],file);
+  }
+  if(file==="admin-domains.js") {
+    for(const pattern of [/\bnode\("[^"]+","([^"]+)"/g,/\bbutton\("([^"]+)"/g,/\bfield\([^,]+,"([^"]+)"/g,/\bdialog\("[^"]+","([^"]+)"/g])for(const match of script.matchAll(pattern))translated(match[1],file);
   }
 }
 
@@ -561,8 +566,9 @@ async function checkMaintenanceControls() {
   calls.length=0;id("login-email").value="admin@other.example";
   id("login-form").callbacks.submit({preventDefault(){},currentTarget:id("login-form")});
   for(let index=0;index<8;index++)await Promise.resolve();
-  assert.equal(calls.length,0,"Administrator login rejects a different domain before requesting authentication");
-  assert.match(id("login-error").textContent,/displayed domain/);
+  assert.equal(calls.length,1,"Administrator login allows retained administrator identities from a removed domain");
+  assert.equal(calls[0].route,"/api/login");
+  assert.equal(calls[0].options.body.username,"admin@other.example");
   calls.length=0;
   const customFolder="Projects/客户",literalFolder="<img src=x>";
   sandbox.request=async route=>{calls.push({route});return route.startsWith("/api/admin/folders?") ? {folders:[{name:"INBOX"},{name:customFolder},{name:literalFolder}]} : {messages:[]};};

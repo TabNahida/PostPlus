@@ -1,6 +1,7 @@
 {
   "domain": "localhost",
-  "additional_domains": [],
+  "admin_hostname": "",
+  "webmail_shared_hostname": "",
   "bind": "127.0.0.1",
   "admin_bind": "127.0.0.1",
   "data_dir": "../data",

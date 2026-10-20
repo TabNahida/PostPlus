@@ -62,6 +62,7 @@ jobs:
           node tests/security_ui_test.js
           node tests/verification_code_ui_test.js
           node tests/multi_domain_ui_test.js
+          node tests/domain_management_ui_test.js
           node tests/access_ui_test.js
           node tests/logs_ui_test.js
           node tests/restart_ui_test.js

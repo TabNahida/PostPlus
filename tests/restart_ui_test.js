@@ -51,6 +51,11 @@ async function run() {
   const standalone=await ready();standalone.respond(()=>({ok:true,restart_required:true,...urls}));
   assert.equal(await standalone.run("saveSettings()"),true);assert.equal(standalone.timers.size,0);
   assert.match(standalone.id("settings-success-message").textContent,/standalone service cannot restart/);
+  const domains=await ready();domains.respond(route=>route==="/api/admin/config"?{ok:true,restart_available:true,restart:job(["smtp"],"complete"),...urls}:job(["auth","smtp","web","admin"]));
+  await domains.run('applyDomainChanges({restart_required:true})');
+  assert.equal(domains.calls[0].route,"/api/admin/config");assert.equal(domains.calls[1].route,"/api/admin/restart");assert.deepEqual(JSON.parse(domains.calls[1].options.body),{mode:"changed"});assert.equal(domains.run("state.view"),"restart");assert.equal(domains.run("restartBusy"),true,"Domain activation schedules and tracks the affected services");
+  const standaloneDomains=await ready();standaloneDomains.respond(()=>({ok:true,restart_available:false,...urls}));await standaloneDomains.run('applyDomainChanges({restart_required:true})');assert.equal(standaloneDomains.calls.length,1);assert.match(standaloneDomains.id("notice").textContent,/Restart PostPlus manually/);
+  const failedDomains=await ready();failedDomains.respond(()=>({ok:true,restart_available:true,...urls}));failedDomains.sandbox.fetch=async route=>route==="/api/admin/config"?{ok:true,json:async()=>({ok:true,restart_available:true,...urls})}:{ok:false,status:409,json:async()=>({ok:false,error:"Wait"})};await failedDomains.run('applyDomainChanges({restart_required:true})');assert.match(failedDomains.id("notice").textContent,/saved, but restarting failed/);
   const shutdown=await ready();shutdown.respond(()=>({ok:true,restart_required:true,...urls}));
   assert.equal(await shutdown.run("saveSettings({apply:false})"),true);
   assert.equal(JSON.parse(shutdown.calls[0].options.body).apply,false);assert.equal(shutdown.timers.size,0);

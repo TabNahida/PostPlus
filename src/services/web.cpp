@@ -6,6 +6,7 @@
 #include "postplus/restart.hpp"
 #include "postplus/mail_clients.hpp"
 #include "postplus/dns.hpp"
+#include "postplus/domains.hpp"
 #include "postplus/access.hpp"
 #include "postplus/forwarding.hpp"
 #include "postplus/verification_code.hpp"
@@ -53,6 +54,52 @@ HttpResponse api_error_response(const ApiError& error) {
 std::string header(const HttpRequest& request, const std::string& name) {
     auto found = request.headers.find(name);
     return found == request.headers.end() ? "" : found->second;
+}
+
+// Host is the only authority used for portal selection. Proxy headers are not
+// trusted, and ambiguous authorities must never fall through to a default site.
+std::string portal_host(const HttpRequest& request) {
+    const auto authority = lower(header(request, "host"));
+    if (authority.empty() || authority.size() > 260 || authority.find_first_of(" \t\r\n/@\\?#,%") != std::string::npos)
+        throw ApiError(400, "Invalid Host header.", 0, "invalid_host");
+    std::string host, port;
+    if (authority.front() == '[') {
+        const auto end = authority.find(']');
+        if (end == std::string::npos) throw ApiError(400, "Invalid Host header.", 0, "invalid_host");
+        host = authority.substr(1, end - 1);
+        std::error_code error;
+        const auto address = asio::ip::make_address(host, error);
+        if (error || !address.is_v6()) throw ApiError(400, "Invalid Host header.", 0, "invalid_host");
+        host = address.to_string();
+        if (end + 1 < authority.size()) {
+            if (authority[end + 1] != ':') throw ApiError(400, "Invalid Host header.", 0, "invalid_host");
+            port = authority.substr(end + 2);
+            if (port.empty()) throw ApiError(400, "Invalid Host header.", 0, "invalid_host");
+        }
+    } else {
+        const auto colon = authority.find(':');
+        host = authority.substr(0, colon);
+        if (!host.empty() && host.back() == '.') host.pop_back();
+        if (!valid_address("x@" + host)) throw ApiError(400, "Invalid Host header.", 0, "invalid_host");
+        if (colon != std::string::npos) {
+            port = authority.substr(colon + 1);
+            if (port.empty()) throw ApiError(400, "Invalid Host header.", 0, "invalid_host");
+        }
+    }
+    if (!port.empty()) {
+        unsigned number = 0;
+        const auto [end, error] = std::from_chars(port.data(), port.data() + port.size(), number);
+        if (error != std::errc{} || end != port.data() + port.size() || number == 0 || number > 65535)
+            throw ApiError(400, "Invalid Host header.", 0, "invalid_host");
+    }
+    return host;
+}
+
+bool loopback_host(const std::string& host) {
+    if (host == "localhost") return true;
+    std::error_code error;
+    const auto address = asio::ip::make_address(host, error);
+    return !error && address.is_loopback();
 }
 
 std::string session_cookie(const HttpRequest& request) {
@@ -371,6 +418,7 @@ struct WebSession {
     Clock::time_point expires;
     std::string api_key_id;
     std::vector<std::string> api_permissions;
+    std::string hostname;
 };
 
 class Web {
@@ -388,6 +436,8 @@ public:
             load_static(root, "/acme.js", "acme.js", "application/javascript; charset=utf-8");
             load_static(root, "/mail-clients.js", "mail-clients.js", "application/javascript; charset=utf-8");
             load_static(root, "/admin-dns.js", "admin-dns.js", "application/javascript; charset=utf-8");
+            load_static(root, "/admin-domains.js", "admin-domains.js", "application/javascript; charset=utf-8");
+            load_static(root, "/admin-domains.css", "admin-domains.css", "text/css; charset=utf-8");
             load_static(root, "/update.js", "update.js", "application/javascript; charset=utf-8");
             load_static(root, "/admin-access.js", "admin-access.js", "application/javascript; charset=utf-8");
             load_static(root, "/admin-access.css", "admin-access.css", "text/css; charset=utf-8");
@@ -442,6 +492,8 @@ public:
     }
 
     std::optional<HttpResponse> preflight(const HttpRequest& request) {
+        try { require_portal(request); }
+        catch (const ApiError& error) { return api_error_response(error); }
         if (forbidden_portal_route(request))
             return json_response({{"ok",false},{"error","API route not found."}},404);
         // Verify session and CSRF before core allocates a potentially large compose body.
@@ -459,6 +511,43 @@ public:
     }
 
 private:
+    bool local_development(const HttpRequest& request, const std::string& host) const {
+        return request.peer_loopback && loopback_host(host) && config_.flag("allow_insecure_auth");
+    }
+
+    void require_portal(const HttpRequest& request) const {
+        const auto host = portal_host(request);
+        // Supervisor readiness is deliberately local and exposes no account data.
+        if (request.method == "GET" && request.path == "/health" && request.peer_loopback && loopback_host(host)) return;
+        if (local_development(request, host)) return;
+        const auto path = lower(request.path.substr(0, request.path.find('?')));
+        if (!admin_only && host == lower(config_.mail_hostname()) &&
+            (path == "/mail/config-v1.1.xml" || path == "/.well-known/autoconfig/mail/config-v1.1.xml" ||
+             path == "/autodiscover/autodiscover.xml")) return;
+        auto administrator = lower(trim(config_.text("admin_hostname")));
+        if (administrator.empty()) administrator = config_.mail_domains().front();
+        const auto shared = lower(trim(config_.text("webmail_shared_hostname")));
+        const bool allowed = admin_only ? host == administrator : config_.hosts_domain(host) || (!shared.empty() && host == shared);
+        if (!allowed) throw ApiError(421, "This hostname is not configured for this portal.", 0, "portal_host_mismatch");
+    }
+
+    std::vector<std::string> login_domains(const HttpRequest& request) const {
+        const auto host = portal_host(request);
+        if (admin_only || local_development(request, host) || host == lower(trim(config_.text("webmail_shared_hostname"))))
+            return config_.mail_domains();
+        return {host};
+    }
+
+    void require_account_domain(const HttpRequest& request, const std::string& username) const {
+        // Domain removal retains account identities. An existing administrator
+        // must still be able to repair configuration on the designated portal.
+        if (admin_only) return;
+        const auto domains = login_domains(request);
+        const auto at = username.rfind('@');
+        if (at == std::string::npos || std::find(domains.begin(), domains.end(), lower(username.substr(at + 1))) == domains.end())
+            throw ApiError(403, "Use the Webmail hostname for this mailbox domain or the shared login hostname.", 0, "mailbox_domain_mismatch");
+    }
+
     static bool public_invitation_route(const HttpRequest& request) {
         return !admin_only && request.method == "POST" &&
             (request.path == "/api/public/invitations/inspect" || request.path == "/api/public/invitations/redeem");
@@ -544,6 +633,7 @@ private:
                 throw ApiError(403, "This API key does not have permission for this operation.");
             WebSession session;
             session.username = account.at("username").get<std::string>();
+            require_account_domain(request, session.username);
             session.admin = account.value("admin", false);
             session.api_key_id = account.at("id").get<std::string>();
             session.api_permissions = account.at("permissions").get<std::vector<std::string>>();
@@ -560,6 +650,9 @@ private:
             if (found == sessions_.end()) throw ApiError(401, "Your session has expired. Please sign in again.");
             session = found->second;
         }
+        if (session.hostname != portal_host(request))
+            throw ApiError(401, "Sign in again on this hostname.", 0, "session_host_mismatch");
+        require_account_domain(request, session.username);
         const auto account = rpc(config_, "auth", {{"op","session_check"},{"username",session.username},
                                                   {"credential_version",session.credential_version}});
         require_ok(account,"A required service is unavailable. Please retry.");
@@ -608,6 +701,7 @@ private:
             reject_auth_throttled(failure);
             throw;
         }
+        require_account_domain(request, username);
         auto user = rpc(config_, "auth", {{"op", "verify"}, {"username", username}, {"password", password}, {"session", true},
             {"peer_ip", request.peer_address}, {"protocol", admin_only ? "admin" : "webmail"}});
         reject_auth_throttled(user);
@@ -617,6 +711,7 @@ private:
         auto token = random_hex(32);
         WebSession session{user.at("username").get<std::string>(), random_hex(32), user.at("credential_version").get<std::string>(), user.value("admin", false),
                            Clock::now() + std::chrono::seconds(session_seconds_), {}};
+        session.hostname = portal_host(request);
         {
             std::lock_guard lock(mutex_);
             prune(Clock::now());
@@ -676,12 +771,15 @@ private:
     }
 
     HttpResponse route(const HttpRequest& request) {
+        require_portal(request);
         if (forbidden_portal_route(request))
             throw ApiError(404, "API route not found.");
         if (request.method == "GET" && request.path == "/health")
             return json_response({{"ok", true}, {"service", service_name}});
-        if (request.method == "GET" && request.path == "/api/public/config")
-            return json_response({{"ok", true}, {"domain", config_.mail_domains().front()}, {"domains",config_.mail_domains()},{"max_message_bytes",config_.number("max_message_bytes",10485760)}});
+        if (request.method == "GET" && request.path == "/api/public/config") {
+            const auto domains = login_domains(request);
+            return json_response({{"ok", true}, {"domain", domains.front()}, {"domains",domains},{"max_message_bytes",config_.number("max_message_bytes",10485760)}});
+        }
         if (!admin_only)
             if (auto discovered = mail_client_discovery(config_, request)) return *discovered;
         if (request.method == "GET") {
@@ -702,7 +800,14 @@ private:
                     throw ApiError(400, "Unexpected registration field.");
             input["token"] = field(input, "token", 71);
             input["op"] = redeem ? "invite_redeem" : "invite_inspect";
-            auto result = rpc(config_, "auth", input);
+            // Inspect before redemption so a token cannot create an account on
+            // another domain's portal. The auth service rechecks token validity
+            // transactionally when redeeming it.
+            auto result = rpc(config_, "auth", {{"op","invite_inspect"},{"token",input.at("token")}});
+            if (result.value("ok", false)) {
+                require_account_domain(request, "invitation@" + result.at("domain").get<std::string>());
+                if (redeem) result = rpc(config_, "auth", input);
+            }
             if (!result.value("ok", false)) {
                 const auto code = result.value("code", std::string{});
                 if (code == "user_exists") return json_response(result, 409);
@@ -879,8 +984,16 @@ private:
                     require_ok(result,"Unable to manage invitations.");
                 }
                 if (result.contains("token")) {
-                    const auto settings=settings_view(config_);
-                    result["registration_url"]=settings.at("web_url").get<std::string>()+"register#"+result.at("token").get<std::string>();
+                    auto registration = config_;
+                    const auto domain = result.at("invitation").at("domain").get<std::string>();
+                    registration.values["domain"] = domain;
+                    // settings_url prefers the shared portal when configured;
+                    // otherwise this invitation belongs on its own domain.
+                    if (!local_development(request, portal_host(request))) {
+                        registration.values["bind"] = "0.0.0.0";
+                        registration.values["allow_insecure_auth"] = false;
+                    }
+                    result["registration_url"]=settings_url(registration,"web")+"register#"+result.at("token").get<std::string>();
                     result.erase("token");
                 }
                 return json_response(result,request.method=="POST"?201:200);
@@ -1037,6 +1150,41 @@ private:
                     }
                     return json_response(DnsChecker().check_server(saved,request_json(request)));
                 } catch(const DnsError& error) {
+                    return json_response({{"ok",false},{"code",error.code},{"error",error.what()}},400);
+                }
+            }
+            if (path == "/api/admin/domains" || path.starts_with("/api/admin/domains/")) {
+                try {
+                    if (request.method == "GET" && path == "/api/admin/domains") {
+                        Json filters = Json::object();
+                        for (const auto& [key, value] : query) {
+                            if (key == "q") filters[key] = value;
+                            else if (key == "offset" || key == "limit") {
+                                unsigned number = 0;
+                                const auto [end, error] = std::from_chars(value.data(), value.data() + value.size(), number);
+                                if (error != std::errc{} || end != value.data() + value.size())
+                                    throw ApiError(400, "Invalid domain list pagination.");
+                                filters[key] = number;
+                            } else throw ApiError(400, "Unknown domain list parameter.");
+                        }
+                        return json_response(domains_list(config_, filters));
+                    }
+                    if (request.method == "POST" && path == "/api/admin/domains/preview")
+                        return json_response(domains_preview(config_, request_json(request)));
+                    if (request.method != "POST") throw ApiError(405, "Use POST for domain changes.");
+                    const auto input = request_json(request);
+                    std::lock_guard lock(maintenance_mutex_);
+                    if (shutting_down_ || backups_->busy()) throw ApiError(409, "Wait for the backup or shutdown operation to finish before changing domains.");
+                    if (supervisor_restart_busy(config_)) throw ApiError(409, "Wait for the service restart to finish before changing domains.");
+                    Json result;
+                    if (path == "/api/admin/domains") result = domains_add(config_, input);
+                    else if (path == "/api/admin/domains/check") result = domains_check(config_, input);
+                    else if (path == "/api/admin/domains/activate") result = domains_activate(config_, input);
+                    else if (path == "/api/admin/domains/remove") result = domains_remove(config_, input);
+                    else throw ApiError(404, "API route not found.");
+                    log(service_name, "administrator " + session.username + " changed domain configuration");
+                    return json_response(result, path == "/api/admin/domains" ? 201 : 200);
+                } catch (const DnsError& error) {
                     return json_response({{"ok",false},{"code",error.code},{"error",error.what()}},400);
                 }
             }

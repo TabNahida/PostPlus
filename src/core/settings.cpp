@@ -37,7 +37,8 @@ Json fields() {
         result.push_back(std::move(entry));
     };
     add("domain","general","text","localhost","Mail domain","Domain used for local recipient addresses; changing it does not rename existing accounts.");
-    add("additional_domains","general","lines",Json::array(),"Additional mail domains","One domain per line, up to 49. Mailboxes use their complete address and remain separate across domains. Publish MX, SPF, DKIM and DMARC for each domain.");
+    add("admin_hostname","portals","text","","Administration hostname","Only this hostname can open administration. Leave blank to use the first mail domain.");
+    add("webmail_shared_hostname","portals","text","","Shared Webmail hostname","Optional hostname where accounts from all hosted domains can sign in. Each mail domain otherwise accepts only its own accounts.");
     add("bind","network","text","127.0.0.1","Mail and Webmail listening address","Use 127.0.0.1 for local use or 0.0.0.0 to accept IPv4 connections from other computers.");
     add("admin_bind","network","text","127.0.0.1","Administration listening address","Keep 127.0.0.1 unless remote administration is needed; public access requires TLS.");
     const std::map<std::string,int> ports = {{"smtp",25},{"submission",587},{"smtps",465},{"pop3",110},{"pop3s",995},{"imap",143},{"imaps",993},{"web",80},{"admin",8081},{"auth",18081},{"storage",18082},{"filter",18083},{"transfer",18084}};
@@ -298,8 +299,10 @@ Json settings_schema(const Config& config) {
 
 std::string settings_url(const Config& config,const std::string& service) {
     const bool tls=!config.text("tls_certificate").empty();
-    auto host=config.text(service=="admin" ? "admin_bind" : "bind","127.0.0.1");
-    if (host=="0.0.0.0" || host=="::") host=config.mail_hostname();
+    auto host=config.text(service=="admin" ? "admin_hostname" : "webmail_shared_hostname");
+    if(host.empty()) host=config.text("domain","localhost");
+    const auto bind=config.text(service=="admin" ? "admin_bind" : "bind","127.0.0.1");
+    if(config.flag("allow_insecure_auth") && (bind=="127.0.0.1" || bind=="::1")) host=bind;
     if(tls && (host=="127.0.0.1" || host=="::1")) host="localhost";
     if (host.find(':')!=std::string::npos) host="["+host+"]";
     const auto port=config.port(service);
@@ -325,13 +328,14 @@ Json settings_view(const Config& config) {
     }
     values["outbound_mode"]=current.outbound_mode();
     values["mail_hostname"]=current.mail_hostname();
+    values["admin_hostname"]=current.text("admin_hostname").empty()?current.text("domain","localhost"):current.text("admin_hostname");
     if (!current.values.contains("ports") || !current.values.at("ports").contains("web"))
         values["ports"]["web"]=current.port("web");
     const bool available=supervisor_restart_available(config);
     const auto running=supervisor_running_config(config).value_or(config);
     auto result=Json{{"ok",true},{"values",values},{"revision",version},{"schema",settings_schema(current)},
         {"restart_available",available},
-        {"restart_required",!config.source.empty() && current.values!=running.values},
+        {"restart_required",!config.source.empty() && !restart_plan(running,current,"changed").empty()},
         {"secret_status",{{"smarthost_password",!current.text("smarthost_password_file").empty()}}},
         {"admin_url",settings_url(current,"admin")},{"web_url",settings_url(current,"web")},
         {"mail_clients",mail_client_settings(current)}};
@@ -400,8 +404,14 @@ Config validate_settings(const Config& existing,const Json& patch) {
     result.values["domain"]=domain;
     try {
         const auto domains=result.mail_domains();
-        result.values["additional_domains"]=std::vector<std::string>(domains.begin()+1,domains.end());
-    } catch(const std::exception&) { throw SettingsError("additional_domains","Enter at most 49 valid ASCII mail domains, one per line."); }
+        result.values["mail_domains"]=domains;
+        result.values.erase("additional_domains");
+    } catch(const std::exception&) { throw SettingsError("mail_domains","Enter valid ASCII mail domains."); }
+    for(const auto* key:{"admin_hostname","webmail_shared_hostname"}) {
+        const auto host=lower(trim(result.text(key)));
+        if(!host.empty() && !valid_address("postmaster@"+host)) throw SettingsError(key,"Enter a valid ASCII hostname without a scheme, port or path.");
+        result.values[key]=host;
+    }
     const auto parent=result.source.empty() ? fs::current_path() : result.source.parent_path();
     for(const auto* field:{"tls_certificate","tls_private_key","dkim_private_key"}) {
         const auto value=trim(result.text(field));
@@ -458,7 +468,7 @@ Config validate_settings(const Config& existing,const Json& patch) {
     if(mode=="direct" || (mode=="relay" && !result.text("dkim_private_key").empty()))
         for(const auto& mail:result.mail_domains())
             if(!valid_dkim_record_name(mail,result.text("dkim_selector","postplus")))
-                throw SettingsError("additional_domains","DKIM signing requires a public mail domain and valid selector for every mail domain.");
+                throw SettingsError("mail_domains","DKIM signing requires a public mail domain and valid selector for every mail domain.");
     for(const auto* key:{"max_mailbox_bytes","max_queue_bytes"})
         if(result.values.value(key,INT64_C(1073741824))<result.number("max_message_bytes",10485760)) throw SettingsError(key,"Storage byte limits must be at least the maximum message size.");
     return result;
@@ -496,6 +506,9 @@ Json save_settings(const Config& config,const Json& request) {
     if(!secure_equal(request.at("revision").get<std::string>(),revision(raw))) throw SettingsError("","Configuration changed since it was opened. Reload before saving.",409);
     auto current=Config::from_file(config.source);
     if(read_file(config.source)!=raw) throw SettingsError("","Configuration changed while it was being read. Reload the page.",409);
+    if(request.at("values").is_object() && request.at("values").contains("domain") &&
+       request.at("values").at("domain")!=current.text("domain","localhost"))
+        throw SettingsError("domain","The first mail domain is fixed. Manage other hosted domains from Domains.");
     auto updated=validate_settings(current,request.at("values"));
     const auto& values=request.at("values");
     if(values.value("clear_smarthost_password",false)) {

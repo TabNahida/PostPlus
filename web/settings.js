@@ -94,7 +94,7 @@ window.PostPlusSettings = (() => {
           sizeControl=PostPlusSize.create(input,unit,Number(initial),{min:field.min,max:field.max});
           const size=node("div","size-control");size.append(input,unit);wrapper.append(label,size,help);
         } else wrapper.append(label,input,help);
-        if (field.readonly) wrapper.append(node("p","field-hint readonly-hint",field.key==="dkim_private_key"?"Use Generate / load DKIM public record below. The private key stays on this server.":"Managed by the server. Change this in the configuration file while PostPlus is stopped."));
+        if (field.readonly && field.key!=="domain") wrapper.append(node("p","field-hint readonly-hint",field.key==="dkim_private_key"?"Use Generate / load DKIM public record below. The private key stays on this server.":"Managed by the server. Change this in the configuration file while PostPlus is stopped."));
         let clearPassword = null;
         if (field.type === "password") {
           wrapper.append(node("p","field-hint", options.secretStatus?.[field.key] ? "A password is saved. Leave blank to keep it." : "No password is saved. Leave blank to use the environment variable."));

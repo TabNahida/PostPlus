@@ -6,12 +6,12 @@ window.PostPlusAdminDns = (() => {
   const statuses = {unchecked:"Not checked",not_configured:"Pending configuration",matched:"Published value matches",published:"Published — verify the address",missing:"Record not found",mismatch:"Published value differs",error:"Lookup unavailable",skipped:"Optional — not configured",stale:"Changed — check again"};
   const labels = {a:"A · server IPv4",aaaa:"AAAA · server IPv6 (optional)",mx:"MX · incoming mail",spf:"TXT · SPF",dkim:"DKIM · outgoing signing",dmarc:"TXT · DMARC"};
   const fields = [["ipv4","Server public IPv4 address"],["ipv6","Server public IPv6 address (optional)"],["spf","SPF TXT value"],["dkim_name","Full DKIM record name"],["dkim_type","DKIM record type"],["dkim_value","DKIM public TXT value or CNAME target"],["dmarc","DMARC TXT policy"]];
-  function create(root,{request,prefix="admin-dns"}={}) {
+  function create(root,{request,prefix="admin-dns",onReport,onChanged,onBusy,draft=false}={}) {
     let disposed=false,revision=0,busy=false,report=null,error=null,checked=false,stale=false,spfEdited=false;
     const controls=new Map();
     function node(tag,text,className){const item=document.createElement(tag);if(text){item.dataset.i18n=text;item.textContent=t(text);}if(className)item.className=className;return item;}
     root.replaceChildren();
-    const intro=node("p","DNS uses the saved server settings. Publish these records at your DNS provider, then test them here without saving or restarting PostPlus.","field-hint"),summary=node("p",null,"dns-prerequisite"),edit=node("details",null,"dns-technical"),grid=node("div",null,"settings-grid admin-dns-fields");
+    const intro=node("p",draft?"Publish the records below at your DNS provider, then verify this domain. Your existing mail server and signing key are reused.":"DNS uses the saved server settings. Publish these records at your DNS provider, then test them here without saving or restarting PostPlus.","field-hint"),summary=node("p",null,"dns-prerequisite"),edit=node("details",null,"dns-technical"),grid=node("div",null,"settings-grid admin-dns-fields");
     const domainLabel=node("label","Mail domain"),domainSelect=node("select");domainSelect.id=`${prefix}-domain`;domainSelect.setAttribute("aria-label",t("Mail domain"));domainLabel.append(domainSelect);domainLabel.hidden=true;
     domainSelect.addEventListener("change",()=>load(false));
     edit.append(node("summary","Expected DNS values (optional)"),node("p","Enter your actual public IPs to compare them with DNS and prepare an exact SPF policy. For a relay or an existing policy, enter the values you want to keep. These fields are only used for this check.","field-hint"),grid);
@@ -20,7 +20,7 @@ window.PostPlusAdminDns = (() => {
       input.id=`${prefix}-${name}`;caption.htmlFor=input.id;input.autocomplete="off";input.spellcheck=false;input.maxLength=name==="dkim_name"?253:["ipv4","ipv6"].includes(name)?64:4096;
       if(name==="dkim_type"){for(const value of ["TXT","CNAME"]){const option=node("option");option.value=value;option.textContent=value;input.append(option);}input.value="TXT";}
       else if(input.tagName==="TEXTAREA")input.rows=name==="dkim_value"?4:2;else input.type="text";
-      input.addEventListener(name==="dkim_type"?"change":"input",()=>{revision++;stale=checked;error=null;if(name==="spf")spfEdited=true;if(["ipv4","ipv6"].includes(name)&&!spfEdited&&report?.outbound_mode==="direct"){const mechanisms=[controls.get("ipv4").value.trim()?"ip4:"+controls.get("ipv4").value.trim():"",controls.get("ipv6").value.trim()?"ip6:"+controls.get("ipv6").value.trim():""].filter(Boolean);controls.get("spf").value="v=spf1 "+(mechanisms.length?mechanisms.join(" "):"mx")+" -all";}render();});
+      input.addEventListener(name==="dkim_type"?"change":"input",()=>{revision++;stale=checked;error=null;onChanged?.();if(name==="spf")spfEdited=true;if(["ipv4","ipv6"].includes(name)&&!spfEdited&&report?.outbound_mode==="direct"){const mechanisms=[controls.get("ipv4").value.trim()?"ip4:"+controls.get("ipv4").value.trim():"",controls.get("ipv6").value.trim()?"ip6:"+controls.get("ipv6").value.trim():""].filter(Boolean);controls.get("spf").value="v=spf1 "+(mechanisms.length?mechanisms.join(" "):"mx")+" -all";}render();});
       wrap.append(caption,input);grid.append(wrap);controls.set(name,input);
     }
     const actions=node("div",null,"dns-check-actions"),reload=node("button","Reload DNS recommendations","button secondary"),check=node("button","Test DNS and connectivity","button primary"),status=node("p",null,"field-hint"),failure=node("p",null,"form-error"),records=node("div",null,"dns-record-grid"),connections=node("section",null,"dns-connectivity");
@@ -51,10 +51,10 @@ window.PostPlusAdminDns = (() => {
     }
     function validate(data){if(!data?.ok||typeof data.domain!=="string"||typeof data.hostname!=="string"||!data.expected||!Array.isArray(data.records)||data.records.some(record=>!record||typeof record.id!=="string"||typeof record.name!=="string"||typeof record.type!=="string"||typeof record.value!=="string"||!statuses[record.status]||!Array.isArray(record.observed)||record.observed.some(value=>typeof value!=="string")))throw new Error(t("The server returned an unreadable response."));return data;}
     async function load(test){
-      if(disposed||busy)return;const current=++revision;busy=true;error=null;render();
-      try{const data=validate(await request(test?"/check":domainSelect.value?"?domain="+encodeURIComponent(domainSelect.value):"",test?{method:"POST",body:expected()}:{method:"GET"}));if(disposed||current!==revision)return;report=data;checked=test;stale=false;domainSelect.replaceChildren();for(const value of data.domains||[data.domain]){const option=node("option");option.value=value;option.textContent=value;domainSelect.append(option);}domainSelect.value=data.domain;domainLabel.hidden=(data.domains||[data.domain]).length<2;if(!test){spfEdited=false;for(const [name,input] of controls)input.value=typeof data.expected[name]==="string"?data.expected[name]:"";}}
+      if(disposed||busy)return;const current=++revision;busy=true;error=null;onBusy?.(true);render();
+      try{const data=validate(await request(test?"/check":domainSelect.value?"?domain="+encodeURIComponent(domainSelect.value):"",test?{method:"POST",body:expected()}:{method:"GET"}));if(disposed||current!==revision)return;report=data;checked=test;stale=false;domainSelect.replaceChildren();for(const value of data.domains||[data.domain]){const option=node("option");option.value=value;option.textContent=value;domainSelect.append(option);}domainSelect.value=data.domain;domainLabel.hidden=draft||(data.domains||[data.domain]).length<2;if(!test){spfEdited=false;for(const [name,input] of controls)input.value=typeof data.expected[name]==="string"?data.expected[name]:"";}onReport?.(data,{checked:test});}
       catch(problem){if(!disposed&&current===revision)error=problem;}
-      finally{if(!disposed){busy=false;render();}}
+      finally{if(!disposed){busy=false;onBusy?.(false);render();}}
     }
     check.addEventListener("click",()=>load(true));reload.addEventListener("click",()=>load(false));render();load(false);
     return {reload:()=>load(false),translate(){PostPlusI18n.apply(root);render();},dispose(){disposed=true;revision++;root.replaceChildren();}};

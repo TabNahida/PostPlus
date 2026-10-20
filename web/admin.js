@@ -2,7 +2,7 @@
 const t = (...args) => PostPlusI18n.t(...args);
 const $ = id => document.getElementById(id);
 const state = {user:null,view:"overview",userMode:"create"};
-const viewLabels = {overview:"Overview",accounts:"User accounts",queue:"Delivery queue",logs:"Service logs",security:"Login security","api-keys":"API keys",settings:"Server settings",maintenance:"Server maintenance",restart:"Restart and shutdown"};
+const viewLabels = {overview:"Overview",domains:"Domains",accounts:"User accounts",queue:"Delivery queue",logs:"Service logs",security:"Login security","api-keys":"API keys",settings:"Server settings",maintenance:"Server maintenance",restart:"Restart and shutdown"};
 const inspectionReader=PostPlusMailReader.create($("inspect-body"));
 let settingsData = null;
 let settingsEditor = null;
@@ -13,12 +13,12 @@ let acmeControl=null;
 let updateControl=null,updateBusy=false;
 let passwordPolicyData=null, passwordPolicyVersion=0, userDialogVersion=0, policySaving=false;
 let apiKeysData=null,apiKeysVersion=0,apiKeyDialogVersion=0,apiKeyCreating=false,apiKeyRevoking=false,apiKeyRevokeTarget=null;
-let keyPermissionEditor=null,accessControl=null,securityControl=null;
+let keyPermissionEditor=null,accessControl=null,securityControl=null,domainControl=null;
 let usersData=[];
 let restartJob=null,restartVersion=0,restartTimer=null,restartStarted=0,restartBusy=false,restartText="",restartSubmitting=false;
 let noticeTimer;
 const accountAddress=PostPlusAddress.create($("new-email"),$("new-email-domain"));
-const loginAddress=PostPlusAddress.create($("login-email"),$("login-domain"));
+const loginAddress=PostPlusAddress.create($("login-email"),$("login-domain"),{allowFullAddress:true});
 const mailDomainReady=api("/api/public/config",{quiet:true}).then(data=>{accountAddress.setDomains(data.domains||[data.domain]);loginAddress.setDomains(data.domains||[data.domain]);return true;}).catch(()=>false);
 
 function showNotice(message, error = false) {
@@ -80,6 +80,7 @@ function signedOut() {
   usersData=[];$("users-search").value="";$("users-count").textContent="";$("users-empty").hidden=true;
   accessControl?.dispose();accessControl=null;keyPermissionEditor?.clear();keyPermissionEditor=null;
   securityControl?.dispose();securityControl=null;
+  domainControl?.dispose();domainControl=null;
   clearRestart();
   updateControl?.dispose();updateControl=null;updateBusy=false;
   backupVersion++;clearTimeout(backupTimer);backupTimer=null;shutdownPending=false;
@@ -109,9 +110,26 @@ function signedOut() {
   $("login-email").focus();
   document.title = t("PostPlus · Administration");
 }
+async function applyDomainChanges(data) {
+  settingsData=null;
+  if(data.restart){startRestart(data);return;}
+  if(data.restart_required){
+    try {
+      const saved=await api("/api/admin/config",{quiet:true});
+      if(saved.restart_available){
+        const restart=await api("/api/admin/restart",{method:"POST",body:{mode:"changed"}});
+        startRestart({...saved,...restart,restart});
+      } else showNotice(t("Domain changes are saved. Restart PostPlus manually before using the updated mail domains."));
+    } catch(error){showNotice(t("Domain changes are saved, but restarting failed. Open Restart and shutdown to apply them.")+" "+error.message,true);}
+    return;
+  }
+  try {const config=await api("/api/public/config",{quiet:true});accountAddress.setDomains(config.domains||[config.domain]);}catch{}
+}
 async function signedIn(user) {
   if (!user.admin) throw new Error(t("Administrator access is required."));
   state.user = user;
+  domainControl?.dispose();
+  if(window.PostPlusAdminDomains)domainControl=PostPlusAdminDomains.mount($("view-domains"),{api,notice:showNotice,canChange:()=>!settingsSaving&&!restartBusy&&!updateBusy&&!shutdownPending,onSaved:applyDomainChanges});
   securityControl?.dispose();
   if(window.PostPlusAdminSecurity)securityControl=PostPlusAdminSecurity.mount($("view-security"),{api,notice:showNotice});
   accessControl?.dispose();
@@ -172,13 +190,14 @@ async function switchView(view) {
   if (!Object.hasOwn(viewLabels,view)) return;
   showAdminView(view);
   if (view === "logs") await loadLogs();
+  else if (view === "domains") await domainControl?.refresh();
   else if (view === "security") await securityControl?.refresh();
   else if (view === "api-keys") await loadApiKeys();
   else if (["settings","maintenance","restart"].includes(view)) { if (!settingsData) await loadSettings(); }
   else {await loadAdmin();if(view==="accounts")await accessControl?.refresh();}
 }
 document.querySelectorAll("[data-view]").forEach(button => button.addEventListener("click", () => switchView(button.dataset.view)));
-$("admin-refresh").addEventListener("click", () => state.view === "logs" ? loadLogs() : state.view === "security" ? securityControl?.refresh() : state.view === "api-keys" ? loadApiKeys() : Promise.allSettled([loadAdmin(),state.view==="accounts" ? accessControl?.refresh() : null]));
+$("admin-refresh").addEventListener("click", () => state.view === "domains" ? domainControl?.refresh() : state.view === "logs" ? loadLogs() : state.view === "security" ? securityControl?.refresh() : state.view === "api-keys" ? loadApiKeys() : Promise.allSettled([loadAdmin(),state.view==="accounts" ? accessControl?.refresh() : null]));
 
 function renderUsers() {
   const query=$("users-search").value.trim().toLowerCase(),accounts=usersData.filter(account=>account.username.toLowerCase().includes(query));
@@ -497,7 +516,7 @@ async function loadSettings() {
     $("restart-open").disabled=data.restart_available===false;
     maintenanceStatus("settings-apply-hint",data.restart_available===false ? "This standalone service saves settings without restarting. Restart the affected services manually after saving." : "Saving validates the configuration and restarts only affected services. Other services continue running.");
     settingsEditor?.dispose();
-    settingsEditor = PostPlusSettings.create($("settings-fields"),data.schema,data.values,{prefix:"config",secretStatus:data.secret_status,mailClients:true,onChange:updateSettingsCount,dnsRequest:(path,options)=>api('/api/admin/dns'+path,options),generateDkim:body=>api("/api/admin/dkim",{method:"POST",body})});
+    settingsEditor = PostPlusSettings.create($("settings-fields"),data.schema.map(field=>field.key==="domain"?{...field,readonly:true,help:"The first mail domain is fixed. Add and manage hosted domains on the Domains page."}:field),data.values,{prefix:"config",exclude:new Set(["additional_domains","mail_domains","admin_hostname","webmail_shared_hostname"]),secretStatus:data.secret_status,mailClients:true,onChange:updateSettingsCount,dnsRequest:(path,options)=>api('/api/admin/dns'+path,options),generateDkim:body=>api("/api/admin/dkim",{method:"POST",body})});
     $("settings-success").hidden = true;
     $("settings-form").hidden = false;
     setLink("open-webmail",data.web_url);
@@ -666,6 +685,7 @@ document.addEventListener("postplus:language", () => {
   updateSettingsCount();
   updateControl?.translate();
   securityControl?.translate();
+  domainControl?.translate();
   renderPasswordHint();
   acmeControl?.translate();
   renderInspection();

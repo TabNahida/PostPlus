@@ -2,6 +2,10 @@
 
 [Login security and IP bans](security.md) documents the shared authentication policy, audit logs and dedicated API-key permissions.
 
+Since 0.5.1, administration and its API use one designated login hostname. Webmail and mailbox API keys use the matching mailbox domain, or an explicitly configured shared Webmail hostname. Invitations follow the same domain policy. See [domain management and login addresses](configuration.md#multiple-mailbox-domains).
+
+Removing a hosted domain retains its accounts and messages. Existing administrators from that domain can still sign in on the designated administration hostname by entering their complete email address, even when its domain no longer appears in the selector. This allows them to restore the domain or manage retained accounts. Their administrative API keys remain governed by the designated administration hostname and their existing permissions. Webmail and mailbox API keys continue to require an active hosted domain, including on the shared Webmail hostname.
+
 Webmail badges show unread counts for Inbox, Junk and Archive, and unsent draft counts for Drafts. Sent and Trash have no count badges.
 
 ## Latest verification code
@@ -89,5 +93,5 @@ Mailbox keys cannot select another account or access administration. Administrat
 ```sh
 curl --fail --silent --show-error \
   -H "Authorization: Bearer $POSTPLUS_MAILBOX_KEY" \
-  https://mail.example.com/api/verification-code
+  https://example.com/api/verification-code
 ```

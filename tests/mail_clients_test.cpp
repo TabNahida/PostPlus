@@ -10,12 +10,16 @@ void check(bool condition, const char* message) { if (!condition) throw std::run
 int main() {
     try {
         Config config; config.values={{"domain","fatutu.xyz"},{"bind","0.0.0.0"},{"admin_bind","::"}};
-        check(settings_url(config,"web")=="http://mail.fatutu.xyz/","public Webmail URL must use mail hostname and standard port");
+        check(settings_url(config,"web")=="http://fatutu.xyz/","public Webmail URL must use the first mail domain and standard port");
         config.values["tls_certificate"]="certificate.pem"; config.values["tls_private_key"]="key.pem";
-        check(settings_url(config,"web")=="https://mail.fatutu.xyz/","TLS Webmail URL");
-        check(settings_url(config,"admin")=="https://mail.fatutu.xyz:8081/","administration certificate hostname");
+        check(settings_url(config,"web")=="https://fatutu.xyz/","TLS Webmail URL");
+        check(settings_url(config,"admin")=="https://fatutu.xyz:8081/","administration defaults to the first domain");
+        config.values["admin_hostname"]="admin.fatutu.xyz";
+        config.values["webmail_shared_hostname"]="login.fatutu.xyz";
+        check(settings_url(config,"admin")=="https://admin.fatutu.xyz:8081/" && settings_url(config,"web")=="https://login.fatutu.xyz/","configured portal URL hostnames");
+        config.values.erase("admin_hostname");config.values.erase("webmail_shared_hostname");
         config.values["ports"]["web"]=8443;
-        check(settings_url(config,"web")=="https://mail.fatutu.xyz:8443/","explicit Web port");
+        check(settings_url(config,"web")=="https://fatutu.xyz:8443/","explicit Web port");
         check(!mail_client_settings(config).at("discovery").at("enabled").get<bool>(),"discovery needs standard HTTPS port");
         config.values["ports"].erase("web");
         auto model=mail_client_settings(config);
@@ -57,6 +61,8 @@ int main() {
         config.values["domain"]="mail.fatutu.xyz";
         check(config.mail_hostname()=="mail.fatutu.xyz","mail hostname cannot get duplicate prefix");
         config.values["bind"]="::1";
+        check(settings_url(config,"web")=="https://mail.fatutu.xyz/","production portal URL must not bypass hostname policy on loopback bind");
+        config.values["allow_insecure_auth"]=true;
         check(settings_url(config,"web")=="https://localhost/","local TLS URL");
         std::cout<<"Mail client tests passed\n";
         return 0;

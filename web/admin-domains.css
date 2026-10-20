@@ -1,0 +1,53 @@
+.domain-intro { margin-bottom:28px; max-width:760px; }
+.domain-intro h2 { margin:0 0 12px; font-size:26px; letter-spacing:-.6px; }
+.domain-intro p { line-height:1.8; margin:0; }
+.domain-tabs { display:flex; gap:28px; border-bottom:1px solid var(--line); margin-bottom:28px; }
+.domain-tab { border:0; border-bottom:3px solid transparent; border-radius:0; padding:14px 1px; background:transparent; color:var(--muted); font:inherit; font-weight:600; cursor:pointer; }
+.domain-tab.active { color:var(--ink); border-bottom-color:var(--accent,#45684a); }
+.domain-panel { min-width:0; }
+.domain-panel h3 { margin:0 0 9px; font-size:18px; }
+.domain-panel .section-heading { align-items:center; margin-bottom:24px; }
+.domain-panel .section-heading p { margin:0; font-size:13px; }
+.domain-field { display:flex; flex-direction:column; gap:9px; }
+.domain-field label { margin:0; font-size:13px; }
+.domain-field input { width:100%; margin:0; }
+#domain-panel-domains>.domain-field { max-width:420px; margin-bottom:22px; }
+.domain-panel td { vertical-align:middle; }
+.domain-panel td strong { font-size:13px; overflow-wrap:anywhere; }
+.domain-panel td .role-badge { display:inline-block; margin:7px 0 7px 10px; font-size:10px; }
+.domain-panel td small { display:block; margin-top:6px; color:var(--muted); font-size:11px; }
+.domain-state { display:inline-block; padding:5px 9px; border-radius:5px; font-size:11px; background:var(--surface-selected,#edf2e5); color:var(--text-secondary,#52644f); white-space:nowrap; }
+.domain-state.is-pending { background:#c79e1615; color:#8c6c12; }
+[data-theme="dark"] .domain-state.is-pending { background:#493e29; color:#eed5a7; }
+.domain-row-actions { white-space:nowrap; }
+.domain-row-actions .table-action { margin-right:14px; }
+.domain-pagination { display:flex; align-items:center; gap:12px; margin-top:22px; }
+.domain-pagination>p { flex:1; font-size:12px; }
+.portal-policy-grid { display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); gap:24px; }
+.portal-policy-card { padding:25px; border:1px solid var(--line); border-radius:10px; background:var(--surface); }
+.portal-policy-card>.field-hint { line-height:1.8; margin:10px 0 24px; }
+.portal-policy-card>.field-hint:last-child { margin-bottom:0; }
+.portal-policy-card .checkbox-label { align-items:flex-start; margin:0 0 22px; line-height:1.6; }
+.portal-policy-card .checkbox-label input { margin-top:4px; flex-shrink:0; }
+.portal-dns-note { border-left:3px solid var(--line); padding:3px 0 3px 20px; margin:28px 0; max-width:850px; }
+.portal-dns-note h3 { font-size:14px; }
+.portal-dns-note p { line-height:1.8; margin:10px 0 0; }
+.domain-policy-actions { display:flex; justify-content:flex-end; gap:12px; margin-top:24px; }
+.domain-dialog { width:min(940px,calc(100vw - 40px)); max-height:90dvh; }
+.domain-dialog>.form-error { margin:0 28px 20px; }
+.domain-dialog .dialog-header h2 { overflow-wrap:anywhere; }
+.domain-dialog .dialog-body { padding:24px 28px; max-height:calc(90dvh - 170px); overflow:auto; overscroll-behavior:contain; }
+.domain-wizard-steps { display:flex; list-style:none; gap:22px; padding:0 0 22px; margin:0 0 26px; border-bottom:1px solid var(--line); color:var(--muted); font-size:12px; }
+.domain-wizard-steps .current { color:var(--ink); font-weight:600; }
+.domain-dialog #new-mail-domain { max-width:500px; }
+.domain-dialog .field-hint { line-height:1.8; }
+.domain-dns-root { margin-top:26px; }
+.domain-dns-root .dns-technical { margin:22px 0; padding:20px; border:1px solid var(--line); border-radius:8px; }
+.domain-dns-root .dns-technical>summary { cursor:pointer; }
+.domain-dns-root .admin-dns-fields { margin-top:22px; }
+.domain-dns-root .dns-check-actions { justify-content:flex-start; margin:24px 0 14px; gap:12px; }
+.domain-dns-root .dns-connectivity { margin-top:24px; }
+.domain-remove-name { font-weight:600; font-size:18px; overflow-wrap:anywhere; }
+#domain-remove-dialog { max-width:570px; }
+@media(max-width:800px) { .portal-policy-grid { grid-template-columns:1fr; } .domain-panel table { min-width:650px; } }
+@media(max-width:550px) { .domain-intro h2 { font-size:23px; } .domain-tabs { gap:22px; } .domain-panel .section-heading { align-items:flex-start; gap:16px; } .domain-panel .section-heading>.button { white-space:nowrap; } .portal-policy-card { padding:20px; } .domain-policy-actions { flex-direction:column-reverse; } .domain-pagination { flex-wrap:wrap; } .domain-pagination>p { flex-basis:100%; margin:0; } .domain-dialog { width:calc(100vw - 18px); } .domain-dialog .dialog-body { padding:20px 16px; } .domain-dialog .dialog-footer { gap:10px; flex-wrap:wrap; } .domain-wizard-steps { gap:14px; font-size:11px; } .domain-dns-root .dns-technical { padding:16px 12px; } .domain-dns-root .dns-check-actions .button { width:100%; } }

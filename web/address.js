@@ -1,7 +1,7 @@
 "use strict";
 // Keep the chosen mail domain visible while accepting saved full usernames.
 window.PostPlusAddress = (() => {
-  function create(input, suffix) {
+  function create(input, suffix, {allowFullAddress=false} = {}) {
     let domain = "", domains = [], fixedAddress = "", draftDomain = false, selector = null;
     const validDomain = value => typeof value === "string" && value.length > 0 && value.length <= 253 && value.split(".").every(label => label.length > 0 && label.length <= 63 && /^[a-z0-9](?:[a-z0-9-]*[a-z0-9])?$/i.test(label));
     function displayDomain(value) {
@@ -28,7 +28,7 @@ window.PostPlusAddress = (() => {
       selector.value = domain;
     }
     function setDomains(values) {
-      if (!Array.isArray(values) || !values.length || values.length > 50 || values.some(value=>!validDomain(value)))
+      if (!Array.isArray(values) || !values.length || values.some(value=>!validDomain(value)))
         throw new Error(PostPlusI18n.t("The server returned an unreadable response."));
       domains = [...new Set(values.map(value=>value.toLowerCase()))];
       selector = null;
@@ -46,12 +46,18 @@ window.PostPlusAddress = (() => {
       const at = value.lastIndexOf("@"), pasted = value.slice(at+1).toLowerCase();
       if (at >= 0 && !draftDomain && domains.includes(pasted)) {domain=pasted;render();}
       if (value.toLowerCase().endsWith("@" + domain)) input.value = value.slice(0, -(domain.length + 1));
+      if (allowFullAddress) suffix.hidden=input.value.includes("@");
     }
     function address() {
       if (fixedAddress) return fixedAddress;
+      normalize();
+      if (allowFullAddress && input.value.trim().includes("@")) {
+        const value=input.value.trim().toLowerCase(),at=value.lastIndexOf("@"),name=value.slice(0,at),host=value.slice(at+1);
+        if(value.length<=254&&name.length<=64&&/^[a-z0-9!#$%&'*+\-/=?^_`{|}~]+(?:\.[a-z0-9!#$%&'*+\-/=?^_`{|}~]+)*$/.test(name)&&validDomain(host))return value;
+        throw new Error(PostPlusI18n.t("Enter a valid email address."));
+      }
       if (!domain) throw new Error(PostPlusI18n.t("Could not load the mail domain. Refresh this page and try again."));
       if (!validDomain(domain)) throw new Error(PostPlusI18n.t(draftDomain ? "Enter a valid ASCII mail domain, such as example.com." : "The server returned an unreadable response."));
-      normalize();
       const value = input.value.trim().toLowerCase();
       const localSymbols = ".!#$%&'*+-/=?^_`{|}~";
       if (!value || value.length > 64 || value.length + domain.length + 1 > 254 || value.startsWith(".") || value.endsWith(".") || value.includes("..") || [...value].some(char => !(/[a-z0-9]/.test(char) || localSymbols.includes(char))))
@@ -65,6 +71,7 @@ window.PostPlusAddress = (() => {
       selector=null;render();
     }
     input.addEventListener("change", normalize);
+    if (allowFullAddress) input.addEventListener("input",()=>{suffix.hidden=input.value.includes("@");});
     return {setDomain, setDomains, setDraftDomain, setAddress, address};
   }
   return {create};

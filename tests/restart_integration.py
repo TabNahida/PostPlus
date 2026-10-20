@@ -215,10 +215,10 @@ def selective(binaries, directory):
         assert_ports_closed({"old_auth": old_auth})
         assert rpc(new_auth, token, op="exists", username="admin@localhost")["exists"]
         apply_and_check(server, ports, external, {"max_connections": 24}, SERVICES)
-        apply_and_check(server, ports, external, {"domain": "changed.example"}, SERVICES)
+        apply_and_check(server, ports, external, {"timeout_seconds": 31}, SERVICES)
         assert server.process.pid == original_supervisor and server.process.poll() is None
         assert token_file.read_bytes() == original_token
-        print("PASS internal RPC dependency closures, global/domain consumers and persistent API/service credentials", flush=True)
+        print("PASS internal RPC dependency closures, global consumers and persistent API/service credentials", flush=True)
 
         before = pids(server)
         saved = save(ports, external, {"blocked_terms": ["RestartBlockedSentinel", "ManualStagedSentinel"]}, apply=False)

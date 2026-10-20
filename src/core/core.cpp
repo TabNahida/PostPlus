@@ -20,6 +20,7 @@
 #include <limits>
 #include <mutex>
 #include <optional>
+#include <set>
 #include <sstream>
 #include <stdexcept>
 #ifdef _WIN32
@@ -152,6 +153,11 @@ Config Config::from_file(const std::filesystem::path& path) {
     // Keep legacy readers (hostname derivation, supervisor probes and DKIM key
     // paths) consistent with the canonical domain set used for mail routing.
     config.values["domain"] = config.mail_domains().front();
+    for (const auto* key : {"admin_hostname", "webmail_shared_hostname"}) {
+        const auto host = lower(trim(config.text(key)));
+        if (!host.empty() && !valid_address("postmaster@" + host)) throw std::invalid_argument(std::string("invalid ") + key);
+        if (config.values.contains(key)) config.values[key] = host;
+    }
     const auto outbound = config.outbound_mode();
     if (outbound != "disabled" && outbound != "direct" && outbound != "relay") throw std::invalid_argument("outbound_mode must be disabled, direct, or relay");
     const auto hostname = config.mail_hostname();
@@ -183,17 +189,19 @@ std::string Config::mail_hostname() const {
 }
 std::vector<std::string> Config::mail_domains() const {
     std::vector<std::string> result;
+    std::set<std::string> distinct;
     auto append = [&](const std::string& input) {
         const auto domain = lower(trim(input));
         if (!valid_address("postmaster@" + domain)) throw std::invalid_argument("invalid mail domain");
-        if (std::find(result.begin(), result.end(), domain) == result.end()) result.push_back(domain);
+        if (distinct.insert(domain).second) result.push_back(domain);
     };
     append(text("domain", "localhost"));
-    if (values.contains("additional_domains")) {
-        const auto& additional = values.at("additional_domains");
-        if (!additional.is_array() || additional.size() > 49) throw std::invalid_argument("additional_domains must contain at most 49 domains");
+    const auto key = values.contains("mail_domains") ? "mail_domains" : "additional_domains";
+    if (values.contains(key)) {
+        const auto& additional = values.at(key);
+        if (!additional.is_array()) throw std::invalid_argument(std::string(key) + " must be an array of domains");
         for (const auto& domain : additional) {
-            if (!domain.is_string()) throw std::invalid_argument("additional_domains must contain domain strings");
+            if (!domain.is_string()) throw std::invalid_argument(std::string(key) + " must contain domain strings");
             append(domain.get<std::string>());
         }
     }

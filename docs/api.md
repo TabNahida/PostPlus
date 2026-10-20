@@ -10,7 +10,9 @@ With TLS and no explicit Web port, Webmail uses 443. [Mail client discovery](mai
 
 ## Sessions
 
-`GET /api/public/config` is available without a session on both web services. It returns `{"ok":true,"domain":"example.com","domains":["example.com","example.net"],"max_message_bytes":10485760}` for address inputs and the attachment size hint. `domain` remains the primary suffix; `domains` contains the normalized primary and additional suffixes. API login and account creation accept complete addresses, and accounts with the same local part on different domains remain independent.
+`GET /api/public/config` is available without a session on each permitted portal hostname. It returns `{"ok":true,"domain":"example.com","domains":["example.com"],"max_message_bytes":10485760}` for address inputs and the attachment size hint. A domain-specific Webmail host exposes only that domain; the shared Webmail host and administration expose active hosted domains. API login and account creation accept complete addresses, and accounts with the same local part on different domains remain independent.
+
+Administration accepts only `admin_hostname` (default: primary `domain`). Webmail accepts each active domain for its own mailbox accounts, or the optional `webmail_shared_hostname` for all active domains. Unknown hostnames are rejected. `Host` determines the portal; `Forwarded` and `X-Forwarded-Host` do not override it. Password login, invitation inspection/redemption and mailbox Bearer keys enforce the same account-domain policy. Browser sessions are also bound to their login hostname, so copying a session cookie to another hostname cannot reuse it. Local development access requires an actual loopback connection, loopback Host, and `allow_insecure_auth`; loopback health probes are allowed without granting account access.
 
 Administration DNS recommendations accept `GET /api/admin/dns?domain=example.net`; DNS checks accept an optional `domain` in `POST /api/admin/dns/check`. Only saved hosted domains are accepted, and the hostname, ports and probe targets still come from server settings. Both responses include the hosted `domains` list.
 
@@ -23,6 +25,54 @@ Administration DNS recommendations accept `GET /api/admin/dns?domain=example.net
 It returns `ok`, `username`, `admin`, `csrf`, and `expires_in`, and sets the `pp_session` cookie for Webmail or `pp_admin_session` for administration. Send the appropriate cookie on subsequent browser requests. Sessions and CSRF tokens are held independently by each process. All state-changing cookie-authenticated requests except login also require `X-CSRF-Token: <csrf>`. The browser administration portal continues to use its cookie and CSRF token; API keys support external administration and owner-bound mailbox clients.
 
 `GET /api/session` returns the current account and CSRF token. `POST /api/logout` revokes the session and clears its cookie. Cookies are HttpOnly and SameSite=Strict, with Secure added over HTTPS. Sessions are kept in web-process memory, last one hour by default, and expire on restart.
+
+## Hosted domain management
+
+Domain management is available on the designated administration hostname. All
+browser requests require an administrator session; POST requests also require
+CSRF. Bearer keys use the permissions below. Domain edits use the configuration
+revision returned by the list or latest mutation. A stale revision returns 409.
+
+| Method and path | Body or query | Permission |
+| --- | --- | --- |
+| GET `/api/admin/domains` | Optional `q` (case-insensitive substring, at most 253 bytes), `offset` (zero or greater), `limit` (1–200, default 25) | `config:read` |
+| POST `/api/admin/domains` | `{"revision":"…","domain":"example.net"}`; registers a pending domain, returns 201 | `config:write` |
+| POST `/api/admin/domains/preview` | `{"domain":"example.net","dns":{}}`; returns expected DNS records without saving | `config:read` |
+| POST `/api/admin/domains/check` | `{"revision":"…","domain":"example.net","dns":{}}`; saves server-generated verification evidence | `config:write` |
+| POST `/api/admin/domains/activate` | `{"revision":"…","domain":"example.net"}` | `config:write` |
+| POST `/api/admin/domains/remove` | `{"revision":"…","domain":"example.net"}`; preserves accounts and mail | `config:write` |
+
+The list returns `items`, filtered `total`, unfiltered `total_domains`,
+`active_count`, `offset`, `limit`, `revision`, and `restart_required`. The primary
+domain appears first; other domains sort lexicographically. Each item contains
+`domain`, `primary`, `status` (`active` or `pending`), `dns_status`, `checked_at`,
+`can_activate`, `can_remove`, and saved `dns` expectations. Empty search results
+are a successful empty page. There is no domain-count cap; configuration must
+fit within the existing 1 MiB file limit.
+
+Optional `dns` expectations use the existing diagnostic fields (`ipv4`, `ipv6`,
+`spf`, `dkim_name`, `dkim_type`, `dkim_value`, `dmarc`). The server supplies the
+domain, mail hostname, ports and resolver. A client cannot override them or
+submit its own verification result. The check response adds a complete `dns`
+report. Activation requires a matching MX plus a public A/AAAA address for the
+configured mail server. Evidence expires after 24 hours and becomes invalid
+when the relevant DNS expectations or server configuration change. Other DNS
+diagnostics remain visible warnings, so activation is not a deliverability or
+certificate guarantee.
+
+Pending domains do not change running mail routing. Activation/removal return
+`restart_required`; API clients then call `POST /api/admin/restart` with
+`{"mode":"changed"}` and `services:write`, or restart independently launched
+services manually. The administration UI uses this same restart API. The
+primary domain cannot be removed. Generic configuration updates cannot edit
+the hosted-domain array or registry, or change the primary domain after setup.
+
+Login policy is configured through the existing revisioned
+`POST /api/admin/config`, with `values.admin_hostname` and
+`values.webmail_shared_hostname`. An empty administration hostname uses the
+primary domain; an empty shared hostname disables shared Webmail. These changes
+follow the ordinary configuration-save restart behavior. DNS and TLS coverage
+for each public hostname must be configured separately.
 
 ## Mailbox
 

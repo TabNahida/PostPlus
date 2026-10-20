@@ -45,6 +45,8 @@ std::optional<std::string> required_api_permission(std::string_view method, std:
     if (path == "/api/admin/queue") return read ? std::optional<std::string>("queue:read") : std::nullopt;
     if (path == "/api/admin/logs") return read ? std::optional<std::string>("logs:read") : std::nullopt;
     if (path == "/api/admin/config") return read ? "config:read" : "config:write";
+    if (path == "/api/admin/domains" || path.starts_with("/api/admin/domains/"))
+        return read || path == "/api/admin/domains/preview" ? "config:read" : "config:write";
     if ((path == "/api/admin/dns" && read) || (path == "/api/admin/dns/check" && method == "POST")) return "config:read";
     if (path == "/api/admin/dkim") return write ? std::optional<std::string>("config:write") : std::nullopt;
     if (path.starts_with("/api/admin/acme/")) return read ? "config:read" : "config:write";

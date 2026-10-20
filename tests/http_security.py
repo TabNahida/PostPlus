@@ -248,7 +248,10 @@ def run(suite):
     suite.start("web")
     username = "http-security@localhost"
     assert suite.rpc("auth", op="create", username=username, password=PASSWORD)["ok"]
-    status, headers, login = suite.http("web", "POST", "/api/login", {"username": username, "password": PASSWORD})
+    # Raw framing probes below use Host: localhost. Sign in on the same
+    # authority so host-bound sessions reach the intended CSRF/body checks.
+    status, headers, login = suite.http("web", "POST", "/api/login", {"username": username, "password": PASSWORD},
+                                        {"Host": "localhost"})
     assert status == 200, (status, login)
     cookie = headers["Set-Cookie"].split(";", 1)[0]
     healthy(suite)

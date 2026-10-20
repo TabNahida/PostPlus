@@ -47,6 +47,12 @@ std::vector<std::string> restart_plan(const Config& running, const Config& saved
         else if (key == "tls_certificate" || key == "tls_private_key" || key == "allow_insecure_auth")
             add({"smtp", "pop3", "imap", "web", "admin"});
         else if (key == "web_root" || key == "web_session_seconds" || key == "max_web_sessions") add({"web", "admin"});
+        else if (key == "admin_hostname") add({"admin"});
+        else if (key == "webmail_shared_hostname") add({"web", "admin"});
+        else if (key == "domain_registry") {}
+        else if (key == "mail_domains" || key == "additional_domains") {
+            if(running.mail_domains()!=saved.mail_domains()) all();
+        }
         else if (key == "auth_pbkdf2_iterations" || key == "max_password_bytes") add({"auth"});
         else if (key == "max_auth_attempts") add({"smtp", "pop3", "imap"});
         else if (key == "max_recipients" || key == "smtp_data_timeout_seconds") add({"smtp"});

@@ -1,5 +1,9 @@
 <!-- Tabler Icons v3.34.1, MIT. See icons-LICENSE.txt. -->
 <svg xmlns="http://www.w3.org/2000/svg">
+<symbol id="globe" viewBox="0 0 24 24">
+  <circle cx="12" cy="12" r="9" />
+  <path d="M3 12h18M12 3a17 17 0 0 1 0 18a17 17 0 0 1 0 -18" />
+</symbol>
 <symbol id="inbox" viewBox="0 0 24 24">
   <path d="M4 4m0 2a2 2 0 0 1 2 -2h12a2 2 0 0 1 2 2v12a2 2 0 0 1 -2 2h-12a2 2 0 0 1 -2 -2z" />
   <path d="M4 13h3l3 3h4l3 -3h3" />
