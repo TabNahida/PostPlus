@@ -30,7 +30,12 @@ struct Fixture {
 };
 }
 int main(){try {
-    const auto directory=std::filesystem::temp_directory_path()/("postplus-domains-"+random_hex(10));std::filesystem::create_directories(directory);
+    // DKIM rejects symlinks in every parent component. macOS temporary paths
+    // can contain /var -> /private/var, so use a real workspace path as in the
+    // dedicated DKIM suite and resolve it before writing fixture paths.
+    const auto fixture_directory=std::filesystem::current_path()/"build"/("postplus-domains-"+random_hex(10));
+    std::filesystem::create_directories(fixture_directory);
+    const auto directory=std::filesystem::canonical(fixture_directory);
     const auto path=directory/"config.json",secret=directory/"token";{std::ofstream file(secret);file<<std::string(64,'a');}
     Json values={{"domain"," Example.COM "},{"mail_hostname","mail.example.com"},{"allow_insecure_auth",true},
         {"outbound_mode","disabled"},{"data_dir",directory.string()},{"service_token_file",secret.string()},{"additional_domains",Json::array()}};
