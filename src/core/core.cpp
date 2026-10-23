@@ -352,7 +352,7 @@ void check_json_depth(std::string_view body) {
         else if (c == '}' || c == ']') --depth;
     }
 }
-void send_response(Connection& connection, const HttpResponse& response) {
+void send_response(Connection& connection, const HttpResponse& response, bool complete_request = false) {
     static const std::map<int,std::string> reasons{{200,"OK"},{201,"Created"},{202,"Accepted"},{204,"No Content"},{400,"Bad Request"},{401,"Unauthorized"},{403,"Forbidden"},{404,"Not Found"},{405,"Method Not Allowed"},{409,"Conflict"},{413,"Payload Too Large"},{429,"Too Many Requests"},{500,"Internal Server Error"},{503,"Service Unavailable"}};
     const auto it = reasons.find(response.status);
     std::string out = "HTTP/1.1 " + std::to_string(response.status) + " " + (it == reasons.end() ? "Response" : it->second) + "\r\n";
@@ -367,7 +367,8 @@ void send_response(Connection& connection, const HttpResponse& response) {
     // Large responses and backups retain their bounded streaming behavior.
     if (!response.file && response.body.size() <= 65536) {
         out += response.body;
-        connection.write(out);
+        if (complete_request && !connection.encrypted()) connection.write_and_close(out);
+        else connection.write(out);
         return;
     }
     connection.write(out);
@@ -439,7 +440,7 @@ void serve_http(const Config& config, const std::string& service, HttpHandler ha
             connection.set_deadline(std::nullopt);
             const auto response = handler(request);
             response_started = true;
-            send_response(connection, response);
+            send_response(connection, response, true);
         } catch (const ConnectionTimeout&) {
             // A timed-out sender may keep transmitting. Closing unread input
             // can reset TCP and truncate a freshly started error response, so

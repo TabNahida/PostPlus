@@ -104,6 +104,13 @@ struct Connection::Impl {
         if (tls) co_await tls->write_all(bytes);
         else co_await socket->write_all(bytes);
     }
+    pace::task<void> final_write_task(std::string_view bytes) {
+        if (!socket || tls) throw std::logic_error("final plaintext write requires a plaintext connection");
+        co_await socket->write_all(bytes);
+        // Signal response completion before another worker/reactor round trip.
+        // A bounded drain prevents unread trailing bytes from resetting output.
+        co_await socket->close_gracefully(std::chrono::milliseconds(100), 8192);
+    }
     void check_read_state() const {
         if (stopping.load()) throw std::runtime_error("service stopping");
         if (expires() <= std::chrono::steady_clock::now()) throw NetworkTimeout();
@@ -182,6 +189,7 @@ bool Connection::wait_readable(std::chrono::milliseconds timeout) {
     return impl_->executor.run(impl_->poll(until));
 }
 void Connection::write(std::string_view bytes) { impl_->executor.run(impl_->bounded(impl_->write_task(bytes))); }
+void Connection::write_and_close(std::string_view bytes) { impl_->executor.run(impl_->bounded(impl_->final_write_task(bytes))); }
 void Connection::start_tls_server(const Config& config) {
     if (!impl_->socket || encrypted() || !impl_->buffer.empty()) throw std::runtime_error("invalid TLS transition");
     if (impl_->stopping.load()) throw std::runtime_error("service stopping");

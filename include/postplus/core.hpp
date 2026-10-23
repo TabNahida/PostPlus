@@ -67,6 +67,9 @@ public:
     // Wait without consuming input; polling timeout leaves the connection usable.
     bool wait_readable(std::chrono::milliseconds timeout);
     void write(std::string_view bytes);
+    // Finish a plaintext response on the reactor, with bounded TCP input drain.
+    // Call only after the complete request has been consumed.
+    void write_and_close(std::string_view bytes);
     void start_tls_server(const Config& config);
     void start_tls_client(const std::string& hostname);
     bool encrypted() const;

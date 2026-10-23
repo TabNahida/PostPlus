@@ -185,6 +185,19 @@ void polling_preserves_transport() {
     std::cout << "PASS repeated TCP poll timeouts preserve subsequent reads, buffered input and writes\n";
 }
 
+void final_response_closes_without_worker_destruction() {
+    Pair pair;
+    pair.client.write("trailing input");
+    Pending finishing([&] { pair.peer.write_and_close("complete response"); }, [&] { pair.peer.request_stop(); });
+    check(pair.client.read(17) == "complete response", "final response was truncated by close");
+    bool closed = false;
+    try { (void)pair.client.read(1); } catch (const NetworkEof&) { closed = true; }
+    check(closed, "final response did not signal EOF while its connection object remained alive");
+    finishing.require_ready();
+    finishing.result.get();
+    std::cout << "PASS final plaintext response signals EOF before destruction with bounded trailing-input drain\n";
+}
+
 void queued_poll_timeout_and_stop() {
     for (const bool stopping : {false, true}) {
         Pair pair;
@@ -362,6 +375,7 @@ int main() {
         ipv6_loopback();
         empty_connection_and_accept_retry();
         polling_preserves_transport();
+        final_response_closes_without_worker_destruction();
         queued_poll_timeout_and_stop();
         buffered_reads_obey_state();
         absolute_deadline_with_fragments();
