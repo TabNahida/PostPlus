@@ -1,160 +1,160 @@
 # Network migration benchmark
 
-## Status
+The PACE 0.1.1 transport integration passes the compatibility checks described in
+[network integration](pace-migration.md), but this Windows application benchmark
+shows **no overall performance improvement**. HTTP health throughput regressed
+39.7%, and its p95 increased from 1.809 to 13.207 ms. Mailbox throughput was 14.9%
+lower. Storage RPC had a higher median throughput but wide variation and worse
+p99. SMTP throughput was 3.9% lower with overlapping round ranges and worse tails.
 
-The existing Asio backend has a measured baseline. The PACE migration and its
-measurement are pending upstream compatibility work; there is **no PACE result or
-claimed performance improvement** yet.
+## Implementations and evidence
 
-The integration is waiting for an upstream release, as requested. PostPlus still
-uses Asio and its production dependencies are unchanged. The following PACE
-v0.1.0 requirements were filed against upstream:
-
-| Issue | Required capability | Evidence |
+| Input | Asio baseline | PACE candidate |
 |---|---|---|
-| [PACE #7](https://github.com/TabNahida/PACE/issues/7) | IPv6 TCP listeners and connections | A local `::1` listener probe prints `expected a numeric IPv4 address` and exits 1 |
-| [PACE #8](https://github.com/TabNahida/PACE/issues/8) | Server SNI certificate selection and application trust stores | Public API and implementation review; no failing TLS experiment claimed |
-| [PACE #9](https://github.com/TabNahida/PACE/issues/9) | Admission before the complete request body, per-request limits, streamed responses | Local HTTP probe returns 401 only after the 1,024-byte body is sent |
-| [PACE #10](https://github.com/TabNahida/PACE/issues/10) | Publish the Xmake package recipe | `repo-xmake` tree contains only README and LICENSE at the inspected commit |
+| PostPlus revision | `205254ff8041f2ee5f83f9e1c162951f3e3da134` (0.5.2) | `6a45b1670d8620ab0713b8f21950d2b7614a6a4b` |
+| Transport | Asio 1.34.2 | Unmodified PACE 0.1.1 |
+| UTC run, 2026-10-23 | 14:18:52–14:19:05 | 14:22:24–14:22:40 |
+| Raw schema 2 result | [Asio JSON](benchmarks/asio-windows-2026-10-23-paired.json) | [PACE JSON](benchmarks/pace-windows-2026-10-23-paired.json) |
 
-The probes used PACE commit `66ed7c34129b6b2d95ae01e053da5755a0739ffe`
-(`v0.1.0`), Windows x64, MSVC 14.51.36231, and Xmake 3.1.1. The package tree
-was checked at `3b3f8a60c90306b7d7cd8f3660aa497eb48e03c8`. The issues contain
-reproduction details and acceptance scenarios. No compatibility fork has been
-added to PostPlus.
+PACE source: `61fe0e21d62205fca77d1fb1e07e91aa200b6050`; inspected `tab-repo`
+recipe: `a880ca1bb53e8cb8a5b7bba330540f3823d44932`. Both builds use static
+OpenSSL 3.6.1 and the same pinned database/JSON dependencies. The candidate
+replaces production Asio with PACE sockets, reactor, DNS and the HTTP RPC client.
+HTTP servers retain PostPlus framing/admission/streaming policy; mail/HTTPS TLS
+uses an OpenSSL application adapter on PACE sockets. This does not benchmark
+PACE's HTTP server parser or TLS stream API.
 
-When a suitable upstream version is available, first verify these capabilities,
-then migrate and run the existing HTTP security, IPv6/DNS/outbound, domain TLS,
-STARTTLS/IMAP IDLE, portal and lifecycle tests. Only compare performance after
-those behavior checks pass, using paired Asio and PACE runs on the same host.
+Host: Windows 11 build 26200, AMD64, Intel Family 6 Model 198 Stepping 2,
+24 logical processors; MSVC release builds and Python 3.13.3. All builds and tests
+finished before measurement. Frozen baseline executable hashes were verified.
+Both runs used `build/pace-baseline/web` and its `example.json`; no source,
+binaries, harness or fixture changed between runs.
 
-The baseline was collected on 2026-10-23 from release binaries at commit
-`205254ff8041f2ee5f83f9e1c162951f3e3da134`, before production changes. Seven service
-executables, the public Web assets, and the example configuration were copied to
-`build/pace-baseline/`. The copy excludes user configuration, databases, credentials,
-and private keys. `manifest.json` records executable sizes and SHA-256 hashes.
+The comparison command accepted both complete results with identical host,
+parameters, configuration hash and harness hashes. Harness SHA-256:
 
-## Workloads and method
+- `scripts/benchmark_network.py`: `2b061c19f79e3b2111a2920cca22771f6c4cc635a9696c540e1f3d62856ecb56`
+- `tests/integration.py`: `87a571b9fdb28311d57c9a3d2a4e5b9aaeaa63cfc6471d4205485b0f4d4fb0d9`
 
-`scripts/benchmark_network.py` uses the real-process integration fixture. Every round
-gets a new temporary database, random loopback ports, a random service token, one
-mailbox, and 50 identical seeded messages. All processes and temporary data are
-removed afterward. The server has 128 connection slots; client concurrency is 8.
-All requests open and close a fresh TCP connection. No public DNS queries, external
-mail deliveries, production configuration changes, or builds are performed.
+## Method
 
-Three rounds use exactly the same workload sizes:
+Three rounds each create temporary data, random loopback ports, a service token,
+one mailbox and 50 seeded messages. Six services run during timing, with 128
+connection slots and client concurrency 8. Every operation opens a new connection.
+Logging is error-only; external scanners and outbound delivery are disabled.
+There are no public DNS queries, external mail deliveries or production changes.
 
-| Workload | Measured operations per round | Warmup | Verification |
+| Workload | Operations per round | Warmup | Verification |
 |---|---:|---:|---|
-| `GET /health` | 1,000 | 40 | HTTP 200 and `ok` |
-| Authenticated `GET /api/messages` | 300 | 40 | HTTP 200 and 50 seeded messages |
+| `GET /health` | 1,000 | 40 | HTTP 200 and `ok`; includes public connection security check |
+| Authenticated `GET /api/messages` | 300 | 40 | HTTP 200 and 50 messages |
 | Authenticated storage `/rpc` stats | 1,000 | 40 | `ok` and expected message count |
-| SMTP receive and durable acceptance | 80 | 8 | EHLO, MAIL, RCPT, DATA, QUIT; durable queue count |
+| SMTP durable acceptance | 80 | 8 | EHLO, MAIL, RCPT, DATA, QUIT and durable queue count |
 
-SMTP messages are exactly 4,096 bytes, with lines below the SMTP length limit.
-Its latency includes connection establishment through `QUIT`; acceptance requires
-durable queue storage. After timing, the delivery worker starts and every accepted
-message must reach the local mailbox with an empty remaining queue. All 264 messages
-(warmup included) were delivered across the three rounds.
+Messages are exactly 4,096 bytes. SMTP latency includes QUIT after durable DATA
+acceptance. After timing, the delivery worker starts; every accepted message must
+reach the mailbox and the queue must empty. **Each backend completed 7,140 measured
+operations with zero errors and delivered all 264 SMTP messages including warmup.**
+Warmups and resource collection also had zero errors. No paired run was discarded.
 
-The load generator is closed loop with fixed concurrency. Throughput is successful
-operations divided by the round's wall-clock time. The table uses the median
-throughput of three rounds and nearest-rank percentiles pooled over successful
-operations. Failures are counted separately and prevent the comparison command from
-presenting a performance comparison. Raw latency samples, per-round measurements,
-binary hashes, host details, CPU counters, and memory samples are saved in
-[`benchmarks/asio-windows-2026-10-23.json`](benchmarks/asio-windows-2026-10-23.json),
-with the original working copy at `build/pace-benchmark/baseline.json`.
+Throughput is successful operations divided by elapsed wall-clock time; the report
+uses its three-round median. Latencies use nearest-rank percentiles pooled across
+successful measured operations. Failed/incomplete results cannot be compared.
 
-## Asio baseline
+## Throughput and latency
 
-Host: Windows 11 build 26200, AMD64, Intel Family 6 Model 198 Stepping 2, 24 logical
-processors; Python 3.13.3. Retained run: 12:14:46–12:14:59 UTC on 2026-10-23.
+Latency columns are milliseconds; changes compare median throughput.
 
-| Workload | Median ops/s | Round range ops/s | p50 ms | p95 ms | p99 ms | Errors / attempts |
-|---|---:|---:|---:|---:|---:|---:|
-| HTTP health | 3,682.50 | 2,577.65–4,064.09 | 1.346 | 2.319 | 20.035 | 0 / 3,000 |
-| Authenticated mailbox | 720.74 | 580.05–782.86 | 3.518 | 27.173 | 28.460 | 0 / 900 |
-| Storage RPC | 5,802.40 | 5,764.14–6,572.94 | 1.199 | 1.687 | 2.033 | 0 / 3,000 |
-| SMTP durable acceptance | 269.36 | 252.33–272.64 | 25.940 | 41.118 | 47.964 | 0 / 240 |
+| Workload | Asio ops/s | PACE ops/s | Change | Asio p50 / p95 / p99 | PACE p50 / p95 / p99 |
+|---|---:|---:|---:|---|---|
+| HTTP health | 3,755.17 | 2,263.66 | −39.7% | 1.341 / 1.809 / 17.174 | 1.522 / 13.207 / 24.749 |
+| Authenticated mailbox | 854.28 | 726.66 | −14.9% | 3.433 / 27.066 / 28.563 | 4.937 / 25.342 / 32.241 |
+| Storage RPC | 6,089.36 | 6,741.17 | +10.7% | 1.145 / 1.638 / 2.159 | 1.107 / 1.591 / 11.029 |
+| SMTP durable acceptance | 266.27 | 255.98 | −3.9% | 24.994 / 42.956 / 50.012 | 25.666 / 49.013 / 71.599 |
 
-CPU time is measured with `GetProcessTimes`; resident memory uses
-`GetProcessMemoryInfo`. Both cover the six running server services, excluding the
-Python load generator. The delivery worker runs after measurement. Per-round CPU
-seconds and sampled aggregate resident memory were:
-
-| Workload | CPU seconds, rounds 1 / 2 / 3 | Peak sampled RSS MiB, rounds 1 / 2 / 3 |
+| Workload | Asio ops/s, rounds 1 / 2 / 3 | PACE ops/s, rounds 1 / 2 / 3 |
 |---|---|---|
-| HTTP health | 0.765625 / 1.015625 / 1.156250 | 100.49 / 101.17 / 101.20 |
-| Authenticated mailbox | 0.609375 / 1.421875 / 1.250000 | 107.38 / 107.35 / 107.32 |
-| Storage RPC | 0.218750 / 0.281250 / 0.265625 | 107.57 / 107.28 / 107.25 |
-| SMTP durable acceptance | 0.328125 / 0.343750 / 0.234375 | 109.76 / 109.43 / 109.54 |
+| HTTP health | 5,659.50 / 3,755.17 / 3,693.44 | 2,852.11 / 2,263.66 / 2,140.24 |
+| Authenticated mailbox | 806.72 / 854.28 / 899.56 | 721.68 / 936.00 / 726.66 |
+| Storage RPC | 6,561.19 / 6,089.36 / 4,472.10 | 6,783.78 / 3,884.61 / 6,741.17 |
+| SMTP durable acceptance | 266.27 / 279.58 / 256.13 | 255.98 / 291.56 / 252.34 |
 
-These are short local measurements, not capacity claims. Individual timed windows
-lasted approximately 0.15–0.52 seconds, so OS scheduling and CPU-counter granularity
-can materially affect results. The observed variation is reported rather than
-hidden. RSS was sampled every 100 ms (3–6 samples per window) and can miss transient
-peaks. Client and server share one machine, and Python can limit peak throughput.
-This does not measure TLS, WAN latency, sustained saturation, or latency under an
-externally fixed arrival rate. A later comparison must rerun the Asio baseline
-alongside the PACE candidate on the same host and parameters; small differences
-within the observed variation should not be treated as improvements.
+HTTP health ranges do not overlap in this pair. Other ranges overlap; the RPC
+median alone is not evidence of a stable improvement. Worker/reactor handoffs in
+the new synchronous bridge and Windows PACE's WSAPoll/UDP wakeup are candidates
+for profiling, **not established causes**. No scheduler/CPU profile or isolated
+library experiment was collected. This is a PostPlus integration regression and
+cannot be attributed uniquely to PACE. Further HTTP server adoption depends on
+[asynchronous admission (#12)](https://github.com/TabNahida/PACE/issues/12) and
+[safe connection cancellation (#13)](https://github.com/TabNahida/PACE/issues/13).
 
-## Windows port-pressure diagnostic
+## Resource use and limits
 
-An initial, discarded trial used 8,000 health requests, 8,000 storage requests,
-2,000 mailbox requests, and 400 SMTP messages per round. It produced 2 SMTP errors
-in round 1, then widespread connection resets in round 2; it is not a valid
-performance baseline. Its completed first round is retained separately in
-`build/pace-benchmark/high-volume-partial.json` for diagnosis.
+CPU is aggregate server CPU seconds from `GetProcessTimes`; RSS is aggregate
+resident memory sampled by `GetProcessMemoryInfo`. Both cover auth, storage,
+filter, transfer, SMTP and Web, excluding Python and the post-timing delivery worker.
 
-Read-only OS inspection afterward showed a TCP dynamic range of 49,152–65,535
-(16,384 ports) and 35,708 `TIME_WAIT` entries. Public requests also create internal
-RPC connections, so application operation count understates connection churn. This
-is evidence of substantial transient port pressure, but the discarded trial alone
-does not establish a unique cause for every error. No operating-system TCP settings
-were changed. After reducing the default workload and allowing the earlier churn
-to clear during investigation, all three retained rounds completed with zero
-errors. Avoid running repeated fresh-connection benchmarks back to back; allow
-the host's TCP state to settle between comparison runs, and retain failed output
-separately instead of reporting it as a successful sample.
+| Workload | Asio CPU s, rounds 1 / 2 / 3 | PACE CPU s, rounds 1 / 2 / 3 |
+|---|---|---|
+| HTTP health | 0.921875 / 0.890625 / 1.062500 | 0.578125 / 0.484375 / 0.671875 |
+| Authenticated mailbox | 0.953125 / 0.578125 / 1.265625 | 0.640625 / 0.765625 / 0.859375 |
+| Storage RPC | 0.296875 / 0.281250 / 0.125000 | 0.281250 / 0.312500 / 0.250000 |
+| SMTP durable acceptance | 0.156250 / 0.250000 / 0.359375 | 0.203125 / 0.281250 / 0.296875 |
 
-## Reproduce and compare
+| Workload | Asio peak sampled RSS MiB, rounds 1 / 2 / 3 | PACE peak sampled RSS MiB, rounds 1 / 2 / 3 |
+|---|---|---|
+| HTTP health | 100.76 / 101.42 / 101.02 | 100.85 / 100.41 / 100.78 |
+| Authenticated mailbox | 107.53 / 107.83 / 108.00 | 107.38 / 107.34 / 107.62 |
+| Storage RPC | 107.52 / 107.57 / 108.07 | 107.47 / 107.01 / 107.66 |
+| SMTP durable acceptance | 109.44 / 109.81 / 110.29 | 109.64 / 109.14 / 109.61 |
 
-From the repository root, with the same release binary snapshot and Python:
+Timed windows last only 0.15–0.47 seconds. CPU-counter granularity, scheduling and
+background activity can materially affect them. RSS is sampled every 100 ms
+(3–6 samples per measured window), missing possible transient peaks. Python shares
+the host and can limit throughput. This closed-loop fixed-concurrency measurement
+does not cover TLS, WAN traffic, sustained saturation, externally fixed arrival
+rates or maximum capacity. It establishes neither statistical significance nor a
+universal library speedup.
+
+## Port pressure and history
+
+TIME_WAIT counts were 34 before the baseline and 22,133 afterward. Measurement
+paused until the count fell to 20 before running PACE. No TCP settings changed.
+Public requests also create internal RPC connections; repeated fresh-connection
+runs without settling can create transient port pressure.
+
+The [historical schema 1 Asio result](benchmarks/asio-windows-2026-10-23.json) is
+archival and not used above. An earlier high-volume trial (8,000 health, 8,000 RPC,
+2,000 mailbox, 400 SMTP per round) had connection errors; partial diagnostic data
+remains in `build/pace-benchmark/high-volume-partial.json`. The schema 2 pair above
+was freshly measured after compatibility tests. PACE 0.1.0 requests #7–#10 were
+addressed before this integration. Remaining boundaries are described in
+[network integration](pace-migration.md).
+
+## Reproduce
+
+Preserve baseline binaries/assets/config before building the candidate. Use the
+same host, Python, harness, fixture, Web assets and configuration for both runs.
+Stop builds/tests and allow TCP state to settle between commands:
 
 ```powershell
+$common = @('--web-root', 'build/pace-baseline/web',
+  '--config-template', 'build/pace-baseline/example.json',
+  '--rounds', '3', '--concurrency', '8', '--http-requests', '1000',
+  '--rpc-requests', '1000', '--mailbox-requests', '300', '--smtp-messages', '80',
+  '--warmup', '40', '--smtp-warmup', '8', '--seed-messages', '50', '--message-bytes', '4096')
 python scripts/benchmark_network.py --bin-dir build/pace-baseline `
-  --web-root build/pace-baseline/web `
-  --config-template build/pace-baseline/example.json `
-  --label asio-baseline --source-revision 205254ff8041f2ee5f83f9e1c162951f3e3da134 `
-  --output build/pace-benchmark/baseline-rerun.json
-```
-
-Once PACE is integrated, repeat with its release binary directory, an accurate
-candidate source revision, and a different output name. Keep the same pinned Web
-assets, template, and default workload counts. Then compare:
-
-```powershell
+  --label asio-paired --source-revision 205254ff8041f2ee5f83f9e1c162951f3e3da134 `
+  --output build/pace-benchmark/asio-rerun.json @common
+# Wait for TCP state to settle before running the next command.
+python scripts/benchmark_network.py --bin-dir build/windows/x64/release `
+  --label pace-0.1.1-paired --source-revision 6a45b1670d8620ab0713b8f21950d2b7614a6a4b `
+  --output build/pace-benchmark/pace-rerun.json @common
 python scripts/benchmark_network.py --compare `
-  build/pace-benchmark/baseline-rerun.json build/pace-benchmark/pace.json
+  build/pace-benchmark/asio-rerun.json build/pace-benchmark/pace-rerun.json
 ```
 
-The current script writes schema 2 results, checkpointing each completed workload
-and retaining partial results plus failure details when validation fails. It records
-SHA-256 hashes of itself and `tests/integration.py`. The comparison rejects missing
-or mismatched harness hashes, incomplete runs, mismatched workload parameters,
-template hashes, host descriptions, and any request errors.
-
-The historical baseline above uses schema 1, collected before these diagnostic
-improvements. Keep it as an archived observation; the comparison command deliberately
-requires rerunning **both** implementations with the same current script. Its
-original script SHA-256 was
-`5de9efbcae72add14122a54bc09edeb24478c575c586938c6dd2d1829093ec17`;
-the integration fixture SHA-256 was
-`87a571b9fdb28311d57c9a3d2a4e5b9aaeeaa63cfc6471d4205485b0f4d4fb0d9`.
-
-Run `python scripts/benchmark_network.py --self-test` for offline checks of failure
-retention and comparison validation. CPU/RSS collection is available on Windows
-and Linux; unsupported platforms report unavailable data explicitly.
+Use these revision labels only with binaries from those revisions. Raw results
+include binary hashes and checkpoints of partial failures. Retain failures under
+separate filenames. `python scripts/benchmark_network.py --self-test` checks
+failure retention and comparison validation without starting services.
