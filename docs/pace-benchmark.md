@@ -1,5 +1,9 @@
 # Network migration benchmark
 
+For the subsequent comparison against PostPlus 1.0.0 and the independently
+reproduced PACE HTTP client close wait, see the
+[bridge performance follow-up](pace-performance-followup.md).
+
 The PACE 0.1.1 transport integration passes the compatibility checks described in
 [network integration](pace-migration.md), but this Windows application benchmark
 shows **no overall performance improvement**. HTTP health throughput regressed
