@@ -191,7 +191,7 @@ The web form provides B, KiB, MiB, GiB, and TiB selectors. Configuration files a
 | --- | --- | --- | --- |
 | `max_message_bytes` | `10485760` (10 MiB) | 1024–104857600 | Maximum raw message size. MIME/Base64 encoding can make messages larger than their original attachments. |
 | `max_recipients` | `100` | 1–100 | Maximum SMTP recipients per message. |
-| `max_connections` | `32` | 1–1024 | Concurrent sessions per listening service; each active connection consumes a worker. Excess sessions are closed. |
+| `max_connections` | `32` | 1–1024 | Concurrent sessions per listening service; each active connection consumes a worker. At capacity, each listener can hold one accepted connection for up to 200 ms while completed sessions release their slots; excess sessions are then closed. |
 | `timeout_seconds` | `30` | 1–300 | General network timeout, in seconds. |
 | `smtp_data_timeout_seconds` | `120` | 1–3600 | Total SMTP DATA upload deadline, in seconds. |
 | `max_mailbox_bytes` | `1073741824` (1 GiB) | 1024–1125899906842624 | Default byte limit per user across all folders; must be at least `max_message_bytes`. |

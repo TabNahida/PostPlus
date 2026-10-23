@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Real-process HTTP framing, request-budget and graceful-stop regressions."""
 import argparse
+from concurrent.futures import ThreadPoolExecutor
 import contextlib
 import json
 import os
@@ -68,6 +69,48 @@ def healthy(suite):
     status, _, result = suite.http("web", "GET", "/health")
     assert status == 200 and result == {"ok": True, "service": "web"}, (status, result)
     assert suite.children["web"].poll() is None, "web process exited"
+
+
+def connection_admission(suite):
+    # A completed response can reach its client before the server worker has
+    # finished the bounded transport drain and released its connection slot.
+    suite.stop("web")
+    suite.stop("auth")
+    suite.config.update(max_connections=1, timeout_seconds=2)
+    suite.save()
+    suite.start("auth")
+    payload = dict(op="security_check", peer_ip="192.0.2.8", protocol="imap")
+    body = json.dumps(payload).encode()
+    request = request_bytes("/rpc", body, (f"Content-Length: {len(body)}",
+                                            f"Authorization: Bearer {suite.token}"))
+    for _ in range(12):
+        with socket.create_connection(("127.0.0.1", suite.ports["auth"]), timeout=5) as first:
+            first.sendall(request)
+            status, _, result = parse_response(receive_closed(first))
+            assert status == 200 and result == {"ok": True}, (status, result)
+            # Keep our sending direction open. The first server connection is
+            # draining while this replacement request arrives at capacity 1.
+            assert suite.rpc("auth", **payload) == {"ok": True}
+
+    # A genuinely busy session must still enforce the configured hard limit;
+    # waiting for a slot is bounded, not an unbounded worker queue.
+    with socket.create_connection(("127.0.0.1", suite.ports["auth"]), timeout=5) as held:
+        held.sendall(b"POST /rpc HTTP/1.1\r\nHost: localhost\r\n")
+        started = time.monotonic()
+        with socket.create_connection(("127.0.0.1", suite.ports["auth"]), timeout=1.5) as extra:
+            extra.sendall(request)
+            assert receive_closed(extra, allow_reset=True) == b"", "connection limit was bypassed"
+        assert time.monotonic() - started < 1.5, "saturated admission was not bounded"
+    assert suite.rpc("auth", **payload) == {"ok": True}
+
+    suite.stop("auth")
+    suite.config["max_connections"] = 2
+    suite.save()
+    suite.start("auth")
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        results = list(executor.map(lambda _: suite.rpc("auth", **payload), range(120)))
+    assert all(result == {"ok": True} for result in results)
+    print("PASS connection-slot handoff at limits 1/2 preserves completed requests and bounds saturated admission", flush=True)
 
 
 def small_unauthorized_bodies(suite):
@@ -263,6 +306,7 @@ def run(suite):
     slow_body(suite)
     graceful_stop(suite)
     healthy(suite)
+    connection_admission(suite)
 
 
 def main():

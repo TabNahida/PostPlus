@@ -4,6 +4,7 @@
 #include <pace/dns.hpp>
 #include <atomic>
 #include <algorithm>
+#include <condition_variable>
 #include <csignal>
 
 namespace postplus {
@@ -264,9 +265,12 @@ void serve_listeners(const Config& config, const std::string& service, const std
     std::vector<std::unique_ptr<SocketListener>> acceptors;
     for (const auto& listener : listeners) acceptors.push_back(std::make_unique<SocketListener>(tcp::endpoint{address, static_cast<unsigned short>(listener.port)}));
     const auto maximum = static_cast<std::size_t>(std::max(1, config.number("max_connections", 32)));
-    WorkerPool workers(maximum);
     std::mutex mutex;
+    std::condition_variable capacity;
     std::vector<std::weak_ptr<Connection>> connections;
+    // Worker completion notifies capacity, including during exception cleanup.
+    // Join the pool before destroying the registry and its synchronization.
+    WorkerPool workers(maximum);
     interrupted.store(0, std::memory_order_relaxed);
     const auto old_int = std::signal(SIGINT, stop_signal), old_term = std::signal(SIGTERM, stop_signal);
     struct Restore { decltype(old_int) a, b; ~Restore() { std::signal(SIGINT, a); std::signal(SIGTERM, b); } } restore{old_int, old_term};
@@ -276,14 +280,17 @@ void serve_listeners(const Config& config, const std::string& service, const std
     // Also stop and join already-created listeners if another thread cannot start.
     struct JoinAcceptors {
         std::atomic<bool>& stopping;
+        std::mutex& mutex;
+        std::condition_variable& capacity;
         std::vector<std::unique_ptr<SocketListener>>& acceptors;
         std::vector<std::thread>& threads;
         ~JoinAcceptors() {
-            stopping.store(true);
+            { std::lock_guard lock(mutex); stopping.store(true); }
+            capacity.notify_all();
             for (auto& acceptor : acceptors) { try { acceptor->close(); } catch (...) {} }
             for (auto& thread : threads) if (thread.joinable()) thread.join();
         }
-    } join_acceptors{stopping, acceptors, accept_threads};
+    } join_acceptors{stopping, mutex, capacity, acceptors, accept_threads};
     for (std::size_t index = 0; index < listeners.size(); ++index) {
         accept_threads.emplace_back([&, index] {
             try { while (!stopping.load()) {
@@ -295,12 +302,33 @@ void serve_listeners(const Config& config, const std::string& service, const std
                     break;
                 }
                 {
-                    std::lock_guard lock(mutex);
-                    std::erase_if(connections, [](const auto& weak) { return weak.expired(); });
-                    if (connections.size() >= maximum) continue;
+                    std::unique_lock lock(mutex);
+                    // A client can start its next request before the previous
+                    // response's bounded graceful close releases its worker.
+                    // Keep at most one accepted waiter per listener, without
+                    // exceeding the active/queued worker limit.
+                    if (!capacity.wait_for(lock, std::chrono::milliseconds(200), [&] {
+                        std::erase_if(connections, [](const auto& weak) { return weak.expired(); });
+                        return stopping.load() || connections.size() < maximum;
+                    })) continue;
+                    if (stopping.load()) break;
                     connections.push_back(connection);
                 }
-                workers.post([&, connection, index] {
+                workers.post([&, connection = std::move(connection), index]() mutable {
+                    struct ReleaseConnection {
+                        std::shared_ptr<Connection>& connection;
+                        std::mutex& mutex;
+                        std::condition_variable& capacity;
+                        ~ReleaseConnection() {
+                            // No accept-thread owner remains after the move.
+                            // Release the final worker owner before notifying,
+                            // and synchronize with the waiter's predicate so a
+                            // completion cannot lose its capacity notification.
+                            connection.reset();
+                            std::lock_guard lock(mutex);
+                            capacity.notify_all();
+                        }
+                    } release{connection, mutex, capacity};
                     try {
                         bool allowed = true;
                         if (!internal && check_ip_bans) {
@@ -332,7 +360,8 @@ void serve_listeners(const Config& config, const std::string& service, const std
         if (stop_requested && stop_requested()) break;
         std::this_thread::sleep_for(std::chrono::milliseconds(100));
     }
-    stopping.store(true);
+    { std::lock_guard lock(mutex); stopping.store(true); }
+    capacity.notify_all();
     for (auto& acceptor : acceptors) acceptor->close();
     for (auto& thread : accept_threads) thread.join();
     if (cancel_sessions) {
