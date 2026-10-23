@@ -1,0 +1,344 @@
+{
+  "schema": "postplus-counterbalanced-summary-v1",
+  "order": [
+    "baseline-A1",
+    "candidate-B1",
+    "candidate-B2",
+    "baseline-A2"
+  ],
+  "cooldown": "Wait for fewer than 1000 host TCP TIME_WAIT connections before each block.",
+  "blocks": [
+    {
+      "file": "postplus-abba-A1-windows-2026-10-23.json.gz",
+      "uncompressed_sha256": "e6b4f2e536f0fb2f01d0c583106fea0013bca739d892b4196c5ad0d38e66f926",
+      "compressed_sha256": "093b82ad5830b73806c294fa66c9fa05d3345857d06d61f88577540ed7ba84e4",
+      "status": "complete",
+      "source_revision": "9e2513130327528143ab91861d5cf60ea35564aa",
+      "started_at_utc": "2026-10-23T18:05:50.002549+00:00",
+      "finished_at_utc": "2026-10-23T18:06:05.512591+00:00"
+    },
+    {
+      "file": "postplus-abba-B1-windows-2026-10-23.json.gz",
+      "uncompressed_sha256": "ec03b23f79d419a94762a27e6230ad7467a1d1843f4c67c0148d47b48efdb2e9",
+      "compressed_sha256": "de743c4529e5974f770f407afff275388509d61cc0668ce97a90fe3a8bf89f77",
+      "status": "complete",
+      "source_revision": "1a39d51f2f372c330d57a8af5a2cdc5b19b783b3",
+      "started_at_utc": "2026-10-23T18:08:06.702355+00:00",
+      "finished_at_utc": "2026-10-23T18:08:22.451725+00:00"
+    },
+    {
+      "file": "postplus-abba-B2-windows-2026-10-23.json.gz",
+      "uncompressed_sha256": "2cc17cc5308e9d23802bcb9a7fd1c621855d71c772e0e2e9778d8aad4636cae7",
+      "compressed_sha256": "25129b17098ec0e1cf8b0b607927981440bd593b82a845d7f56e023768fbc122",
+      "status": "complete",
+      "source_revision": "1a39d51f2f372c330d57a8af5a2cdc5b19b783b3",
+      "started_at_utc": "2026-10-23T18:10:23.607743+00:00",
+      "finished_at_utc": "2026-10-23T18:10:39.580023+00:00"
+    },
+    {
+      "file": "postplus-abba-A2-windows-2026-10-23.json.gz",
+      "uncompressed_sha256": "9d0429705e0a6a839197ef12a49ac450c4339915f8be9a228ee71cdffd42af99",
+      "compressed_sha256": "7aa9134158998389a25d742b277381ed398a55c735c990a61be9a7707f32fe1d",
+      "status": "complete",
+      "source_revision": "9e2513130327528143ab91861d5cf60ea35564aa",
+      "started_at_utc": "2026-10-23T18:12:40.736161+00:00",
+      "finished_at_utc": "2026-10-23T18:12:56.522536+00:00"
+    }
+  ],
+  "other_measurements": [
+    {
+      "file": "postplus-short-final-baseline-windows-2026-10-23.json.gz",
+      "uncompressed_sha256": "db594c8d85143e97fb0fe342ee3d34c38ba2d6e0e19c54cd9c2a06a16598b891",
+      "compressed_sha256": "a6a2a354c9a682996e1924e10689107ed86be201176a9fdfd132be61346c8e35",
+      "status": "complete",
+      "source_revision": "9e2513130327528143ab91861d5cf60ea35564aa",
+      "started_at_utc": "2026-10-23T18:00:44.536541+00:00",
+      "finished_at_utc": "2026-10-23T18:00:59.778653+00:00",
+      "interpretation": "Uncounterbalanced short pair without TCP-state cooldown."
+    },
+    {
+      "file": "postplus-short-final-candidate-windows-2026-10-23.json.gz",
+      "uncompressed_sha256": "4528ea8778011658b953e16705355d0950349279a63a742ac7b0d441cdf67fe3",
+      "compressed_sha256": "185ca8144ec1a470c96f80d551eab002de15b47219f8adb6e66e0fe6ebeb073d",
+      "status": "complete",
+      "source_revision": "1a39d51f2f372c330d57a8af5a2cdc5b19b783b3",
+      "started_at_utc": "2026-10-23T18:01:00.127846+00:00",
+      "finished_at_utc": "2026-10-23T18:01:14.694737+00:00",
+      "interpretation": "Uncounterbalanced short pair without TCP-state cooldown."
+    },
+    {
+      "file": "postplus-failed-large-baseline-windows-2026-10-23.json.gz",
+      "uncompressed_sha256": "44763debb5143fdbe7cce69a963074a2e89d5ac131c18ae19220ccc8b152c0d7",
+      "compressed_sha256": "4c8cf28de409f1cc2b86aeed405d479369ce10c00ec968b18d9f5ab30a55bfda",
+      "status": "failed",
+      "source_revision": "9e2513130327528143ab91861d5cf60ea35564aa",
+      "started_at_utc": "2026-10-23T18:03:27.333821+00:00",
+      "finished_at_utc": null,
+      "interpretation": "Incomplete enlarged run: Windows ephemeral-port exhaustion; not a valid comparison."
+    }
+  ],
+  "combined": {
+    "baseline": {
+      "schema_version": 2,
+      "status": "complete",
+      "label": "postplus-baseline-ABBA",
+      "harness_sha256": {
+        "scripts/benchmark_network.py": "2b061c19f79e3b2111a2920cca22771f6c4cc635a9696c540e1f3d62856ecb56",
+        "tests/integration.py": "87a571b9fdb28311d57c9a3d2a4e5b9aaeaa63cfc6471d4205485b0f4d4fb0d9"
+      },
+      "source_revision": "9e2513130327528143ab91861d5cf60ea35564aa",
+      "started_at_utc": "2026-10-23T18:05:50.002549+00:00",
+      "parameters": {
+        "rounds": 6,
+        "concurrency": 8,
+        "http_requests": 1000,
+        "rpc_requests": 1000,
+        "mailbox_requests": 300,
+        "smtp_messages": 80,
+        "warmup": 40,
+        "smtp_warmup": 8,
+        "seed_messages": 50,
+        "message_bytes": 4096,
+        "config_template_sha256": "8b0f45f33e626c332b69bab7baeeccec60a5270d0b7b59841cdc2909771e623e",
+        "max_connections": 128,
+        "log_level": "error",
+        "connection_mode": "new connection per operation",
+        "tls": false,
+        "workload_model": "closed loop; fixed concurrency; no coordinated-omission correction"
+      },
+      "host": {
+        "platform": "Windows-11-10.0.26200-SP0",
+        "machine": "AMD64",
+        "processor": "Intel64 Family 6 Model 198 Stepping 2, GenuineIntel",
+        "logical_cpus": 24,
+        "python": "3.13.3"
+      },
+      "binary_directory": "D:\\Project\\Network\\PostPlus\\build\\perf-100-baseline",
+      "binaries": {
+        "postplus-auth.exe": {
+          "sha256": "d30f17b3742f2d04ce12557a74d2427fb181587fae201932dfeb3c0c42815e52",
+          "bytes": 6989824
+        },
+        "postplus-storage.exe": {
+          "sha256": "39a2afe1ef11f1a24a52487b7c6b34f1097bd895c603944475483e1829532261",
+          "bytes": 7086080
+        },
+        "postplus-filter.exe": {
+          "sha256": "675e7d0ebe46d8f7a00cb08c884081c564fe6c5a11a523f80c7f2bb33ff1b6e4",
+          "bytes": 6982144
+        },
+        "postplus-transfer.exe": {
+          "sha256": "dcdcff10f42662835cbc3ce042304d661d43af98b0ea0a62dd6c92152d078983",
+          "bytes": 7006208
+        },
+        "postplus-smtp.exe": {
+          "sha256": "49a5b49b388a7fca0d234f56a6042cd5e3fdeecabfe32598e08fb74e58c0330c",
+          "bytes": 6799360
+        },
+        "postplus-web.exe": {
+          "sha256": "757ddd3401c7f96a2685b7e957a0efb626e650a490458e1c247807b4d831a7a6",
+          "bytes": 7269376
+        },
+        "postplus-delivery.exe": {
+          "sha256": "d2bbc104833c3bd6f5cb217b42dfbe02e572a80209858390be76b79225393b0a",
+          "bytes": 6607360
+        }
+      },
+      "limitations": [
+        "Loopback cleartext network; not a WAN or TLS benchmark.",
+        "Client and server share a host; Python client can limit peak throughput.",
+        "Closed-loop results do not estimate overload or arrival-rate latency.",
+        "Latency includes client connect, protocol, response parsing and close.",
+        "SMTP timing includes QUIT after durable DATA acceptance; local delivery verified separately.",
+        "Server CPU/RSS exclude load generator and warmup; RSS sampled every 100 ms."
+      ],
+      "summary": {
+        "http_health": {
+          "throughput_median_per_second": 2531.068924983666,
+          "throughput_min_per_second": 2338.7173725752036,
+          "throughput_max_per_second": 3244.109508060818,
+          "latency_pooled_ms": {
+            "p50": 1.7307000234723091,
+            "p95": 5.43449999531731,
+            "p99": 23.13550002872944
+          },
+          "attempted": 6000,
+          "errors": 0
+        },
+        "http_authenticated_mailbox": {
+          "throughput_median_per_second": 984.2415262463901,
+          "throughput_min_per_second": 941.9424360667878,
+          "throughput_max_per_second": 1080.608339197934,
+          "latency_pooled_ms": {
+            "p50": 5.020499986130744,
+            "p95": 23.90560001367703,
+            "p99": 30.805300048086792
+          },
+          "attempted": 1800,
+          "errors": 0
+        },
+        "http_storage_rpc": {
+          "throughput_median_per_second": 5489.84471075262,
+          "throughput_min_per_second": 3878.918774786021,
+          "throughput_max_per_second": 6510.760009307941,
+          "latency_pooled_ms": {
+            "p50": 1.1628999491222203,
+            "p95": 1.6872999840416014,
+            "p99": 2.614900004118681
+          },
+          "attempted": 6000,
+          "errors": 0
+        },
+        "smtp_durable_accept": {
+          "throughput_median_per_second": 237.29677000984685,
+          "throughput_min_per_second": 228.38180643476102,
+          "throughput_max_per_second": 250.37814925325202,
+          "latency_pooled_ms": {
+            "p50": 28.797299950383604,
+            "p95": 53.243500005919486,
+            "p99": 63.14590002875775
+          },
+          "attempted": 480,
+          "errors": 0
+        }
+      },
+      "finished_at_utc": "2026-10-23T18:12:56.522536+00:00",
+      "block_order": [
+        "A1",
+        "A2"
+      ],
+      "total_delivered_including_warmup": 528
+    },
+    "candidate": {
+      "schema_version": 2,
+      "status": "complete",
+      "label": "postplus-candidate-ABBA",
+      "harness_sha256": {
+        "scripts/benchmark_network.py": "2b061c19f79e3b2111a2920cca22771f6c4cc635a9696c540e1f3d62856ecb56",
+        "tests/integration.py": "87a571b9fdb28311d57c9a3d2a4e5b9aaeaa63cfc6471d4205485b0f4d4fb0d9"
+      },
+      "source_revision": "1a39d51f2f372c330d57a8af5a2cdc5b19b783b3",
+      "started_at_utc": "2026-10-23T18:08:06.702355+00:00",
+      "parameters": {
+        "rounds": 6,
+        "concurrency": 8,
+        "http_requests": 1000,
+        "rpc_requests": 1000,
+        "mailbox_requests": 300,
+        "smtp_messages": 80,
+        "warmup": 40,
+        "smtp_warmup": 8,
+        "seed_messages": 50,
+        "message_bytes": 4096,
+        "config_template_sha256": "8b0f45f33e626c332b69bab7baeeccec60a5270d0b7b59841cdc2909771e623e",
+        "max_connections": 128,
+        "log_level": "error",
+        "connection_mode": "new connection per operation",
+        "tls": false,
+        "workload_model": "closed loop; fixed concurrency; no coordinated-omission correction"
+      },
+      "host": {
+        "platform": "Windows-11-10.0.26200-SP0",
+        "machine": "AMD64",
+        "processor": "Intel64 Family 6 Model 198 Stepping 2, GenuineIntel",
+        "logical_cpus": 24,
+        "python": "3.13.3"
+      },
+      "binary_directory": "D:\\Project\\Network\\PostPlus\\build\\windows\\x64\\release",
+      "binaries": {
+        "postplus-auth.exe": {
+          "sha256": "745e0ee67237d0771f319b873fd945cec9e3b715451df7141b8752c12aee3c70",
+          "bytes": 6987776
+        },
+        "postplus-storage.exe": {
+          "sha256": "8dfd7bfa99d91ff9b39b36c5f1fa91abb42267c18650f9d15aa4aa0372e07f1b",
+          "bytes": 7084032
+        },
+        "postplus-filter.exe": {
+          "sha256": "0ecf82e84ee1906badc7467dc20aa67cad1a0d624e67687554d56b1f439e31a6",
+          "bytes": 6980096
+        },
+        "postplus-transfer.exe": {
+          "sha256": "ac2c04027f7ee65a8fd70cf23769e9c2964638e6a2c364837452f5b6fc97be85",
+          "bytes": 7004160
+        },
+        "postplus-smtp.exe": {
+          "sha256": "74ca3a21dae3460c49873928a732f34582e0f328906985c19f1bbe60f9d3b23a",
+          "bytes": 6794752
+        },
+        "postplus-web.exe": {
+          "sha256": "b28677d9ce40a0c0901c97f550c452a5c1b07bd959c66bf98ba1771b94517948",
+          "bytes": 7267840
+        },
+        "postplus-delivery.exe": {
+          "sha256": "464b8f54875b836887d9379e73224c7045a2b3f492e48a02de841a6d1e5e481d",
+          "bytes": 6607360
+        }
+      },
+      "limitations": [
+        "Loopback cleartext network; not a WAN or TLS benchmark.",
+        "Client and server share a host; Python client can limit peak throughput.",
+        "Closed-loop results do not estimate overload or arrival-rate latency.",
+        "Latency includes client connect, protocol, response parsing and close.",
+        "SMTP timing includes QUIT after durable DATA acceptance; local delivery verified separately.",
+        "Server CPU/RSS exclude load generator and warmup; RSS sampled every 100 ms."
+      ],
+      "summary": {
+        "http_health": {
+          "throughput_median_per_second": 3711.1424077483102,
+          "throughput_min_per_second": 2883.302650093854,
+          "throughput_max_per_second": 4597.288978651239,
+          "latency_pooled_ms": {
+            "p50": 1.3020000187680125,
+            "p95": 2.3064000415615737,
+            "p99": 20.408599986694753
+          },
+          "attempted": 6000,
+          "errors": 0
+        },
+        "http_authenticated_mailbox": {
+          "throughput_median_per_second": 959.4205080785364,
+          "throughput_min_per_second": 726.0197492170445,
+          "throughput_max_per_second": 1131.7649837816118,
+          "latency_pooled_ms": {
+            "p50": 3.6582000320777297,
+            "p95": 26.497500017285347,
+            "p99": 37.00920002302155
+          },
+          "attempted": 1800,
+          "errors": 0
+        },
+        "http_storage_rpc": {
+          "throughput_median_per_second": 6472.820020638901,
+          "throughput_min_per_second": 5971.928353265033,
+          "throughput_max_per_second": 6724.176303696712,
+          "latency_pooled_ms": {
+            "p50": 1.1758999899029732,
+            "p95": 1.6583999968133867,
+            "p99": 1.9246999872848392
+          },
+          "attempted": 6000,
+          "errors": 0
+        },
+        "smtp_durable_accept": {
+          "throughput_median_per_second": 245.10469866814395,
+          "throughput_min_per_second": 215.24899194808515,
+          "throughput_max_per_second": 282.8563255711306,
+          "latency_pooled_ms": {
+            "p50": 27.15599996736273,
+            "p95": 50.2377999946475,
+            "p99": 69.38240001909435
+          },
+          "attempted": 480,
+          "errors": 0
+        }
+      },
+      "finished_at_utc": "2026-10-23T18:10:39.580023+00:00",
+      "block_order": [
+        "B1",
+        "B2"
+      ],
+      "total_delivered_including_warmup": 528
+    }
+  }
+}

@@ -1,9 +1,9 @@
 # PACE bridge performance follow-up
 
-This follow-up reduces PostPlus's own networking overhead while retaining the
-unmodified PACE 0.1.1 dependency. In this Windows loopback comparison, HTTP health
-and storage RPC throughput increased, but authenticated mailbox and SMTP medians
-did not improve. This is not evidence of an overall or production-capacity gain.
+This follow-up reduces selected PostPlus networking overhead while retaining the
+unmodified PACE 0.1.1 dependency. Measurements are mixed; they do not establish an
+overall or production-capacity gain. The final comparison includes the bounded
+connection-admission repair found during cross-platform validation.
 
 ## Changes
 
@@ -19,68 +19,104 @@ did not improve. This is not evidence of an overall or production-capacity gain.
   without waiting for a worker to resume and destroy the connection. Trailing
   input drain is bounded to 100 ms and 8 KiB. TLS, early rejection and incomplete
   request handling retain their existing paths.
+- At connection capacity, allow one accepted waiter per listener for up to
+  200 ms while completed sessions release their slots. The active/queued worker
+  limit remains unchanged; saturation still rejects excess connections, and
+  shutdown wakes waiters. This fixes the handoff race exposed by Linux/macOS
+  concurrency tests after initiating graceful close earlier. A deterministic
+  capacity-1 regression fails before the fix and passes afterwards; capacity-2
+  concurrent requests and sustained-capacity rejection are also covered.
 
 The last change uses PACE's existing server-side graceful close; it does not patch
 PACE or bypass PostPlus's framing, authentication, deadlines, or cancellation.
 
-## Same-host comparison
+## Final same-host comparison
 
-| Input | Baseline | Optimized |
-|---|---|---|
-| PostPlus source | `9e2513130327528143ab91861d5cf60ea35564aa` (1.0.0) | `42057e6f76fd4aff33bc3b7aedb2fea107000f6c` |
-| Raw result | [Baseline](benchmarks/postplus-100-before-optimization-windows-2026-10-23.json) | [Optimized](benchmarks/postplus-bridge-optimized-windows-2026-10-23.json) |
-| Measured UTC on 2026-10-23 | 17:21:30–17:21:46 | 17:41:28–17:41:44 |
+The final comparison uses a fixed **A → B → B → A** order, with A = frozen
+PostPlus 1.0.0 (`9e2513130327528143ab91861d5cf60ea35564aa`) and B = the completed
+changes including the admission fix (`1a39d51f2f372c330d57a8af5a2cdc5b19b783b3`).
+Before every block, host TCP `TIME_WAIT` connections were allowed to fall below
+1,000 (observed counts: 39, 31, 23, 19). This avoids carrying the previous block's
+large volume of closed connections into the next measurement.
 
-Both use the same local MSVC Release configuration, official PACE 0.1.1, frozen
-1.0.0 Web assets and configuration, benchmark harness, Windows 11 x64 host and
-Python 3.13.3. Builds, probes and integration tests were not running during these
-two measurements. Baseline executables were copied before making changes; raw
-results retain executable hashes, host details and both harness hashes.
+Both builds use MSVC Release, official PACE 0.1.1, frozen 1.0.0 Web assets and
+configuration, the same harness, Windows 11 x64 and Python 3.13.3. Local builds,
+probes and integration tests were stopped. Every block contains three rounds of
+the existing [benchmark method](pace-benchmark.md#method): concurrency 8, a new
+connection per operation, 1,000 health requests, 300 mailbox requests, 1,000 storage
+RPC requests and 80 SMTP messages per round. Warmup is 40 requests or 8 messages,
+with 50 seeded messages of 4,096 bytes and a server connection limit of 128.
 
-The existing [benchmark method](pace-benchmark.md#method) is unchanged: three
-rounds, concurrency 8, a fresh connection for each operation, 1,000 health requests,
-300 authenticated mailbox requests, 1,000 storage RPC requests and 80 SMTP messages
-per round. Warmup is 40 requests or 8 SMTP messages, with 50 seeded messages of
-4,096 bytes. Both versions completed **7,140 measured operations without errors**
-and delivered all **264 SMTP messages**, including warmup. Each round verifies
-the durable queue and its complete delivery after timing.
+Each version therefore has six measured rounds: **14,280 operations without
+errors** and all **528 SMTP messages delivered**, including warmup. Throughput is
+the median of all six round rates; latency percentiles pool their individual
+samples. The queue and complete delivery are checked after each timed round.
 
-| Workload | Baseline ops/s | Optimized ops/s | Median change | Baseline p95 ms | Optimized p95 ms |
+| Block | Build | UTC on 2026-10-23 | Raw schema-2 JSON (gzip) |
+|---|---|---|---|
+| A1 | 1.0.0 | 18:05:50–18:06:05 | [A1](benchmarks/postplus-abba-A1-windows-2026-10-23.json.gz) |
+| B1 | Final changes | 18:08:06–18:08:22 | [B1](benchmarks/postplus-abba-B1-windows-2026-10-23.json.gz) |
+| B2 | Final changes | 18:10:23–18:10:39 | [B2](benchmarks/postplus-abba-B2-windows-2026-10-23.json.gz) |
+| A2 | 1.0.0 | 18:12:40–18:12:56 | [A2](benchmarks/postplus-abba-A2-windows-2026-10-23.json.gz) |
+
+The [summary and evidence manifest](benchmarks/postplus-abba-summary-windows-2026-10-23.json)
+retains binary/harness hashes, host details, parameters, all rates and percentiles,
+and compressed/uncompressed hashes of the raw files.
+
+| Workload | Baseline ops/s | Final ops/s | Median change | Baseline p95 ms | Final p95 ms |
 |---|---:|---:|---:|---:|---:|
-| HTTP health | 2,448.13 | 3,259.55 | +33.1% | 8.908 | 3.440 |
-| Authenticated mailbox | 1,103.58 | 1,069.01 | −3.1% | 15.345 | 24.517 |
-| Storage RPC | 5,510.45 | 7,176.67 | +30.2% | 1.811 | 1.507 |
-| SMTP durable acceptance | 257.03 | 222.76 | −13.3% | 47.917 | 57.892 |
+| HTTP health | 2,531.07 | 3,711.14 | +46.6% | 5.434 | 2.306 |
+| Authenticated mailbox | 984.24 | 959.42 | −2.5% | 23.906 | 26.498 |
+| Storage RPC | 5,489.84 | 6,472.82 | +17.9% | 1.687 | 1.658 |
+| SMTP durable acceptance | 237.30 | 245.10 | +3.3% | 53.244 | 50.238 |
 
-| Workload | Baseline round range, ops/s | Optimized round range, ops/s |
+| Workload | Baseline round range, ops/s | Final round range, ops/s |
 |---|---:|---:|
-| HTTP health | 1,986–2,537 | 2,779–3,593 |
-| Authenticated mailbox | 734–1,297 | 940–1,175 |
-| Storage RPC | 5,198–6,453 | 7,092–7,276 |
-| SMTP durable acceptance | 242–270 | 220–297 |
+| HTTP health | 2,339–3,244 | 2,883–4,597 |
+| Authenticated mailbox | 942–1,081 | 726–1,132 |
+| Storage RPC | 3,879–6,511 | 5,972–6,724 |
+| SMTP durable acceptance | 228–250 | 215–283 |
 
-Health/RPC ranges do not overlap in these runs. Mailbox/SMTP ranges overlap, but
-their lower medians and worse p95 remain negative measurements, not improvements.
-The run order was not randomized or counterbalanced. These are short, closed-loop
-measurements sharing a host with the Python load generator; scheduling, filesystem
-activity and host drift can affect them. They do not establish significance,
-sustained capacity, TLS performance, or gains on Linux/macOS. Further profiling
-is needed before claiming mailbox or SMTP improvements.
+All round ranges overlap. HTTP health and RPC have higher medians in this final
+measurement, but mailbox throughput and p95 worsened. The small SMTP median
+increase is within substantial variation, and SMTP p99 worsened from 63.146 to
+69.382 ms. The fixed order counterbalances some time drift; it is not randomized
+and does not establish statistical significance. These short, closed-loop runs
+share a host with the load generator and do not establish sustained capacity,
+production, TLS, Linux or macOS gains.
 
-An [intermediate result](benchmarks/postplus-bridge-intermediate-windows-2026-10-23.json)
-at `fa30072f2a9b753ec082bda492269ef3e8285ac0` contains the first three changes but
-not reactor-side HTTP shutdown. Against the same baseline its median changes were
-+7.3%, −10.4%, +4.9%, and −10.3%, in table order. This prompted investigation of
-response teardown. Earlier exploratory files remain under
-`build/perf-maintenance/before.json` and `after.json`; the candidate overlapped
-preparation of the independent PACE probe, so those files are not used here.
+## Earlier and excluded measurements
 
-To reproduce, preserve the baseline binaries, Web assets and example configuration,
-then run `scripts/benchmark_network.py` for each build with the same `--web-root`
-and `--config-template`, default counts, and the appropriate `--source-revision`.
-Allow TCP state to settle and stop local builds/tests before each measurement.
-Run `--compare <baseline.json> <candidate.json>` to verify matching provenance and
-calculate the comparison; do not compare incomplete runs or relabel old binaries.
+These results are retained to avoid selecting only a favorable measurement:
+
+- The initial [baseline](benchmarks/postplus-100-before-optimization-windows-2026-10-23.json)
+  and [pre-admission-fix candidate](benchmarks/postplus-bridge-optimized-windows-2026-10-23.json)
+  (`42057e6`) gave +33.1%, −3.1%, +30.2%, −13.3% in workload table order.
+- The [intermediate candidate](benchmarks/postplus-bridge-intermediate-windows-2026-10-23.json)
+  (`fa30072`, before reactor-side HTTP close) gave +7.3%, −10.4%, +4.9%, −10.3%
+  against that initial baseline.
+- A later short pair using the final code, without counterbalancing or a TCP-state
+  cooldown, gave **−19.4%, +11.0%, −10.3%, −10.5%**. Both the
+  [baseline](benchmarks/postplus-short-final-baseline-windows-2026-10-23.json.gz)
+  and [candidate](benchmarks/postplus-short-final-candidate-windows-2026-10-23.json.gz)
+  are retained. Reversed directions prompted the fixed-order, cooled comparison;
+  they reinforce the limits of short local measurements.
+- An attempt to increase each workload count fivefold failed during the second
+  baseline round with Windows ephemeral-port exhaustion (`WinError 10048`),
+  alongside connection resets. The host's dynamic port range was 49,152–65,535.
+  Its [partial raw result](benchmarks/postplus-failed-large-baseline-windows-2026-10-23.json.gz)
+  is not a valid performance comparison. No candidate block ran in that attempt.
+- Earlier exploratory files remain under `build/perf-maintenance/before.json`
+  and `after.json`; the candidate overlapped preparation of the PACE probe and
+  is excluded from the reported comparisons.
+
+To reproduce the final comparison, preserve baseline binaries/assets/configuration
+and run `scripts/benchmark_network.py` four times with default counts in A/B/B/A
+order, matching `--web-root`, `--config-template`, and correct `--source-revision`.
+Stop local builds/tests and wait for fewer than 1,000 host TCP `TIME_WAIT` entries
+before each block. Use the harness's `summarize()` on the six rounds per version;
+do not average block percentiles. `--compare` validates matching provenance for
+individual pairs. Never compare incomplete runs or relabel existing binaries.
 
 ## Independently reproduced PACE cost
 
