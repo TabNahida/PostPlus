@@ -109,6 +109,12 @@ def wait_job(server, ports, headers, job, *, state="complete", timeout=50, conte
         except (OSError, HTTPException):
             time.sleep(0.05)
             continue
+        # Polling authenticates through auth even when only that module is
+        # restarting. Its brief downtime can leave admin reachable with a 503.
+        # Keep the same overall deadline and require a real terminal job state.
+        if status == 503:
+            time.sleep(0.05)
+            continue
         assert status == 200 and result["ok"] and result["job_id"] == identifier, (status, result)
         assert result["state"] in ("pending", "running", "complete", "failed"), result
         if result["state"] in ("complete", "failed"):

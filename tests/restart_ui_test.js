@@ -85,6 +85,14 @@ async function run() {
       individual.sandbox.fetch=async()=>({ok:false,status:401,json:async()=>({ok:false,error:"Expired"})});
       await individual.tick();assert.match(individual.id("restart-status").textContent,/sign in again to check/);assert.equal(individual.timers.size,0);
     }else{
+      if(service==="auth"){
+        individual.sandbox.fetch=async()=>({ok:false,status:503,json:async()=>({ok:false,error:"A required service is unavailable. Please retry."})});
+        await individual.tick();
+        assert.equal(individual.run("restartBusy"),true,"An auth restart may temporarily make authenticated status polling unavailable");
+        assert.equal(individual.run("state.user.username"),"admin@example.com","A transient 503 must not discard the administration session");
+        assert.equal(individual.timers.size,1,"Status polling resumes after a transient 503");
+        assert.doesNotMatch(individual.id("restart-status").textContent,/services restarted/i);
+      }
       individual.respond(()=>({...job([service],"complete"),mode:"service",service}));await individual.tick();
       assert.equal(individual.run("restartBusy"),false);assert.match(individual.id("restart-status").textContent,/session remains available/);
       assert.equal(individual.run('Array.from(restartServiceButtons.values()).every(button=>!button.disabled)'),true);
@@ -137,6 +145,10 @@ async function run() {
   assert.equal(await unscheduled.run("saveSettings()"),true);assert.match(unscheduled.id("settings-success-message").textContent,/could not be scheduled/);assert.equal(unscheduled.timers.size,0);
   const timeout=await ready();timeout.sandbox.schedule=job();timeout.run("startRestart(schedule);restartStarted=Date.now()-90001;");
   timeout.sandbox.fetch=async()=>{throw new Error("Still offline");};await timeout.tick();assert.equal(timeout.timers.size,0);assert.match(timeout.id("restart-status").textContent,/could not be confirmed/);
+  const unavailable=await ready();unavailable.sandbox.schedule=job(["auth"]);unavailable.run("startRestart(schedule);restartStarted=Date.now()-90001;");
+  unavailable.sandbox.fetch=async()=>({ok:false,status:503,json:async()=>({ok:false,error:"A required service is unavailable. Please retry."})});
+  await unavailable.tick();assert.equal(unavailable.run("restartBusy"),false);assert.equal(unavailable.timers.size,0);
+  assert.match(unavailable.id("restart-status").textContent,/could not be confirmed/,"Persistent 503 responses cannot be reported as a completed restart");
   for(const stage of ["fetch","json body"]) {
     const hanging=await ready();hanging.sandbox.schedule=job();hanging.run("startRestart(schedule)");
     let signal;const delays=[],originalSetTimeout=hanging.sandbox.setTimeout;

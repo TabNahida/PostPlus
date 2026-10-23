@@ -276,24 +276,50 @@ void wait_ready(ProcessGroup& children, const Config& config, const std::string&
 
 void provision_admin(const std::filesystem::path& binaries, const Config& staged,
                      const std::string& username, const std::string& password) {
-    port_available(staged, "auth");
-    ProcessGroup temporary;
-    temporary.start("auth", service_executable(binaries, "auth"), {"--config", path_argument(staged.source)});
-    wait_ready(temporary, staged, "auth");
-    auto request_config = staged;
-    request_config.values["timeout_seconds"] = 10;
-    const auto created = rpc(request_config, "auth", {{"op", "create"}, {"username", username}, {"password", password}, {"admin", true}});
-    if (!created.value("ok", false)) {
-        if (created.value("error", "") != "user already exists")
-            throw std::runtime_error("administrator provisioning failed");
-        const auto verified = rpc(request_config, "auth", {{"op", "verify"}, {"username", username}, {"password", password}});
-        if (!verified.value("ok", false) || !verified.value("admin", false))
-            throw std::runtime_error("administrator account already exists with different credentials or permissions");
+    const auto started = std::chrono::steady_clock::now();
+    std::string phase = "port_check";
+    const auto report_failure = [&](const std::string& reason) {
+        const auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(
+            std::chrono::steady_clock::now() - started).count();
+        // Do not log exception text: transport/configuration errors can contain
+        // paths or request material. A fixed phase and error category are safe.
+        log("setup", "administrator provisioning failed phase=" + phase +
+            " elapsed_ms=" + std::to_string(elapsed) + " reason=" + reason, "error");
+    };
+    try {
+        port_available(staged, "auth");
+        ProcessGroup temporary;
+        phase = "start_auth";
+        temporary.start("auth", service_executable(binaries, "auth"), {"--config", path_argument(staged.source)});
+        phase = "auth_readiness";
+        wait_ready(temporary, staged, "auth");
+        auto request_config = staged;
+        request_config.values["timeout_seconds"] = 10;
+        phase = "create_administrator";
+        const auto created = rpc(request_config, "auth", {{"op", "create"}, {"username", username}, {"password", password}, {"admin", true}});
+        if (!created.value("ok", false)) {
+            if (created.value("error", "") != "user already exists")
+                throw std::runtime_error("administrator provisioning failed");
+            phase = "verify_existing_administrator";
+            const auto verified = rpc(request_config, "auth", {{"op", "verify"}, {"username", username}, {"password", password}});
+            if (!verified.value("ok", false) || !verified.value("admin", false))
+                throw std::runtime_error("administrator account already exists with different credentials or permissions");
+        }
+        phase = "stop_auth";
+        ensure_alive(temporary);
+        // Stop and reap auth before the setup server commits the configuration
+        // or normal services start. Destruction also covers every failure.
+        temporary.stop();
+    } catch (const NetworkTimeout&) {
+        report_failure("network_timeout");
+        throw;
+    } catch (const std::system_error& error) {
+        report_failure("system_error_" + std::to_string(error.code().value()));
+        throw;
+    } catch (const std::exception&) {
+        report_failure("operation_failed");
+        throw;
     }
-    ensure_alive(temporary);
-    // Stop and reap auth before the setup server commits the configuration or
-    // the normal service group starts. Destruction also covers every failure.
-    temporary.stop();
 }
 
 std::string configuration_bytes(const std::filesystem::path& path) {

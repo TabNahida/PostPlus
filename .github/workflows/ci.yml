@@ -78,5 +78,7 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: logs-${{ runner.os }}-${{ matrix.mode }}
-          path: build/test-runs/**/*.log
+          path: |
+            build/test-runs/**/*.log
+            build/test-runs/**/*.jsonl*
           retention-days: 7
