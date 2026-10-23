@@ -637,7 +637,7 @@ int run(int argc, char** argv) {
                 // alter the requested revision or trigger an implicit restart.
                 if (Config::from_file(config.source).values != request.config.values)
                     throw MaintenanceError("Configuration changed after scheduling; reload and retry.", 409);
-                request.services = restart_plan(config, request.config, request.mode);
+                request.services = restart_plan(config, request.config, request.mode, request.service);
                 require_distinct_ports(request.config, services);
                 const auto target_snapshot = control.snapshot_config(request.config);
                 const auto* manager = std::getenv("POSTPLUS_SERVICE_MANAGER");

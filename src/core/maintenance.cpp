@@ -574,7 +574,7 @@ Json request_supervisor_update(const Config& config, const std::string& action, 
     if (action != "stage" && action != "apply") throw MaintenanceError("Invalid update action.", 400);
     const auto identity = control_identity(config);
     const auto running = supervisor_running_config(config);
-    if (!running || Config::from_file(config.source).values != running->values)
+    if (!running || !restart_plan(*running, Config::from_file(config.source)).empty())
         throw MaintenanceError("Apply saved configuration before updating PostPlus.", 409);
     auto state = supervisor_update_status(config);
     std::string id;
@@ -652,7 +652,8 @@ Json supervisor_restart_status(const Config& config, const std::string& job_id) 
     if (!job_id.empty() && state.value("job_id", "") != job_id) throw MaintenanceError("Restart job not found.", 404);
     return public_restart_state(std::move(state));
 }
-Json request_supervisor_restart(const Config& config, const Config& saved, const std::string& mode) {
+Json request_supervisor_restart(const Config& config, const Config& saved, const std::string& mode,
+                                const std::string& service) {
     const auto identity = control_identity(config);
     const auto running = supervisor_running_config(config);
     if (!running) throw MaintenanceError("Running configuration is unavailable.");
@@ -660,7 +661,7 @@ Json request_supervisor_restart(const Config& config, const Config& saved, const
         throw MaintenanceError("Configuration changed before restart; reload and retry.", 409);
     if (saved.text("data_dir") != running->text("data_dir"))
         throw MaintenanceError("Stop PostPlus before changing the data directory.", 409);
-    const auto services = restart_plan(*running, saved, mode);
+    const auto services = restart_plan(*running, saved, mode, service);
     const auto reservation = identity.state_directory / "reservation";
     try { private_directory(reservation); }
     catch (...) {
@@ -673,6 +674,7 @@ Json request_supervisor_restart(const Config& config, const Config& saved, const
         Json state{{"ok", true}, {"job_id", id}, {"state", "pending"}, {"mode", mode},
             {"services", services}, {"admin_url", settings_url(saved, "admin")}, {"web_url", settings_url(saved, "web")},
             {"config", saved.values}, {"not_before", control_milliseconds() + 300}};
+        if (mode == "service") state["service"] = service;
         private_replace(identity.state_directory / "latest.json", state.dump());
         state["token"] = identity.value.at("token");
         private_write(identity.directory / "restart.tmp", state.dump());
@@ -715,7 +717,8 @@ std::optional<RestartRequest> SupervisorControl::restart_requested() {
     }
     if (control_milliseconds() < value.at("not_before").get<std::int64_t>()) return {};
     RestartRequest request{value.at("job_id").get<std::string>(), value.at("mode").get<std::string>(),
-        Config{value.at("config"), config_.source}, value.at("services").get<std::vector<std::string>>()};
+        Config{value.at("config"), config_.source}, value.at("services").get<std::vector<std::string>>(),
+        value.value("service", "")};
     const auto current = read_restart_state(state_directory_);
     if (current.value("job_id", "") != request.job_id || current.value("state", "") != "pending")
         throw MaintenanceError("Restart request does not match its reservation.");

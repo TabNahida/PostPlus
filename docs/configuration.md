@@ -82,6 +82,8 @@ Watch the service-restart panel after saving. Only affected services close their
 
 **Server maintenance → Restart all services** restarts the complete group with the saved configuration. It does not save unsaved form edits. The supplied systemd installation automatically brings PostPlus back after this action. **Save and shut down** saves with automatic application disabled, then stops the service group without restarting it. Independently launched service executables have no supervisor, so restart them manually after a save using the same configuration path.
 
+The same panel offers an individual restart for each module. Only the selected process restarts; other modules and the launcher remain running. Apply any saved runtime settings first, because an individual restart does not partially apply configuration. DNS verification records do not count as pending runtime settings and do not block either a module restart or an upgrade. Restarting the administration module ends its browser sessions and requires signing in again.
+
 ### Manual editing
 
 Stop the whole service group before editing the file. Keep a protected copy of the old configuration, edit valid JSON, then restart with the same `--config` path. JSON uses double-quoted keys/strings and does not allow comments or trailing commas. Numbers and booleans are unquoted. The example file is a reference, not a replacement for an initialized installation's credentials and paths.

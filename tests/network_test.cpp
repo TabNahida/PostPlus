@@ -132,6 +132,43 @@ void ipv6_loopback() {
     std::cout << "PASS native IPv6 loopback listener, peer endpoints and bidirectional bytes\n";
 }
 
+void empty_connection_and_accept_retry() {
+    Connection empty;
+    auto disconnected = [](auto operation) {
+        bool rejected = false;
+        try { operation(); } catch (const std::runtime_error&) { rejected = true; }
+        check(rejected, "unconnected operation was not rejected");
+    };
+    disconnected([&] { (void)empty.peer_endpoint(); });
+    disconnected([&] { empty.write("x"); });
+    disconnected([&] { (void)empty.read(1); });
+    disconnected([&] { (void)empty.wait_readable(1s); });
+    empty.request_stop();
+    empty.request_stop();
+
+    SocketListener listener({ip::address_v4::loopback(), 0});
+    Connection accepted;
+    for (int attempt = 0; attempt < 2; ++attempt) {
+        bool expired = false;
+        try { listener.accept(accepted, 20ms); } catch (const NetworkTimeout&) { expired = true; }
+        check(expired, "idle accept did not expire");
+    }
+    Connection first, second;
+    first.connect("localhost", listener.local_endpoint().port());
+    listener.accept(accepted, 2s);
+    const auto previous = accepted.peer_endpoint();
+    check(first.peer_endpoint().port() == listener.local_endpoint().port(), "resolved peer has wrong port");
+    first.write("first\r\n");
+    check(accepted.line() == "first", "accept failed after idle polling timeout");
+    second.connect(listener.local_endpoint());
+    listener.accept(accepted, 2s);
+    check(accepted.peer_endpoint().address().is_loopback() && accepted.peer_endpoint().port() != previous.port(),
+          "reusing an accepted connection retained the old peer identity");
+    second.write("second\r\n");
+    check(accepted.line() == "second", "replacement accepted socket did not receive bytes");
+    std::cout << "PASS empty connections are safe, timed-out accepts retry, and replacement sockets update peer identity\n";
+}
+
 void polling_preserves_transport() {
     Pair pair;
     for (int attempt = 0; attempt < 3; ++attempt)
@@ -323,6 +360,7 @@ int main() {
     Watchdog watchdog;
     try {
         ipv6_loopback();
+        empty_connection_and_accept_retry();
         polling_preserves_transport();
         queued_poll_timeout_and_stop();
         buffered_reads_obey_state();

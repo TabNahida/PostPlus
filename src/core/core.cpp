@@ -362,6 +362,14 @@ void send_response(Connection& connection, const HttpResponse& response) {
         out += name + ": " + value + "\r\n";
     }
     out += "\r\n";
+    // Small responses are already resident in memory. Send headers and body in
+    // one operation to avoid an extra worker/reactor handoff and TCP write.
+    // Large responses and backups retain their bounded streaming behavior.
+    if (!response.file && response.body.size() <= 65536) {
+        out += response.body;
+        connection.write(out);
+        return;
+    }
     connection.write(out);
     if (response.file) {
         std::array<char, 65536> buffer{};

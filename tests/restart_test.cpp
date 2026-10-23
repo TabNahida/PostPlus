@@ -191,6 +191,20 @@ int main() {
         }
         check(restart_plan(base, base, "all") == supervisor_services(), "full restart scope is incomplete");
         rejects(400, [&] { restart_plan(base, base, "unexpected"); });
+        for (const auto& service : supervisor_services())
+            check(restart_plan(base, base, "service", service) == std::vector<std::string>{service},
+                  "individual restart affected another service");
+        rejects(400, [&] { restart_plan(base, base, "service"); });
+        rejects(400, [&] { restart_plan(base, base, "service", "postplus"); });
+        rejects(400, [&] { restart_plan(base, base, "all", "smtp"); });
+        auto metadata_only = base;
+        metadata_only.values["domain_registry"]["example.test"] = {{"status", "active"},
+            {"dns", {{"ready", false}, {"status", "incomplete"}, {"checked_at", "2026-10-23T12:00:00Z"}}}};
+        check(restart_plan(base, metadata_only).empty(), "DNS metadata unexpectedly requires application");
+        check(restart_plan(base, metadata_only, "service", "smtp") == std::vector<std::string>{"smtp"},
+              "DNS metadata blocked individual maintenance");
+        metadata_only.values["blocked_terms"] = Json::array({"pending"});
+        rejects(409, [&] { restart_plan(base, metadata_only, "service", "smtp"); });
 
         const auto test_root = fs::absolute("build/test-runs").lexically_normal();
         fs::create_directories(test_root);
@@ -243,10 +257,29 @@ int main() {
             check(supervisor_running_config(initial)->values == updated.values, "applied config remains stale in unchanged admin child");
             concurrent_state_reads(control, initial, updated, *request);
 
+            const auto single = request_supervisor_restart(initial, updated, "service", "smtp");
+            check(single.at("mode") == "service" && single.at("service") == "smtp" &&
+                single.at("services") == Json::array({"smtp"}), "individual job metadata is wrong");
+            std::this_thread::sleep_for(std::chrono::milliseconds(320));
+            const auto single_request = control.restart_requested();
+            check(single_request && single_request->service == "smtp" &&
+                single_request->services == std::vector<std::string>{"smtp"}, "individual control request was lost");
+            control.restart_running(*single_request);
+            control.restart_complete(*single_request, updated);
+
             save(control_directory / "update.request", {{"token", std::string(64, '0')}});
             check(!control.update_requested(), "forged update capability accepted");
             rejects(400, [&] { request_supervisor_update(initial, "stage", "../escape"); });
             rejects(409, [&] { request_supervisor_update(initial, "apply", "missing"); });
+            auto pending = updated;
+            pending.values["blocked_terms"] = Json::array({"pending"});
+            save(source, pending.values);
+            rejects(409, [&] { request_supervisor_update(initial, "stage", "0.3.0"); });
+            rejects(409, [&] { request_supervisor_restart(initial, pending, "service", "smtp"); });
+            check(!supervisor_restart_busy(initial), "rejected pending configuration left a reservation");
+            auto metadata = updated;
+            metadata.values["domain_registry"]["example.test"] = metadata_only.values.at("domain_registry").at("example.test");
+            save(source, metadata.values);
             const auto update_job = request_supervisor_update(initial, "stage", "0.3.0");
             check(update_job.at("state") == "pending_download" && !update_job.contains("token"), "update scheduling metadata");
             check(supervisor_restart_busy(initial), "update download did not reserve maintenance");
@@ -261,6 +294,11 @@ int main() {
             check(supervisor_update_status(initial).at("state") == "downloading", "update progress missing");
             control.update_finished(*update, {{"state", "staged"}, {"services", Json::array({"web", "admin"})}});
             check(!supervisor_restart_busy(initial), "staged update blocks normal operations");
+            save(source, pending.values);
+            rejects(409, [&] { request_supervisor_update(initial, "apply", update->job_id); });
+            check(supervisor_update_status(initial).at("state") == "staged", "rejected apply lost the staged update");
+            metadata.values["domain_registry"]["example.test"]["dns"]["checked_at"] = "2026-10-23T12:05:00Z";
+            save(source, metadata.values);
             const auto apply_job = request_supervisor_update(initial, "apply", update->job_id);
             check(apply_job.at("state") == "pending_apply", "update apply mailbox state");
             std::this_thread::sleep_for(std::chrono::milliseconds(320));

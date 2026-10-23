@@ -15,6 +15,27 @@ let apiKeysData=null,apiKeysVersion=0,apiKeyDialogVersion=0,apiKeyCreating=false
 let keyPermissionEditor=null,accessControl=null,securityControl=null,domainControl=null;
 let usersData=[];
 let restartJob=null,restartVersion=0,restartTimer=null,restartStarted=0,restartBusy=false,restartText="",restartSubmitting=false;
+let restartServiceTarget=null;
+const restartServiceGroups=[
+  {label:"Mail protocols",services:[
+    {name:"smtp",label:"SMTP",description:"Accepts incoming mail and authenticated submissions."},
+    {name:"imap",label:"IMAP",description:"Keeps mail clients synchronized with their mailboxes."},
+    {name:"pop3",label:"POP3",description:"Lets mail clients download messages."}
+  ]},
+  {label:"Web portals",services:[
+    {name:"web",label:"Webmail",description:"Serves browser mailboxes. Webmail users must sign in again."},
+    {name:"admin",label:"Administration",description:"Serves this management portal. You must sign in again."}
+  ]},
+  {label:"Internal services",services:[
+    {name:"auth",label:"Authentication",description:"Checks accounts, passwords and access permissions."},
+    {name:"storage",label:"Mail storage",description:"Stores accounts, messages and the delivery queue."},
+    {name:"filter",label:"Mail filtering",description:"Checks incoming mail for spam and delivery policy."},
+    {name:"transfer",label:"Outbound transfer",description:"Sends outgoing mail directly or through a relay."},
+    {name:"delivery",label:"Delivery worker",description:"Processes queued mail and schedules delivery retries."}
+  ]}
+];
+const restartServices=new Map(restartServiceGroups.flatMap(group=>group.services.map(service=>[service.name,service])));
+const restartServiceButtons=new Map();
 let noticeTimer;
 const accountAddress=PostPlusAddress.create($("new-email"),$("new-email-domain"));
 const loginAddress=PostPlusAddress.create($("login-email"),$("login-domain"),{allowFullAddress:true});
@@ -510,7 +531,7 @@ async function loadSettings() {
     settingsData = data;
     if(!updateControl){updateControl=PostPlusUpdate.create($("admin-update"),{prefix:"admin-update",request:(path,options)=>api(path,{...options,quiet:true}),canChange:()=>Boolean(state.user?.admin&&!settingsSaving&&!restartBusy&&!shutdownPending),adminUrl:()=>settingsData?.admin_url||location.href,onBusy:updateControls});updateControl.load();}
     $("settings-pending").hidden = !data.restart_required;
-    $("restart-open").disabled=data.restart_available===false;
+    renderServiceRestarts();
     maintenanceStatus("settings-apply-hint",data.restart_available===false ? "This standalone service saves settings without restarting. Restart the affected services manually after saving." : "Saving validates the configuration and restarts only affected services. Other services continue running.");
     settingsEditor?.dispose();
     settingsEditor = PostPlusSettings.create($("settings-fields"),data.schema.map(field=>field.key==="domain"?{...field,readonly:true,help:"The first mail domain is fixed. Add and manage hosted domains on the Domains page."}:field),data.values,{prefix:"config",exclude:new Set(["additional_domains","mail_domains","admin_hostname","webmail_shared_hostname","webmail_hostnames","domain_tls","tls_certificate","tls_private_key","dkim_selector","dkim_private_key"]),secretStatus:data.secret_status,mailClients:true,onChange:updateSettingsCount,showDns:false});
@@ -536,7 +557,7 @@ async function saveSettings({apply=true}={}) {
   catch(error) {formError("settings-error",error.message);return false;}
   if(!Object.keys(values).length)return true;
   const user=state.user;
-  settingsSaving=true;$("settings-save").disabled=true;$("settings-form").setAttribute("aria-busy","true");
+  settingsSaving=true;refreshRestartControls();$("settings-save").disabled=true;$("settings-form").setAttribute("aria-busy","true");
   try {
     const body={revision:settingsData.revision,values};if(!apply)body.apply=false;
     const data=await api("/api/admin/config",{method:"POST",body});
@@ -548,7 +569,7 @@ async function saveSettings({apply=true}={}) {
     if(apply && data.restart)startRestart(data);
     return true;
   } catch(error) {formError("settings-error",error.message);settingsEditor?.highlight(error.field);return false;}
-  finally {settingsSaving=false;$("settings-save").disabled=false;$("settings-form").removeAttribute("aria-busy");}
+  finally {settingsSaving=false;refreshRestartControls();$("settings-save").disabled=false;$("settings-form").removeAttribute("aria-busy");}
 }
 $("settings-form").addEventListener("submit",async event=>{
   event.preventDefault();
@@ -558,21 +579,41 @@ $("settings-form").addEventListener("submit",async event=>{
   }
 });
 function maintenanceStatus(id,key) {$(id).dataset.i18n=key;$(id).textContent=t(key);}
-function updateControls(busy){updateBusy=busy;$("settings-save").disabled=busy||settingsSaving||restartBusy;$("backup-create").disabled=busy||restartBusy;$("restart-open").disabled=busy||restartBusy||settingsData?.restart_available===false;$("shutdown-open").disabled=busy||restartBusy;}
+function updateControls(busy){updateBusy=busy;$("settings-save").disabled=busy||settingsSaving||restartBusy;$("backup-create").disabled=busy||restartBusy;$("shutdown-open").disabled=busy||restartBusy;refreshRestartControls();}
+function canRestart(){return Boolean(state.user?.admin&&settingsData&&settingsData.restart_available!==false&&!settingsSaving&&!restartBusy&&!restartSubmitting&&!updateBusy&&!shutdownPending);}
+function refreshRestartControls(){
+  const disabled=!canRestart();$("restart-open").disabled=disabled;
+  restartServiceButtons.forEach(button=>{button.disabled=disabled;});
+  $("restart-unavailable").hidden=settingsData?.restart_available!==false;
+}
+function renderServiceRestarts(){
+  restartServiceButtons.clear();const groups=document.createDocumentFragment();
+  for(const group of restartServiceGroups){
+    const section=element("section","restart-service-group"),heading=element("h4","",t(group.label)),list=element("ul","restart-service-list");
+    for(const service of group.services){
+      const row=element("li","restart-service-row"),copy=element("div","restart-service-copy"),label=element("h5","",t(service.label)),description=element("p","field-hint",t(service.description)),button=element("button","button secondary",t("Restart"));
+      button.type="button";button.setAttribute("aria-label",t("Restart {service}",{service:t(service.label)}));
+      button.addEventListener("click",()=>openRestartDialog(service.name));restartServiceButtons.set(service.name,button);
+      copy.append(label,description);row.append(copy,button);list.append(row);
+    }
+    section.append(heading,list);groups.append(section);
+  }
+  $("restart-service-groups").replaceChildren(groups);refreshRestartControls();
+}
 function restartIncludesAdmin() {return Boolean(restartJob?.services?.some(name=>/^(postplus-)?admin$/.test(name)));}
 function restartControls(disabled) {
-  restartBusy=disabled;$("settings-edit").disabled=disabled;$("restart-open").disabled=disabled || settingsData?.restart_available===false;
+  restartBusy=disabled;$("settings-edit").disabled=disabled;refreshRestartControls();
   $("shutdown-open").disabled=disabled;$("backup-create").disabled=disabled;
   document.querySelectorAll("[data-view]").forEach(button=>{button.disabled=disabled;});
 }
 function clearRestart() {
-  restartVersion++;clearTimeout(restartTimer);restartTimer=null;restartJob=null;restartText="";restartControls(false);
+  restartVersion++;clearTimeout(restartTimer);restartTimer=null;restartJob=null;restartText="";restartServiceTarget=null;restartControls(false);
   $("restart-panel").hidden=true;$("restart-status").textContent="";$("restart-services").textContent="";formError("restart-error");
 }
 function renderRestart() {
   if(!restartJob)return;
   $("restart-panel").hidden=false;$("restart-status").textContent=t(restartText);
-  $("restart-services").textContent=t("Affected services: {services}",{services:(restartJob.services || []).join(", ") || t("None")});
+  $("restart-services").textContent=t("Affected services: {services}",{services:(restartJob.services || []).map(name=>t(restartServices.get(name.replace(/^postplus-/,""))?.label||name)).join(", ") || t("None")});
 }
 function restartFailureText() {return restartJob?.rolled_back ? "Restart failed. The previous affected services were restored. Saved changes are still pending; correct them before retrying." : "Restart failed. Check service logs, correct the saved configuration, and try again.";}
 function restartReconnect() {
@@ -619,18 +660,30 @@ function startRestart(data,{restored=false}={}) {
   }
   restartTimer=setTimeout(poll,750);
 }
-$("restart-open").addEventListener("click",()=>{if(restartBusy)return;formError("restart-dialog-error");$("restart-dialog").showModal();});
+function renderRestartDialog(){
+  const service=restartServices.get(restartServiceTarget),label=service?t(service.label):"";
+  $("restart-dialog-title").textContent=service?t("Restart {service}?",{service:label}):t("Restart all services?");
+  $("restart-dialog-summary").textContent=service?t("Only {service} will restart. Connections and requests using this module may be interrupted; other modules keep running.",{service:label}):t("All mail and administration connections will close briefly. PostPlus uses the saved configuration; unsaved form edits are not included.");
+  $("restart-dialog-impact").textContent=service?t(service.name==="admin"?"Administration will disconnect. Open its address and sign in again to check that restarting completed.":service.name==="web"?"Webmail users must sign in again. Your administration session remains available.":"Your administration session remains available. Unsaved form edits are not included."):t("If administration restarts, open its updated address and sign in again. Other service restarts keep your administration session.");
+  $("restart-dialog-submit").textContent=service?t("Restart {service}",{service:label}):t("Restart all services");
+}
+function openRestartDialog(service=null){
+  if(!canRestart()||(service!==null&&!restartServices.has(service)))return;
+  restartServiceTarget=service;renderRestartDialog();formError("restart-dialog-error");$("restart-dialog").showModal();
+}
+$("restart-open").addEventListener("click",()=>openRestartDialog());
 $("restart-form").addEventListener("submit",async event=>{
-  event.preventDefault();if(restartSubmitting || restartBusy)return;restartSubmitting=true;const user=state.user;
+  event.preventDefault();if(!canRestart())return;restartSubmitting=true;refreshRestartControls();const user=state.user,service=restartServiceTarget;
   try {
     await busy(event.currentTarget,async()=>{
       formError("restart-dialog-error");
-      const data=await api("/api/admin/restart",{method:"POST",body:{mode:"all"}});
-      if(user!==state.user)return;startRestart(data);$("restart-dialog").close();
+      const data=await api("/api/admin/restart",{method:"POST",body:service?{mode:"service",service}:{mode:"all"}});
+      if(user!==state.user)return;startRestart(data);$("restart-dialog").close();$("restart-panel").scrollIntoView({block:"center"});
     });
   } catch(error){if(user===state.user)formError("restart-dialog-error",error.message);}
-  finally{restartSubmitting=false;}
+  finally{restartSubmitting=false;refreshRestartControls();}
 });
+renderServiceRestarts();
 $("backup-create").addEventListener("click",async()=>{
   const version=++backupVersion;clearTimeout(backupTimer);formError("backup-error");
   $("backup-create").disabled=true;$("backup-download").hidden=true;
@@ -659,7 +712,7 @@ $("shutdown-settings").addEventListener("click",async()=>{$("shutdown-dialog").c
 $("shutdown-form").addEventListener("submit",event=>{
   event.preventDefault();if(shutdownPending)return;
   busy(event.currentTarget,async()=>{
-    shutdownPending=true;formError("shutdown-error");
+    shutdownPending=true;refreshRestartControls();formError("shutdown-error");
     try {
       if(!await saveSettings({apply:false}))throw new Error($("settings-error").textContent||t("Server settings could not be saved. Check the highlighted fields before shutting down."));
       await api("/api/admin/shutdown",{method:"POST",body:{}});
@@ -669,7 +722,7 @@ $("shutdown-form").addEventListener("submit",event=>{
       maintenanceStatus("shutdown-status","Shutdown requested. Check the terminal for completion. Start PostPlus manually to resume service.");
       $("settings-form").querySelectorAll("input,select,textarea,button").forEach(input=>{input.disabled=true;});
       $("settings-edit").disabled=true;
-    } catch(error){shutdownPending=false;formError("shutdown-error",error.message);}
+    } catch(error){shutdownPending=false;refreshRestartControls();formError("shutdown-error",error.message);}
   });
 });
 document.addEventListener("postplus:language", () => {
@@ -687,6 +740,7 @@ document.addEventListener("postplus:language", () => {
   renderInspection();
   renderApiKeys();
   renderRestart();
+  renderServiceRestarts();renderRestartDialog();
   if (state.user) { accessControl?.dispose();if(window.PostPlusAdminAccess)accessControl=PostPlusAdminAccess.mount($("view-accounts"),{api,notice:showNotice,inviteActions:$("account-create-actions"),afterDelete:loadAdmin}); loadAdmin(); renderLogs(); }
 });
 

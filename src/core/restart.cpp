@@ -10,9 +10,21 @@ const std::vector<std::string>& supervisor_services() {
     return services;
 }
 
-std::vector<std::string> restart_plan(const Config& running, const Config& saved, const std::string& mode) {
+std::vector<std::string> restart_plan(const Config& running, const Config& saved, const std::string& mode,
+                                    const std::string& service) {
+    if (mode == "service") {
+        if (std::find(supervisor_services().begin(), supervisor_services().end(), service) == supervisor_services().end())
+            throw MaintenanceError("Choose a valid service to restart.", 400);
+        // A single-module restart is maintenance, not partial configuration
+        // application. Otherwise unrelated saved changes could be marked as
+        // applied while their consumers still used the previous snapshots.
+        if (!restart_plan(running, saved).empty())
+            throw MaintenanceError("Apply saved configuration before restarting an individual service.", 409);
+        return {service};
+    }
+    if (!service.empty()) throw MaintenanceError("A service is only accepted for service restart mode.", 400);
     if (mode == "all") return supervisor_services();
-    if (mode != "changed") throw MaintenanceError("Restart mode must be changed or all.", 400);
+    if (mode != "changed") throw MaintenanceError("Restart mode must be changed, all or service.", 400);
     std::set<std::string> selected;
     auto add = [&](std::initializer_list<const char*> names) { for (auto name : names) selected.insert(name); };
     auto all = [&] { selected.insert(supervisor_services().begin(), supervisor_services().end()); };

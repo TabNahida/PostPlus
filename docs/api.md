@@ -422,7 +422,13 @@ Revision conflicts return 409. Validation failures return 400 with a field ident
 
 `POST /api/admin/restart` requires administrator authentication and CSRF for cookie requests. Send `{ "mode": "all" }` to restart all services with the saved configuration, or `{ "mode": "changed" }` to apply supported changes already saved by manual file editing. It does not save browser form edits. A full restart under the supplied systemd installation automatically brings PostPlus back; shutdown is a separate action that leaves it stopped.
 
+Send `{ "mode": "service", "service": "smtp" }` to restart one module. Accepted module names are `auth`, `storage`, `filter`, `transfer`, `delivery`, `smtp`, `pop3`, `imap`, `web`, and `admin`; unknown names or extra request fields return 400. The same `services:write` permission, maintenance reservation, readiness checks, and rollback rules apply. Other module processes and the supervisor remain running, including under systemd. Restarting a dependency can temporarily interrupt requests from its consumers. Restarting `admin` clears its browser sessions; persistent API keys remain valid.
+
+Individual restarts return 409 when saved configuration contains runtime changes that still need application. Apply those changes with `changed` or `all` first; a one-module restart cannot mark unrelated settings as applied. Domain DNS verification records are metadata and do not trigger this gate. Update staging and application use the same runtime-change check, so checking DNS does not require a restart before upgrading.
+
 The schedule response is `{ "ok": true, "job_id": "...", "state": "pending", "services": ["..."], "admin_url": "...", "web_url": "..." }`. Poll `GET /api/admin/restart?job_id=...` for `pending`, `running`, `complete`, or `failed`, with the same metadata and an optional error plus `rolled_back` on failure. A completed state confirms service readiness; losing the HTTP connection does not. State survives an administration-service restart, but the old browser session does not. After that restart, sign in at the updated address before reading the result.
+
+Individual jobs also return `mode: "service"`, the selected `service`, and a one-item `services` array in both the scheduling response and subsequent status responses.
 
 The UI retries transient connection failures for a bounded interval and shows reconnect links if authentication expires or the administration address moves. It does not repeatedly force the login screen or report completion from a disconnect. Without a native supervisor, the restart API is unavailable and settings saves report the manual fallback.
 

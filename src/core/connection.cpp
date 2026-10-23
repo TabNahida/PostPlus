@@ -18,15 +18,17 @@ struct Connection::Impl {
     NetworkExecutor& executor = network_executor();
     std::unique_ptr<pace::tcp::stream> socket;
     std::unique_ptr<TlsStream> tls;
+    std::optional<tcp::endpoint> peer;
     pace::dns::resolver* resolver = nullptr; // Only accessed on the reactor.
     std::chrono::seconds timeout;
     std::optional<std::chrono::steady_clock::time_point> operation_deadline, deadline;
     std::atomic<bool> stopping{false};
     std::string buffer;
-    explicit Impl(std::chrono::seconds value) : timeout(value) {
-        executor.invoke([&] { socket = std::make_unique<pace::tcp::stream>(executor.context()); });
-    }
-    ~Impl() { executor.invoke([&] { tls.reset(); socket.reset(); }); }
+    // Accepted connections receive their socket from the listener. Creating a
+    // throwaway stream here opens an unused OS socket and wakes the reactor on
+    // every accept attempt, including idle polling timeouts.
+    explicit Impl(std::chrono::seconds value) : timeout(value) {}
+    ~Impl() { if (socket || tls) executor.invoke([&] { tls.reset(); socket.reset(); }); }
     auto expires() const {
         auto result = std::chrono::steady_clock::now() + timeout;
         if (operation_deadline) result = std::min(result, *operation_deadline);
@@ -35,7 +37,7 @@ struct Connection::Impl {
     }
     void cancel() {
         if (resolver) resolver->cancel();
-        executor.context().cancel(socket->native_handle());
+        if (socket) executor.context().cancel(socket->native_handle());
     }
     template<class T> pace::task<T> bounded(pace::task<T> operation) {
         if (stopping.load()) throw std::runtime_error("service stopping");
@@ -53,10 +55,14 @@ struct Connection::Impl {
         } catch (...) { timer.check(); throw; }
     }
     pace::task<void> connect_endpoint(tcp::endpoint endpoint) {
+        peer.reset();
+        if (!socket) socket = std::make_unique<pace::tcp::stream>(executor.context());
         co_await socket->connect(endpoint.native());
         socket->set_no_delay();
+        peer = endpoint_value(socket->remote_endpoint());
     }
     pace::task<void> connect_host(std::string host, int port) {
+        peer.reset();
         if (port < 1 || port > 65535) throw std::invalid_argument("invalid port");
         std::error_code error;
         auto numeric = ip::make_address(host, error);
@@ -85,6 +91,7 @@ struct Connection::Impl {
         std::rethrow_exception(failure);
     }
     pace::task<std::string> receive_task(std::size_t size) {
+        if (!socket) throw std::runtime_error("connection is not connected");
         std::string bytes(size, '\0');
         const auto count = tls ? co_await tls->read_some(bytes) : co_await socket->read_some(bytes);
         if (count == 0) throw NetworkEof();
@@ -93,6 +100,7 @@ struct Connection::Impl {
     }
     std::string receive(std::size_t size) { return executor.run(bounded(receive_task(size))); }
     pace::task<void> write_task(std::string_view bytes) {
+        if (!socket) throw std::runtime_error("connection is not connected");
         if (tls) co_await tls->write_all(bytes);
         else co_await socket->write_all(bytes);
     }
@@ -103,6 +111,7 @@ struct Connection::Impl {
     pace::task<bool> poll(std::chrono::steady_clock::time_point until) {
         // Stop may be posted before this queued task has armed its socket wait.
         if (stopping.load()) throw std::runtime_error("service stopping");
+        if (!socket) throw std::runtime_error("connection is not connected");
         try {
             NetworkDeadline timer(executor.context(), until, [this] { cancel(); });
             try {
@@ -122,7 +131,11 @@ struct Connection::Impl {
 Connection::Connection(std::chrono::seconds timeout) : impl_(std::make_unique<Impl>(timeout)) {}
 Connection::~Connection() = default;
 tcp::endpoint Connection::peer_endpoint() const {
-    return impl_->executor.invoke([&] { return endpoint_value(impl_->socket->remote_endpoint()); });
+    // Peer identity cannot change during a connected session. Capture it when
+    // connect/accept completes instead of blocking on the reactor for each
+    // admission check and HTTP request.
+    if (!impl_->peer) throw std::runtime_error("connection is not connected");
+    return *impl_->peer;
 }
 bool Connection::encrypted() const { return static_cast<bool>(impl_->tls); }
 void Connection::set_deadline(std::optional<std::chrono::steady_clock::time_point> value) { impl_->deadline = value; }
@@ -170,7 +183,7 @@ bool Connection::wait_readable(std::chrono::milliseconds timeout) {
 }
 void Connection::write(std::string_view bytes) { impl_->executor.run(impl_->bounded(impl_->write_task(bytes))); }
 void Connection::start_tls_server(const Config& config) {
-    if (encrypted() || !impl_->buffer.empty()) throw std::runtime_error("invalid TLS transition");
+    if (!impl_->socket || encrypted() || !impl_->buffer.empty()) throw std::runtime_error("invalid TLS transition");
     if (impl_->stopping.load()) throw std::runtime_error("service stopping");
     impl_->operation_deadline = std::chrono::steady_clock::now() + impl_->timeout;
     struct Reset { Impl& value; ~Reset() { value.operation_deadline.reset(); } } reset{*impl_};
@@ -183,7 +196,7 @@ void Connection::start_tls_server(const Config& config) {
     impl_->executor.run(impl_->bounded(impl_->tls->handshake()));
 }
 void Connection::start_tls_client(const std::string& hostname) {
-    if (encrypted() || !impl_->buffer.empty()) throw std::runtime_error("invalid TLS transition");
+    if (!impl_->socket || encrypted() || !impl_->buffer.empty()) throw std::runtime_error("invalid TLS transition");
     if (impl_->stopping.load()) throw std::runtime_error("service stopping");
     impl_->operation_deadline = std::chrono::steady_clock::now() + impl_->timeout;
     struct Reset { Impl& value; ~Reset() { value.operation_deadline.reset(); } } reset{*impl_};
@@ -194,7 +207,7 @@ void Connection::start_tls_client(const std::string& hostname) {
     impl_->executor.run(impl_->bounded(impl_->tls->handshake()));
 }
 void Connection::start_tls_pinned(const std::string& certificate) {
-    if (encrypted() || !impl_->buffer.empty()) throw std::runtime_error("invalid TLS transition");
+    if (!impl_->socket || encrypted() || !impl_->buffer.empty()) throw std::runtime_error("invalid TLS transition");
     if (impl_->stopping.load()) throw std::runtime_error("service stopping");
     impl_->operation_deadline = std::chrono::steady_clock::now() + impl_->timeout;
     struct Reset { Impl& value; ~Reset() { value.operation_deadline.reset(); } } reset{*impl_};
@@ -218,6 +231,7 @@ struct SocketListener::Impl {
             connection.impl_->tls.reset();
             connection.impl_->socket = std::make_unique<pace::tcp::stream>(std::move(socket));
             connection.impl_->socket->set_no_delay();
+            connection.impl_->peer = endpoint_value(connection.impl_->socket->remote_endpoint());
         } catch (...) { timer.check(); throw; }
     }
 };

@@ -163,6 +163,13 @@ def selective(binaries, directory):
         assert http(ports["admin"], "GET", "/api/admin/restart?job_id=unknown")[0] == 401
         assert http(ports["admin"], "GET", "/api/admin/restart?job_id=unknown", headers=external)[0] == 404
         assert http(ports["admin"], "POST", "/api/admin/restart", {"mode": "invalid"}, external)[0] == 400
+        for payload in ({"mode": "service"}, {"mode": "service", "service": "postplus"},
+                        {"mode": "service", "service": 1}, {"mode": "all", "service": "smtp"},
+                        {"mode": "service", "service": "smtp", "unexpected": True}):
+            assert http(ports["admin"], "POST", "/api/admin/restart", payload, external)[0] == 400, payload
+        assert http(ports["admin"], "POST", "/api/admin/restart", {"mode": "service", "service": "smtp"})[0] == 401
+        assert http(ports["admin"], "POST", "/api/admin/restart", {"mode": "service", "service": "smtp"},
+                    {"Cookie": owner["Cookie"]})[0] == 403
         assert http(ports["web"], "POST", "/api/admin/restart", {"mode": "changed"}, web_cookie)[0] == 404
         sample = "Subject: selective restart\r\n\r\nRestartBlockedSentinel\r\n"
         assert rpc(ports["filter"], token, op="scan", raw=sample)["action"] == "accept"
@@ -184,6 +191,25 @@ def selective(binaries, directory):
         assert http(ports["web"], "GET", "/api/session", headers=web_cookie)[0] == 200
         assert not configuration(ports, external)["restart_required"]
         print("PASS filter-only autoapply changes live behavior, preserves sessions and serializes overlapping jobs", flush=True)
+
+        # DNS verification is persisted, but is not an unapplied runtime
+        # change. Exercise all ten explicit choices against that difference.
+        metadata = json.loads(path.read_text())
+        metadata.setdefault("domain_registry", {}).setdefault("localhost", {"status": "active"})["dns"] = {
+            "checked_at": "2026-10-23T12:00:00Z", "ready": False, "status": "incomplete"}
+        path.write_text(json.dumps(metadata), encoding="utf-8")
+        assert not configuration(ports, external)["restart_required"]
+        for service in ("auth", "storage", "filter", "transfer", "delivery", "smtp", "pop3", "imap", "web", "admin"):
+            before = pids(server)
+            status, _, job = http(ports["admin"], "POST", "/api/admin/restart",
+                                  {"mode": "service", "service": service}, external)
+            assert status == 202 and job["services"] == [service] and job["service"] == service, (status, job)
+            wait_job(server, ports, external, restart_job(job))
+            assert_changed(before, pids(server), {service})
+            assert server.process.pid == original_supervisor and server.process.poll() is None
+            assert not configuration(ports, external)["restart_required"]
+        assert token_file.read_bytes() == original_token
+        print("PASS every individual module restarts alone, retaining the supervisor and durable API credentials", flush=True)
 
         old_smtp, new_smtp = ports["smtp"], fresh_port(ports)
         apply_and_check(server, ports, external, {"ports": {"smtp": new_smtp}}, {"smtp"}, updates={"smtp": new_smtp})
@@ -226,6 +252,10 @@ def selective(binaries, directory):
         time.sleep(0.6)
         assert pids(server) == before
         assert configuration(ports, external)["restart_required"]
+        status, _, blocked = http(ports["admin"], "POST", "/api/admin/restart",
+                                  {"mode": "service", "service": "smtp"}, external)
+        assert status == 409 and "Apply saved configuration" in blocked["error"], (status, blocked)
+        assert pids(server) == before and configuration(ports, external)["restart_required"]
         assert rpc(ports["filter"], token, op="scan", raw="Subject: manual\r\n\r\nManualStagedSentinel\r\n")["action"] == "accept"
         status, _, restarted = http(ports["admin"], "POST", "/api/admin/restart", {"mode": "changed"}, external)
         assert status == 202 and restarted["ok"], (status, restarted)
@@ -314,6 +344,13 @@ def standalone(binaries, directory):
 def managed_restart(binaries, directory):
     server, ports, path, token, owner, external = provision(binaries, directory, "managed", {"POSTPLUS_SERVICE_MANAGER": "systemd"})
     try:
+        before = pids(server)
+        status, _, single = http(ports["admin"], "POST", "/api/admin/restart",
+                                 {"mode": "service", "service": "smtp"}, external)
+        assert status == 202
+        wait_job(server, ports, external, restart_job(single))
+        assert_changed(before, pids(server), {"smtp"})
+        assert server.process.poll() is None, "individual restart relaunched the service manager"
         # This isolated manager marker exercises the process exit protocol; it
         # never calls systemctl or alters a real host service.
         status, _, result = http(ports["admin"], "POST", "/api/admin/restart", {"mode": "all"}, external)

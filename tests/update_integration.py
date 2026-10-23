@@ -450,6 +450,20 @@ def selective_updates(binaries, directory):
         assert service_identities(server.process.pid) == pids_before and (installation.install / smtp).read_bytes() == original
         assert http(ports["admin"], "POST", "/api/admin/update/apply", {"job_id": job["job_id"]},
                     {"Cookie": installation.owner["Cookie"]})[0] == 403
+        # Real runtime changes must still block both download and installation;
+        # persisted DNS verification records must not require a restart first.
+        saved = json.loads(installation.path.read_text())
+        pending = dict(saved, blocked_terms=["UnappliedUpdateSentinel"])
+        write_json(installation.path, pending)
+        assert restart.configuration(ports, installation.external)["restart_required"]
+        assert http(ports["admin"], "POST", "/api/admin/update/stage", {"version": VERSION}, installation.external)[0] == 409
+        assert http(ports["admin"], "POST", "/api/admin/update/apply", {"job_id": job["job_id"]}, installation.external)[0] == 409
+        assert service_identities(server.process.pid) == pids_before
+        saved.setdefault("domain_registry", {}).setdefault("localhost", {"status": "active"})["dns"] = {
+            "checked_at": "2026-10-23T12:00:00Z", "ready": False, "status": "incomplete"}
+        write_json(installation.path, saved)
+        installation.config_bytes = installation.path.read_bytes()
+        assert not restart.configuration(ports, installation.external)["restart_required"]
         installation.apply(job, headers=installation.owner)
         assert http(ports["admin"], "POST", "/api/admin/restart", {"mode": "all"}, installation.external)[0] == 409
         assert http(ports["admin"], "POST", "/api/admin/update/apply", {"job_id": job["job_id"]}, installation.external)[0] == 409

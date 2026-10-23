@@ -23,6 +23,7 @@ function fixture() {
     reset(){if(this.id==="api-key-form"){id("api-key-name").value="";id("api-key-expiry").value="";}}
     focus(){this.focused=true;}
     select(){this.selected=true;}
+    scrollIntoView(options){this.scrollOptions=options;}
     showModal(){this.open=true;}
     close(){this.open=false;this.fire("close");}
     fire(name){return this.callbacks[name]?.({preventDefault(){},currentTarget:this,target:this});}

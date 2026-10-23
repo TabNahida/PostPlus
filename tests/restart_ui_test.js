@@ -7,12 +7,12 @@ const urls={admin_url:"http://localhost:8081/",web_url:"http://localhost:8080/"}
 const job=(services=["smtp","delivery"],state="pending")=>({ok:true,job_id:"restart-test",state,services,...urls});
 async function ready() {
   const f=fixture();await f.ready();f.sandbox.saved={revision:"revision-1",restart_available:true,...urls};
-  f.run('settingsData=saved;settingsEditor={read:()=>({log_level:"warn"}),clearSecrets(){},dispose(){},highlight(){}};');
+  f.run('settingsData=saved;settingsEditor={read:()=>({log_level:"warn"}),clearSecrets(){},dispose(){},highlight(){}};renderServiceRestarts();');
   return f;
 }
 async function run() {
   const html=fs.readFileSync(path.join(__dirname,"../web/admin.html"),"utf8");
-  for(const id of ["restart-open","restart-panel","restart-status","restart-dialog"])assert.match(html,new RegExp(`id="${id}"`));
+  for(const id of ["restart-open","restart-panel","restart-status","restart-dialog","restart-service-groups","restart-unavailable","restart-dialog-title","restart-dialog-submit"])assert.match(html,new RegExp(`id="${id}"`));
   const sections=[];let restartParent;
   for(const match of html.matchAll(/<section\b[^>]*>|<\/section>/g)) {
     if(match[0]==="</section>")sections.pop();
@@ -60,6 +60,50 @@ async function run() {
   assert.equal(await shutdown.run("saveSettings({apply:false})"),true);
   assert.equal(JSON.parse(shutdown.calls[0].options.body).apply,false);assert.equal(shutdown.timers.size,0);
   assert.match(shutdown.id("settings-success-message").textContent,/without restarting/);
+  const serviceNames=["auth","storage","filter","transfer","delivery","smtp","pop3","imap","web","admin"];
+  const catalog=await ready();assert.deepEqual([...catalog.run("restartServiceButtons.keys()")].sort(),serviceNames.toSorted());
+  assert.equal(catalog.id("restart-service-groups").children[0].children.length,3,"Modules are grouped into protocol, portal and internal services");
+  for(const service of serviceNames){
+    const individual=await ready();individual.respond(()=>({...job([service]),mode:"service",service}));
+    assert.equal(individual.run(`restartServiceButtons.get("${service}").disabled`),false);
+    await individual.run(`restartServiceButtons.get("${service}").fire("click")`);
+    assert.equal(individual.id("restart-dialog").open,true);
+    assert.match(individual.id("restart-dialog-title").textContent,/^Restart .+\?$/);
+    assert.match(individual.id("restart-dialog-summary").textContent,/Only .+ will restart/);
+    if(service==="admin")assert.match(individual.id("restart-dialog-impact").textContent,/Administration will disconnect/);
+    if(service==="web")assert.match(individual.id("restart-dialog-impact").textContent,/Webmail users must sign in again/);
+    await individual.id("restart-form").fire("submit");
+    assert.equal(individual.calls.length,1,"Individual restart does not save unrelated form edits");
+    assert.equal(individual.calls[0].route,"/api/admin/restart");
+    assert.deepEqual(JSON.parse(individual.calls[0].options.body),{mode:"service",service});
+    assert.equal(individual.calls[0].options.headers["X-CSRF-Token"],"test-csrf");
+    assert.equal(individual.id("restart-dialog").open,false);assert.equal(individual.run("restartBusy"),true);
+    assert.equal(individual.id("restart-panel").scrollOptions.block,"center","Progress is brought into view after confirmation");
+    assert.equal(individual.run('Array.from(restartServiceButtons.values()).every(button=>button.disabled)'),true);
+    assert.equal(individual.run("state.view"),"restart");
+    if(service==="admin"){
+      individual.sandbox.fetch=async()=>({ok:false,status:401,json:async()=>({ok:false,error:"Expired"})});
+      await individual.tick();assert.match(individual.id("restart-status").textContent,/sign in again to check/);assert.equal(individual.timers.size,0);
+    }else{
+      individual.respond(()=>({...job([service],"complete"),mode:"service",service}));await individual.tick();
+      assert.equal(individual.run("restartBusy"),false);assert.match(individual.id("restart-status").textContent,/session remains available/);
+      assert.equal(individual.run('Array.from(restartServiceButtons.values()).every(button=>!button.disabled)'),true);
+    }
+  }
+  for(const condition of ['settingsData.restart_available=false','state.user.admin=false','settingsSaving=true','updateBusy=true','restartBusy=true','shutdownPending=true']){
+    const unavailable=await ready();unavailable.respond(()=>job(["smtp"]));unavailable.run(condition+';refreshRestartControls();');
+    assert.equal(unavailable.run('restartServiceButtons.get("smtp").disabled'),true,condition);
+    await unavailable.run('restartServiceButtons.get("smtp").fire("click")');await unavailable.id("restart-form").fire("submit");
+    assert.equal(unavailable.calls.length,0,"Unavailable or unauthorized module restarts cannot be submitted");
+    assert.notEqual(unavailable.id("restart-dialog").open,true);
+    if(condition.includes("restart_available"))assert.equal(unavailable.id("restart-unavailable").hidden,false);
+  }
+  const pendingConfig=await ready();pendingConfig.sandbox.fetch=async()=>({ok:false,status:409,json:async()=>({ok:false,error:"Apply saved configuration before restarting an individual service."})});
+  await pendingConfig.run('openRestartDialog("smtp")');await pendingConfig.id("restart-form").fire("submit");
+  assert.equal(pendingConfig.id("restart-dialog").open,true);assert.match(pendingConfig.id("restart-dialog-error").textContent,/Apply saved configuration/);assert.equal(pendingConfig.run("restartBusy"),false);
+  const translated=await ready();await translated.run('openRestartDialog("smtp")');
+  translated.sandbox.PostPlusI18n.t=(text,args={})=>text==="Restart"?"重启":text==="Restart {service}?"?`重启${args.service}？`:text.replace(/\{(\w+)\}/g,(match,name)=>args[name]??match);
+  translated.run("renderServiceRestarts();renderRestartDialog();");assert.equal(translated.run('restartServiceButtons.get("smtp").textContent'),"重启");assert.equal(translated.id("restart-dialog-title").textContent,"重启SMTP？");
   const full=await ready();full.respond(()=>job(["auth","storage","smtp","web","admin"]));
   await full.id("restart-open").fire("click");await full.id("restart-form").fire("submit");
   assert.equal(full.calls[0].route,"/api/admin/restart");assert.equal(full.calls[0].options.headers["X-CSRF-Token"],"test-csrf");
@@ -119,6 +163,6 @@ async function run() {
   staleSave.sandbox.fetch=async()=>({ok:true,status:200,json:()=>new Promise(done=>{saved=done;})});
   const saving=staleSave.run("saveSettings()");for(let i=0;i<6;i++)await Promise.resolve();staleSave.run("signedOut()");saved({ok:true,restart_required:false,restart:job(),...urls});
   assert.equal(await saving,false);assert.equal(staleSave.id("restart-panel").hidden,true);assert.equal(staleSave.timers.size,0);
-  console.log("Restart UI checks passed: selective/full restart, shutdown apply:false, fallback, progress, disconnect/session recovery, timeout, and stale responses.");
+  console.log("Restart UI checks passed: all 10 individual modules, authorization/busy/fallback controls, localization, selective/full restart, shutdown apply:false, progress, disconnect/session recovery, timeout, and stale responses.");
 }
 run().catch(error=>{console.error(error);process.exitCode=1;});

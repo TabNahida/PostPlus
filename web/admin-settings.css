@@ -40,6 +40,21 @@
 .operation-cards .field-hint { margin:0 0 22px; line-height:1.8; max-width:650px; }
 .operation-cards .button { margin:0 8px 8px 0; }
 #restart-panel { margin:28px 0 0; }
+.restart-modules { margin-top:36px; }
+.restart-modules-heading { max-width:760px; margin-bottom:24px; }
+.restart-modules-heading h3 { margin:0 0 12px; font-size:20px; }
+.restart-modules-heading p { line-height:1.7; margin:10px 0; }
+.restart-service-groups { display:grid; grid-template-columns:repeat(auto-fit,minmax(min(100%,300px),1fr)); align-items:start; gap:24px; }
+.restart-service-group { padding:24px; border:1px solid var(--line); border-radius:12px; background:var(--surface); min-width:0; }
+.restart-service-group h4 { margin:0 0 20px; font-size:16px; }
+.restart-service-list { list-style:none; padding:0; margin:0; }
+.restart-service-row { display:flex; align-items:center; gap:16px; padding:18px 0; border-top:1px solid var(--line); }
+.restart-service-row:first-child { border-top:0; padding-top:0; }
+.restart-service-row:last-child { padding-bottom:0; }
+.restart-service-copy { flex:1; min-width:0; }
+.restart-service-copy h5 { margin:0 0 7px; font-size:14px; }
+.restart-service-copy .field-hint { margin:0; font-size:12px; line-height:1.7; }
+.restart-service-row .button { flex-shrink:0; min-height:40px; }
 @media(max-width:700px) {
   #view-settings .settings-save { width:calc(100% - 32px); bottom:10px; padding:18px; gap:16px; align-items:stretch; flex-direction:column; }
   #settings-save { width:100%; }
@@ -47,5 +62,6 @@
   .admin-dns-fields { grid-template-columns:1fr; gap:20px; }
   #view-settings .dns-check-actions .button { width:100%; }
   .operation-cards>div,#view-maintenance .update-panel { padding:22px 18px; }
+  .restart-service-group { padding:22px 18px; }
 }
 #inspect-attachments{display:grid;gap:9px;margin-top:24px;padding-top:18px;border-top:1px solid var(--line)}#inspect-attachments:empty{display:none}#inspect-attachments .attachment-card{display:flex;padding:12px;border:1px solid var(--line);border-radius:8px;background:var(--surface,#fff);color:var(--ink);text-decoration:none}#inspect-attachments .attachment-copy{display:flex;min-width:0;flex-direction:column;gap:5px}#inspect-attachments strong{font-size:12px;overflow-wrap:anywhere}#inspect-attachments small{font-size:11px}

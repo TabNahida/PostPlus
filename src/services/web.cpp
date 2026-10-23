@@ -1230,11 +1230,17 @@ private:
                     std::lock_guard lock(maintenance_mutex_);
                     if(shutting_down_ || backups_->busy()) throw ApiError(409,"Wait for the backup or shutdown operation to finish before restarting services.");
                     const auto input=request_json(request);
-                    if(!input.is_object() || input.size()!=1 || !input.contains("mode") || !input.at("mode").is_string())
-                        throw ApiError(400,"Choose a restart mode: changed or all.");
+                    if(!input.is_object() || !input.contains("mode") || !input.at("mode").is_string())
+                        throw ApiError(400,"Choose a restart mode: changed, all or service.");
                     const auto mode=input.at("mode").get<std::string>();
-                    if(mode!="changed" && mode!="all") throw ApiError(400,"Choose a restart mode: changed or all.");
-                    return json_response(request_supervisor_restart(config_,Config::from_file(config_.source),mode),202);
+                    std::string service;
+                    if(mode=="service") {
+                        if(input.size()!=2 || !input.contains("service") || !input.at("service").is_string())
+                            throw ApiError(400,"Choose a valid service to restart.");
+                        service=input.at("service").get<std::string>();
+                    } else if((mode!="changed" && mode!="all") || input.size()!=1)
+                        throw ApiError(400,"Choose a restart mode: changed, all or service.");
+                    return json_response(request_supervisor_restart(config_,Config::from_file(config_.source),mode,service),202);
                 }
                 throw ApiError(405,"Use GET or POST.");
             }
