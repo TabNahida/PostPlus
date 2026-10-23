@@ -393,6 +393,13 @@ window.PostPlusI18n = (() => {
   Object.assign(chinese,{"Continue editing":"继续编辑"});
   Object.assign(chinese,{"Saved changes are waiting for a restart. Stop PostPlus with Ctrl+C and launch it again to apply them.":"保存的更改正在等待重启。请按 Ctrl+C 停止 PostPlus，再次启动后生效。"});
   Object.assign(chinese,{"Adjust service ports":"调整服务端口","Show advanced options":"显示高级选项"});
+  Object.assign(chinese,{"Today":"今天","Yesterday":"昨天","This week":"本周","Earlier":"更早",
+    "Nothing sent yet":"还没有发出的邮件","Messages you send will be kept here.":"你发出的邮件会保存在这里。",
+    "No drafts":"没有草稿","Messages you save for later will wait here.":"稍后再写的邮件会在这里等你。",
+    "Trash is empty":"回收站是空的","Deleted messages stay here until you remove them permanently.":"删除的邮件会留在这里，直到你永久删除。",
+    "No junk mail":"没有垃圾邮件","Suspicious messages will be set aside here.":"可疑邮件会被放到这里。",
+    "Nothing archived":"还没有归档","Archive messages to keep your inbox clear.":"把邮件归档，让收件箱保持清爽。",
+    "No matching messages":"没有匹配的邮件","Try other words or clear the filters.":"换个关键词，或清除筛选条件。"});
   Object.assign(chinese, {
   "Sent": "已发送",
   "Drafts": "草稿箱",

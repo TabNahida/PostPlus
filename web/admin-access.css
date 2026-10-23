@@ -6,7 +6,7 @@
 #view-accounts>.settings-group>summary {
   display:list-item;
   min-height:26px;
-  font-size:17px;
+  font-size:16px;
   line-height:26px;
   font-weight:600;
   list-style-position:inside;
@@ -25,7 +25,7 @@
 .invitation-dialog .invitation-output>.field-hint { margin:0 0 14px; }
 .invitation-dialog .invitation-output textarea { margin:0 0 18px; min-height:90px; }
 .invitation-link-actions { display:flex; align-items:center; flex-wrap:wrap; gap:12px; }
-.invitation-list>h3 { margin:0 0 14px; font-size:15px; font-weight:600; }
+.invitation-list>h3 { margin:0 0 14px; font-size:16px; font-weight:600; }
 .invitation-list>.table-scroll { margin:0; max-height:320px; overflow:auto; overscroll-behavior:contain; }
 .invitation-list thead { position:sticky; top:0; z-index:1; background:var(--surface-raised); }
 .account-delete-dialog { width:min(560px,calc(100vw - 32px)); }

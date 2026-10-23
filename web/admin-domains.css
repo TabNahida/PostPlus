@@ -1,5 +1,5 @@
 .domain-intro { margin-bottom:28px; max-width:760px; }
-.domain-intro h2 { margin:0 0 12px; font-size:26px; letter-spacing:-.6px; }
+.domain-intro h2 { margin:0 0 12px; font-size:24px; letter-spacing:-.6px; }
 .domain-intro p { line-height:1.8; margin:0; }
 .domain-tabs { display:flex; gap:28px; border-bottom:1px solid var(--line); margin-bottom:28px; }
 .domain-tab { border:0; border-bottom:3px solid transparent; border-radius:0; padding:14px 1px; background:transparent; color:var(--muted); font:inherit; font-weight:600; cursor:pointer; }
@@ -14,7 +14,7 @@
 #domain-panel-domains>.domain-field { max-width:420px; margin-bottom:22px; }
 .domain-panel td { vertical-align:middle; }
 .domain-panel td strong { font-size:13px; overflow-wrap:anywhere; }
-.domain-panel td .role-badge { display:inline-block; margin:7px 0 7px 10px; font-size:10px; }
+.domain-panel td .role-badge { display:inline-block; margin:7px 0 7px 10px; font-size:11px; }
 .domain-panel td small { display:block; margin-top:6px; color:var(--muted); font-size:11px; }
 .domain-state { display:inline-block; padding:5px 9px; border-radius:5px; font-size:11px; background:var(--surface-selected,#edf2e5); color:var(--text-secondary,#52644f); white-space:nowrap; }
 .domain-state.is-pending { background:#c79e1615; color:#8c6c12; }
@@ -68,4 +68,4 @@
 .domain-remove-name { font-weight:600; font-size:18px; overflow-wrap:anywhere; }
 #domain-remove-dialog { max-width:570px; }
 @media(max-width:800px) { .portal-policy-grid { grid-template-columns:1fr; } .domain-panel table { min-width:780px; } }
-@media(max-width:550px) { .domain-intro h2 { font-size:23px; } .domain-tabs { gap:22px; } .domain-panel .section-heading { align-items:flex-start; gap:16px; } .domain-panel .section-heading>.button { white-space:nowrap; } .portal-policy-card { padding:20px; } .domain-policy-actions { flex-direction:column-reverse; } .domain-pagination { flex-wrap:wrap; } .domain-pagination>p { flex-basis:100%; margin:0; } .domain-dialog { width:calc(100vw - 18px); } .domain-dialog .dialog-body { padding:20px 16px; } .domain-dialog .dialog-footer { gap:10px; flex-wrap:wrap; } .domain-wizard-steps { gap:14px; font-size:11px; } .domain-dns-root .dns-technical { padding:16px 12px; } .domain-dns-root .dns-check-actions .button { width:100%; } }
+@media(max-width:550px) { .domain-intro h2 { font-size:24px; } .domain-tabs { gap:22px; } .domain-panel .section-heading { align-items:flex-start; gap:16px; } .domain-panel .section-heading>.button { white-space:nowrap; } .portal-policy-card { padding:20px; } .domain-policy-actions { flex-direction:column-reverse; } .domain-pagination { flex-wrap:wrap; } .domain-pagination>p { flex-basis:100%; margin:0; } .domain-dialog { width:calc(100vw - 18px); } .domain-dialog .dialog-body { padding:20px 16px; } .domain-dialog .dialog-footer { gap:10px; flex-wrap:wrap; } .domain-wizard-steps { gap:14px; font-size:11px; } .domain-dns-root .dns-technical { padding:16px 12px; } .domain-dns-root .dns-check-actions .button { width:100%; } }

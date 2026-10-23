@@ -231,11 +231,58 @@ async function switchView(view) {
 document.querySelectorAll("[data-folder]").forEach(button => button.addEventListener("click",()=>switchView(button.dataset.folder)));
 $("refresh").addEventListener("click", ()=>loadInbox());
 
+// Row decoration uses only list fields and previews already opened in this session.
+const dayLength=86400000;
+function messageDate(message,preview) {
+  const seconds=Number(message.internal_date),date=seconds>0?new Date(seconds*1000):new Date(preview?.date || NaN);
+  return Number.isNaN(date.getTime())?null:date;
+}
+function daysAgo(date,now) {
+  const day=value=>new Date(value.getFullYear(),value.getMonth(),value.getDate()).getTime();
+  return Math.round((day(now)-day(date))/dayLength);
+}
+function messageGroup(date,now) {
+  if(!date)return "Earlier";
+  const days=daysAgo(date,now);
+  return days<=0?"Today":days===1?"Yesterday":days<7?"This week":"Earlier";
+}
+function messageTime(date,now) {
+  if(!date)return "";
+  const days=daysAgo(date,now),language=PostPlusI18n.language;
+  if(days<=0)return date.toLocaleTimeString(language,{hour:"2-digit",minute:"2-digit"});
+  if(days===1)return t("Yesterday");
+  if(days<7)return date.toLocaleDateString(language,{weekday:"short"});
+  return date.toLocaleDateString(language,date.getFullYear()===now.getFullYear()?{month:"short",day:"numeric"}:{year:"numeric",month:"short",day:"numeric"});
+}
+function senderName(value) {
+  const text=String(value || "").split(",")[0].trim();
+  return text.replace(/\s*<[^>]*>\s*$/,"").replace(/^"(.*)"$/,"$1").trim() || text.replace(/^<|>$/g,"");
+}
+function senderTone(value) {
+  let hash=0;
+  for(const character of String(value || "").toLowerCase())hash=(hash*31+character.codePointAt(0))>>>0;
+  return String(hash%8);
+}
+function messageSnippet(preview) {
+  return String(preview?.text || "").replace(/\s+/g," ").trim().slice(0,140);
+}
+function skeletonRows() {
+  const fragment=document.createDocumentFragment();
+  for(let index=0;index<6;index++){
+    const row=element("div","message-skeleton");row.setAttribute("aria-hidden","true");
+    row.append(element("span","skeleton-avatar"),element("span","skeleton-lines"));fragment.append(row);
+  }
+  return fragment;
+}
+
 function renderMessages() {
-  const fragment = document.createDocumentFragment();
+  const fragment = document.createDocumentFragment(),now=new Date();
+  let group=null;
   state.messages.slice().reverse().forEach((message) => {
     const id = String(message.id);
     const preview = state.previews.get(id) || message;
+    const date=messageDate(message,preview),messageGroupName=messageGroup(date,now);
+    if(messageGroupName!==group){group=messageGroupName;fragment.append(element("div","message-group",t(group)));}
     const button = element("button", "message-row");
     button.type = "button";
     button.classList.toggle("seen", Boolean(message.seen));
@@ -244,11 +291,23 @@ function renderMessages() {
     const title = preview?.subject || t("Message #{id}", {id: message.uid});
     button.setAttribute("aria-label", message.seen ? title : t("Unread, {title}", {title}));
     const outgoing=["Sent","Drafts"].includes(message.folder || state.view);
-    const avatar = element("span", "avatar", (outgoing ? preview?.to : preview?.from)?.slice(0, 1) || "✉");
+    const party=outgoing ? preview?.to : preview?.from,name=senderName(party);
+    const avatar = element("span", "avatar", name.slice(0, 1) || "✉");
+    avatar.dataset.tone=senderTone(party);
     avatar.setAttribute("aria-hidden", "true");
     const copy = element("span", "message-row-copy");
-    copy.append(element("span", "message-row-title", title));
-    copy.append(element("span", "message-row-subtitle", (outgoing ? preview?.to : preview?.from) || `${bytes(message.size)} · ${t(message.seen ? "Read" : "Unread")}`));
+    const heading=element("span","message-row-heading");
+    heading.append(element("span", "message-row-title", title));
+    const time=element("time","message-row-time",messageTime(date,now));
+    if(date){time.setAttribute("datetime",date.toISOString());time.title=date.toLocaleString(PostPlusI18n.language);}
+    heading.append(time);
+    copy.append(heading);
+    const subtitle=element("span","message-row-subtitle",name || `${bytes(message.size)} · ${t(message.seen ? "Read" : "Unread")}`);
+    if(party)subtitle.title=party;
+    if(preview?.attachments?.length){const clip=icon("paperclip");clip.classList.add("message-row-clip");subtitle.prepend(clip);}
+    copy.append(subtitle);
+    const snippet=messageSnippet(state.previews.get(id));
+    if(snippet)copy.append(element("span","message-row-snippet",snippet));
     if(mailSearch?.active&&message.folder)copy.append(element("span","search-folder-label",folderLabel(message.folder)));
     const dot = element("span", "message-dot");
     dot.setAttribute("aria-hidden", "true");
@@ -258,7 +317,24 @@ function renderMessages() {
   });
   $("message-list").replaceChildren(fragment);
   $("message-total").textContent = t(state.messages.length === 1 ? "{count} message" : "{count} messages", {count: state.messages.length});
-  $("empty-mail").hidden = state.messages.length !== 0;
+  renderEmptyState();
+}
+const emptyStates={
+  INBOX:["No messages yet","New messages will appear here."],
+  Sent:["Nothing sent yet","Messages you send will be kept here."],
+  Drafts:["No drafts","Messages you save for later will wait here."],
+  Trash:["Trash is empty","Deleted messages stay here until you remove them permanently."],
+  Junk:["No junk mail","Suspicious messages will be set aside here."],
+  Archive:["Nothing archived","Archive messages to keep your inbox clear."]
+};
+function renderEmptyState() {
+  const empty=$("empty-mail");empty.hidden=state.messages.length!==0;
+  if(!empty.hidden){
+    const searching=Boolean(mailSearch?.active),[title,hint]=searching?["No matching messages","Try other words or clear the filters."]:emptyStates[state.view] || ["This folder is empty","Messages in this folder will appear here."];
+    empty.dataset.folder=searching?"search":state.view;
+    $("empty-mail-icon").replaceChildren(icon(searching?"search":folderIcons[state.view] || "folder-move"));
+    $("empty-folder-title").textContent=t(title);$("empty-folder-hint").textContent=t(hint);
+  }
 }
 
 function clearReader() {
@@ -284,6 +360,7 @@ async function loadInbox(append=false) {
   mailSearch?.busy(true);
   $("refresh").disabled = true;
   $("message-list").setAttribute("aria-busy", "true");
+  if(!append&&!state.messages.length){$("message-list").replaceChildren(skeletonRows());$("empty-mail").hidden=true;}
   $("mail-status").textContent = t("Syncing…");
   const user = state.user;
   try {
@@ -302,6 +379,7 @@ async function loadInbox(append=false) {
   } catch (error) {
     if (version !== state.listVersion) return;
     $("mail-status").textContent = t("Sync failed");
+    if(!state.messages.length)renderMessages();
     showNotice(error.message, true);
   } finally {
     if (version !== state.listVersion) return;

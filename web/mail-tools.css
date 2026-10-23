@@ -6,3 +6,15 @@
 @media(max-width:760px){.mail-search{padding:16px}.mail-search-bar{gap:10px}.mail-search-bar input{flex-basis:100%;max-width:none}.mail-filter-grid{grid-template-columns:repeat(2,minmax(0,1fr))}.delivery-panel{padding:16px}}
 @media(max-width:600px){.mail-toolbar{margin:16px;gap:14px}}
 @media(max-width:400px){.mail-filter-grid{grid-template-columns:minmax(0,1fr)}}
+
+/* The search strip spans the list and reader instead of floating as a card. */
+.mail-toolbar{margin:0;padding:14px 23px;grid-template-columns:minmax(260px,340px) minmax(0,1fr);gap:16px;border-bottom:1px solid var(--line);background:var(--surface-soft)}
+.verification-code[hidden]+.mail-tools{max-width:none}
+.mail-search{min-height:0;padding:0;gap:8px;background:transparent;border:0;border-radius:0;box-shadow:none}
+.mail-search-bar{gap:10px}
+.mail-search-bar input{max-width:none;min-height:40px;padding-left:38px;background:var(--surface) url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='%2377847c' stroke-width='1.8' stroke-linecap='round'%3E%3Cpath d='M3 10a7 7 0 1 0 14 0a7 7 0 1 0 -14 0M21 21l-6 -6'/%3E%3C/svg%3E") no-repeat 12px center/17px}
+.mail-search-bar .button{min-height:40px}
+.mail-search-filters summary{font-size:12px}
+.verification-code{min-height:0;padding:14px 16px}
+@media(max-width:1120px){.mail-toolbar{grid-template-columns:minmax(0,1fr)}}
+@media(max-width:600px){.mail-toolbar{padding:12px 14px;gap:12px}}

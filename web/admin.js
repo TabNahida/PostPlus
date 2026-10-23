@@ -235,6 +235,7 @@ function renderUsers() {
 }
 $("users-search").addEventListener("input",renderUsers);
 
+const queueAttention=20;
 async function loadAdmin() {
   if (!state.user?.admin || restartBusy) return;
   const user = state.user;
@@ -247,6 +248,8 @@ async function loadAdmin() {
       $("stat-messages").textContent = Number(stats.messages).toLocaleString(PostPlusI18n.language);
       $("stat-queued").textContent = Number(stats.queued).toLocaleString(PostPlusI18n.language);
       $("stat-bytes").textContent = bytes(stats.bytes);
+      // A long queue usually means relay or DNS trouble rather than normal traffic.
+      $("stat-queued-card").classList.toggle("attention",Number(stats.queued)>=queueAttention);
     } else {
       ["stat-messages", "stat-queued", "stat-bytes"].forEach((id) => { $(id).textContent = "—"; });
       showNotice(results[0].reason.message, true);
@@ -254,6 +257,7 @@ async function loadAdmin() {
     if (results[1].status === "fulfilled") {
       usersData=results[1].value.users;
       renderUsers();
+      $("quick-accounts").classList.toggle("done",usersData.length>1);
     } else {
       usersData=[];renderUsers();
       showNotice(results[1].reason.message, true);
