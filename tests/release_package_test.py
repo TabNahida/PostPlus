@@ -77,7 +77,8 @@ def windows_imports(binary):
 def dependencies(binary):
     if os.name == "nt":
         imports = windows_imports(binary)
-        forbidden = ("vcruntime", "msvcp", "ucrtbased", "libssl", "libcrypto", "sqlite", "zlib", "zlib1")
+        forbidden = ("vcruntime", "msvcp", "ucrtbased", "libssl", "libcrypto", "sqlite", "zlib", "zlib1",
+                     "pace", "libpace", "cares", "c-ares", "libcares", "libc-ares")
         assert not any(name.startswith(forbidden) for name in imports), (binary.name, imports)
     elif sys.platform == "darwin":
         output = subprocess.check_output(["otool", "-L", str(binary)], text=True)
@@ -86,7 +87,8 @@ def dependencies(binary):
     else:
         output = subprocess.check_output(["ldd", str(binary)], text=True)
         assert "not found" not in output, output
-        assert not any(name in output for name in ("libssl", "libcrypto", "libsqlite", "libz.so", ".xmake")), output
+        assert not any(name in output for name in ("libssl", "libcrypto", "libsqlite", "libz.so", ".xmake",
+                                                   "libpace", "libcares", "libc-ares")), output
 
 
 def verify_inventory(root, platform, arch):

@@ -312,7 +312,7 @@ std::string configuration_bytes(const std::filesystem::path& path) {
 int run(int argc, char** argv) {
     auto options = parse_options(argc, argv);
     if (options.help) {
-        std::cout << "PostPlus mail server\n"
+        std::cout << "PostPlus mail server " << POSTPLUS_VERSION << "\n"
                      "Usage: postplus [--config PATH] [--web-root PATH] [setup options]\n\n"
                      "  --config PATH       Configuration file (default: config/postplus.json)\n"
                      "  --web-root PATH     Web assets for first-run setup (default: executable/web, then ./web)\n"

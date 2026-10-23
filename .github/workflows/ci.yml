@@ -14,17 +14,20 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, windows-latest, macos-latest]
+        os: [ubuntu-24.04, windows-latest, macos-15]
         mode: [debug, release]
+        include:
+          - os: windows-latest
+            configure: '--runtimes=MT'
     runs-on: ${{ matrix.os }}
     timeout-minutes: 40
     steps:
       - uses: actions/checkout@v4
       - uses: xmake-io/github-action-setup-xmake@v1
         with:
-          xmake-version: '3.0.9'
+          xmake-version: '3.1.1'
           actions-cache-folder: '.xmake-cache'
-          actions-cache-key: '${{ runner.os }}-${{ runner.arch }}-${{ matrix.mode }}-v1'
+          actions-cache-key: '${{ runner.os }}-${{ runner.arch }}-${{ matrix.mode }}-pace-static-v2'
       - uses: actions/setup-python@v5
         with:
           python-version: '3.13'
@@ -35,7 +38,7 @@ jobs:
         if: runner.os == 'Linux'
         run: python tests/systemd_install_test.py
       - name: Configure
-        run: xmake f -m ${{ matrix.mode }} -y
+        run: xmake f -m ${{ matrix.mode }} ${{ matrix.configure }} -y
       - name: Build all services
         run: xmake build -y
       - name: Unit tests

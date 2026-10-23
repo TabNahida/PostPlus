@@ -507,7 +507,7 @@ Json rpc(const Config& config, const std::string& service, const Json& request,
 int service_main(const std::string& name, int argc, char** argv, std::function<void(const Config&)> run) {
     try {
         for (int i = 1; i < argc; ++i) if (std::string_view(argv[i]) == "--help") {
-            std::cout << "PostPlus " << name << " 0.1.0\nUsage: postplus-" << name << " --config PATH\n";
+            std::cout << "PostPlus " << name << " " << POSTPLUS_VERSION << "\nUsage: postplus-" << name << " --config PATH\n";
             return 0;
         }
         const auto config = Config::load(argc, argv);

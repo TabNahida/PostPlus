@@ -1,6 +1,8 @@
 # Binary releases
 
 Download an archive for your computer from [GitHub Releases](https://github.com/TabNahida/PostPlus/releases).
+See the [1.0.0 release notes](releases/1.0.0.md) for changes, upgrade compatibility,
+and the PACE network migration's measured performance and remaining API boundaries.
 Each archive contains the native launcher, its service executables, web pages,
 documentation, the example configuration, and license notices. No compiler,
 xmake, Python, Node.js, or separate OpenSSL/SQLite installation is needed to run
@@ -25,25 +27,25 @@ SHA-256 value against its entry before extracting it:
 
 ```powershell
 # Windows PowerShell
-Get-FileHash .\postplus-0.5.1-windows-x64.zip -Algorithm SHA256
-Expand-Archive .\postplus-0.5.1-windows-x64.zip -DestinationPath .
-Set-Location .\postplus-0.5.1
+Get-FileHash .\postplus-1.0.0-windows-x64.zip -Algorithm SHA256
+Expand-Archive .\postplus-1.0.0-windows-x64.zip -DestinationPath .
+Set-Location .\postplus-1.0.0
 .\postplus.exe
 ```
 
 ```sh
 # Linux
-sha256sum postplus-0.5.1-linux-x86_64.tar.gz
-tar -xzf postplus-0.5.1-linux-x86_64.tar.gz
-cd postplus-0.5.1
+sha256sum postplus-1.0.0-linux-x86_64.tar.gz
+tar -xzf postplus-1.0.0-linux-x86_64.tar.gz
+cd postplus-1.0.0
 ./postplus
 ```
 
 ```sh
 # macOS
-shasum -a 256 postplus-0.5.1-macosx-arm64.tar.gz
-tar -xzf postplus-0.5.1-macosx-arm64.tar.gz
-cd postplus-0.5.1
+shasum -a 256 postplus-1.0.0-macosx-arm64.tar.gz
+tar -xzf postplus-1.0.0-macosx-arm64.tar.gz
+cd postplus-1.0.0
 ./postplus
 ```
 
