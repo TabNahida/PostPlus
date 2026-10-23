@@ -16,6 +16,20 @@ import time
 from integration import PASSWORD, ROOT, Suite
 
 
+def wait_queue_empty(s):
+    # Mailbox commit and queue_finish are separate RPCs. Observe both before
+    # stopping delivery or declaring recovery complete; queue_inspect includes
+    # delayed retries that queue_list would hide.
+    deadline = time.monotonic() + 10
+    while True:
+        remaining = s.rpc("storage", op="queue_inspect")["jobs"]
+        if not remaining:
+            return
+        if time.monotonic() >= deadline:
+            raise AssertionError(f"Delivery queue did not drain: {remaining}")
+        time.sleep(0.1)
+
+
 class RspamdFixture:
     def __init__(self):
         self.reply = {"score": 0.2, "action": "no action", "symbols": {"LOCAL_TEST": {"score": 0.2}}}
@@ -226,6 +240,7 @@ def check(s):
     assert stored["raw"] == spam.encode(), "Junk routing changed signed MIME bytes"
     assert stored["filter_action"] == "spam" and stored["spam_score"] == 8 and stored["spam_reasons"], stored
     assert s.rpc("storage", op="stats")["quarantined"] == 0, "Normal spam incorrectly quarantined"
+    wait_queue_empty(s)
     print("PASS persisted SMTP ingress facts, inbound Junk delivery, authenticated Inbox delivery and unchanged MIME", flush=True)
 
     s.stop("delivery")
@@ -252,7 +267,7 @@ def check(s):
     assert s.rpc("storage", op="queue_retry", id=pending[0]["id"], delay=1, error="scanner restored")["ok"]
     s.start("delivery")
     s.wait_mail(user, 2)
-    assert not s.rpc("storage", op="queue_list")["jobs"]
+    wait_queue_empty(s)
     assert s.rpc("storage", op="stats")["quarantined"] == 0
     print("PASS persisted spam verdicts, scanner outage pending retry and successful recovery", flush=True)
 
@@ -274,6 +289,7 @@ def check(s):
     assert len(pending) == 2 and all(not job["inbound"] for job in pending), pending
     s.start("delivery")
     s.wait_mail(user, 4)
+    wait_queue_empty(s)
     assert s.rpc("storage", op="stats")["quarantined"] == 0
     print("PASS Webmail authenticated spam/block bypass, malware rejection and inbound-scanner outage immunity", flush=True)
 
