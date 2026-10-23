@@ -151,7 +151,7 @@ public:
         options.transport=[this](const auto& method,const auto& url,const auto& headers,const auto& body,auto deadline){return handle(method,url,headers,body,deadline);};
         options.test_ca_file=directory.parent_path()/"mock-ca.pem";
         if(!fs::exists(options.test_ca_file)){std::ofstream file(options.test_ca_file);file<<pem(ca.get());}
-        if(listener){asio::io_context io;tcp::acceptor reserve(io,{asio::ip::address_v4::loopback(),0});challenge_port=reserve.local_endpoint().port();options.challenge_port=challenge_port;}
+        if(listener){SocketListener reserve({ip::address_v4::loopback(),0});challenge_port=reserve.local_endpoint().port();options.challenge_port=challenge_port;}
         return options;
     }
     Json request(const std::string& directory="staging")const{return {{"domain",domain},{"email",email},{"directory",directory},{"agree_terms",true},{"terms_of_service",terms}};}
@@ -202,15 +202,15 @@ int main() {
         fs::create_directories(directory/"network");
         auto network_options=network.options(directory/"network/certificates");
         network_options.transport=[](const auto&,const auto&,const auto&,const auto&,auto)->AcmeHttpResponse {
-            throw std::system_error(asio::error::host_not_found,"SENSITIVE_TRANSPORT_DETAIL");
+            throw NetworkDnsError("SENSITIVE_TRANSPORT_DETAIL");
         };
         AcmeManager dns_failed(network_options);
         rejects([&]{dns_failed.terms();},"ca_dns_failed");
         const auto dns_result=finished(dns_failed,dns_failed.start(network.request()).at("job_id"));
         check(dns_result.at("code")=="ca_dns_failed" && dns_result.dump().find("SENSITIVE_TRANSPORT_DETAIL")==std::string::npos,"ACME network failure leaked details or lost its error code");
-        network_options.transport=[](const auto&,const auto&,const auto&,const auto&,auto)->AcmeHttpResponse {throw std::runtime_error("connection timed out");};
+        network_options.transport=[](const auto&,const auto&,const auto&,const auto&,auto)->AcmeHttpResponse {throw NetworkTimeout();};
         AcmeManager timeout(network_options);rejects([&]{timeout.terms();},"timeout");
-        network_options.transport=[](const auto&,const auto&,const auto&,const auto&,auto)->AcmeHttpResponse {throw std::system_error(asio::error::eof);};
+        network_options.transport=[](const auto&,const auto&,const auto&,const auto&,auto)->AcmeHttpResponse {throw NetworkEof();};
         AcmeManager disconnected(network_options);rejects([&]{disconnected.terms();},"ca_network_failed");
         network_options.transport=[](const auto&,const auto&,const auto&,const auto&,auto)->AcmeHttpResponse {throw std::length_error("oversized response");};
         AcmeManager oversized(network_options);rejects([&]{oversized.terms();},"invalid_ca_response");

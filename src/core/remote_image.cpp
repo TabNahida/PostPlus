@@ -27,7 +27,7 @@ Url parse_url(const std::string& input) {
         authority.resize(colon);
     }
     result.host = lower(authority);
-    std::error_code error; (void)asio::ip::make_address(result.host, error);
+    std::error_code error; (void)ip::make_address(result.host, error);
     if (!error || !valid_public_dns_name(result.host) || result.host.find('.') == result.host.npos ||
         result.host.ends_with(".localhost") || result.host.ends_with(".local") || result.host.ends_with(".internal")) invalid();
     result.target = end == input.npos ? "/" : input.substr(end);
@@ -55,13 +55,13 @@ std::string entity_decode(std::string_view input) {
     return result;
 }
 bool whitespace(char ch) { return ch == ' ' || ch == '\t' || ch == '\r' || ch == '\n' || ch == '\f'; }
-std::vector<asio::ip::address> addresses(const Url& url, const DnsResolver& resolver, Clock::time_point deadline) {
-    std::vector<asio::ip::address> result;
+std::vector<ip::address> addresses(const Url& url, const DnsResolver& resolver, Clock::time_point deadline) {
+    std::vector<ip::address> result;
     for (const auto type : {DnsType::a, DnsType::aaaa}) {
         try {
             const auto answer = resolver.lookup(url.host, type, deadline);
             for (const auto& value : answer.values) {
-                std::error_code error; const auto address = asio::ip::make_address(value, error);
+                std::error_code error; const auto address = ip::make_address(value, error);
                 if (error || !is_public_mail_address(address)) continue;
                 if (std::find(result.begin(), result.end(), address) == result.end() && result.size() < 16) result.push_back(address);
             }

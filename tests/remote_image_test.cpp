@@ -21,7 +21,7 @@ struct Dns {
         ++requests; std::size_t end = 12;
         while (question.at(end)) end += question.at(end) + 1;
         ++end; const unsigned type = (question.at(end) << 8) | question.at(end + 1); end += 4;
-        const auto ip = asio::ip::make_address(address); const bool answer = (type == 1 && ip.is_v4()) || (type == 28 && ip.is_v6());
+        const auto ip = postplus::ip::make_address(address); const bool answer = (type == 1 && ip.is_v4()) || (type == 28 && ip.is_v6());
         Bytes result{question[0], question[1]}; number(result, 0x8180); number(result, 1); number(result, answer ? 1 : 0); number(result, 0); number(result, 0);
         result.insert(result.end(), question.begin() + 12, question.begin() + static_cast<std::ptrdiff_t>(end));
         if (answer) {
@@ -34,26 +34,18 @@ struct Dns {
     DnsOptions options() { DnsOptions result; result.transport = [this](const auto& wire, auto) { return send(wire); }; return result; }
 };
 class Server {
-    asio::io_context io_;
-    tcp::acceptor acceptor_{io_, {asio::ip::make_address("127.0.0.1"), 0}};
+    SocketListener acceptor_{{ip::address_v4::loopback(),0}};
     std::thread thread_;
-    std::atomic<bool> stop_{false};
     std::exception_ptr failure_;
 public:
     template<class F> explicit Server(F handler) {
-        acceptor_.non_blocking(true);
         thread_ = std::thread([this, handler] { try {
-            Connection peer(std::chrono::seconds(2)); const auto deadline = Clock::now() + std::chrono::seconds(5);
-            for (;;) {
-                std::error_code error; acceptor_.accept(peer.socket(), error); if (!error) break;
-                if (error != asio::error::would_block && error != asio::error::try_again) throw std::system_error(error);
-                if (stop_ || Clock::now() >= deadline) return;
-                std::this_thread::sleep_for(std::chrono::milliseconds(2));
-            }
+            Connection peer(std::chrono::seconds(2));
+            acceptor_.accept(peer,std::chrono::seconds(5));
             peer.set_deadline(Clock::now() + std::chrono::seconds(4)); handler(peer);
         } catch (...) { failure_ = std::current_exception(); } });
     }
-    ~Server() { stop_ = true; if (thread_.joinable()) thread_.join(); }
+    ~Server() { acceptor_.close(); if (thread_.joinable()) thread_.join(); }
     int port() const { return acceptor_.local_endpoint().port(); }
     void finish() { if (thread_.joinable()) thread_.join(); if (failure_) std::rethrow_exception(failure_); }
 };
@@ -68,7 +60,7 @@ RemoteImageOptions options(Dns& dns, Server& server, bool tls = true) {
         check(host == "images.example.com" && is_public_mail_address(destination.address()), "DNS endpoint was not pinned to a public address");
         check(destination.port() == (tls ? 443 : 80) && secure == tls, "Wrong remote image transport");
         // Offline native fixture maps a verified destination to our local peer.
-        peer.connect({asio::ip::make_address("127.0.0.1"), static_cast<unsigned short>(server.port())});
+        peer.connect({ip::address_v4::loopback(), static_cast<unsigned short>(server.port())});
     }; return result;
 }
 void response(Connection& peer, const std::string& headers, const std::string& body = png) {

@@ -5,7 +5,8 @@
 #include <postplus/data_lock.hpp>
 #include <postplus/domains.hpp>
 #include <postplus/domain_tls.hpp>
-#include <asio/ssl.hpp>
+#include <pace/http.hpp>
+
 #include <openssl/crypto.h>
 #include <openssl/evp.h>
 #include <openssl/err.h>
@@ -283,284 +284,7 @@ std::string Config::relay_password() const {
     return result;
 }
 
-namespace {
-class ConnectionTimeout final : public std::runtime_error {
-public:
-    using std::runtime_error::runtime_error;
-};
-std::unique_ptr<asio::ssl::context> server_tls_context(const std::string& certificate,const std::string& key) {
-    auto context=std::make_unique<asio::ssl::context>(asio::ssl::context::tls_server);
-    SSL_CTX_set_min_proto_version(context->native_handle(),TLS1_2_VERSION);
-    SSL_CTX_set_options(context->native_handle(),SSL_OP_NO_RENEGOTIATION);
-    context->set_password_callback([](std::size_t,asio::ssl::context::password_purpose){return std::string{};});
-    context->use_certificate_chain_file(certificate);
-    context->use_private_key_file(key,asio::ssl::context::pem);
-    if(SSL_CTX_check_private_key(context->native_handle())!=1)throw std::runtime_error("TLS certificate and private key do not match");
-    return context;
-}
-}
-struct Connection::Impl {
-    asio::io_context io;
-    tcp::socket socket{io};
-    tcp::resolver resolver{io};
-    asio::steady_timer timer{io};
-    std::chrono::seconds timeout;
-    std::optional<std::chrono::steady_clock::time_point> operation_deadline;
-    std::optional<std::chrono::steady_clock::time_point> deadline;
-    std::atomic<bool> stopping = false;
-    std::string buffer;
-    std::unique_ptr<asio::ssl::context> tls_context;
-    std::unique_ptr<asio::ssl::context> sni_context;
-    const Json* server_tls_entries=nullptr;
-    std::unique_ptr<asio::ssl::stream<tcp::socket&>> tls;
-    explicit Impl(std::chrono::seconds value) : timeout(value) {}
-    static int select_server_certificate(SSL* ssl,int* alert,void* argument) noexcept {
-        auto& connection=*static_cast<Impl*>(argument);
-        const auto* requested=SSL_get_servername(ssl,TLSEXT_NAMETYPE_host_name);
-        if(!requested || !connection.server_tls_entries)return SSL_TLSEXT_ERR_NOACK;
-        try {
-            auto hostname=lower(requested);if(hostname.ends_with('.'))hostname.pop_back();
-            const auto entry=connection.server_tls_entries->find(hostname);
-            if(entry==connection.server_tls_entries->end())return SSL_TLSEXT_ERR_NOACK;
-            connection.sni_context=server_tls_context(entry->at("tls_certificate").get<std::string>(),entry->at("tls_private_key").get<std::string>());
-            if(!SSL_set_SSL_CTX(ssl,connection.sni_context->native_handle()))throw std::runtime_error("cannot select TLS certificate");
-            return SSL_TLSEXT_ERR_OK;
-        }catch(const std::exception&){*alert=SSL_AD_INTERNAL_ERROR;return SSL_TLSEXT_ERR_ALERT_FATAL;}
-    }
-    template<class Start> void wait(Start start) {
-        if (stopping.load()) throw std::runtime_error("service stopping");
-        io.restart();
-        std::error_code result;
-        bool expired = false;
-        auto expires = std::chrono::steady_clock::now() + timeout;
-        if (operation_deadline) expires = std::min(expires, *operation_deadline);
-        if (deadline) expires = std::min(expires, *deadline);
-        if (expires <= std::chrono::steady_clock::now()) throw ConnectionTimeout("transaction timed out");
-        timer.expires_at(expires);
-        timer.async_wait([&](std::error_code ec) {
-            if (!ec) { expired = true; std::error_code ignored; socket.cancel(ignored); resolver.cancel(); }
-        });
-        try {
-            start([&](std::error_code ec) { result = ec; timer.cancel(); });
-            io.run();
-        } catch (...) { timer.cancel(); io.poll(); throw; }
-        if (expired) throw ConnectionTimeout("connection timed out");
-        if (result) throw std::system_error(result);
-    }
-    std::string receive(std::size_t size) {
-        std::string bytes(size, '\0');
-        std::size_t count = 0;
-        wait([&](auto done) {
-            auto handler = [&, done](std::error_code ec, std::size_t n) { count = n; done(ec); };
-            if (tls) tls->async_read_some(asio::buffer(bytes), handler);
-            else socket.async_read_some(asio::buffer(bytes), handler);
-        });
-        bytes.resize(count);
-        return bytes;
-    }
-};
-Connection::Connection(std::chrono::seconds timeout) : impl_(std::make_unique<Impl>(timeout)) {}
-Connection::~Connection() = default;
-tcp::socket& Connection::socket() { return impl_->socket; }
-bool Connection::encrypted() const { return static_cast<bool>(impl_->tls); }
-void Connection::set_deadline(std::optional<std::chrono::steady_clock::time_point> deadline) { impl_->deadline = deadline; }
-void Connection::request_stop() { impl_->stopping.store(true); }
-void Connection::connect(const std::string& host, int port) {
-    tcp::resolver::results_type endpoints;
-    impl_->wait([&](auto done) {
-        impl_->resolver.async_resolve(host, std::to_string(port), [&,done](std::error_code ec, auto resolved) { endpoints = std::move(resolved); done(ec); });
-    });
-    impl_->wait([&](auto done) { asio::async_connect(impl_->socket, endpoints, [done](std::error_code ec, const auto&) { done(ec); }); });
-}
-void Connection::connect(const tcp::endpoint& endpoint) {
-    impl_->wait([&](auto done) { impl_->socket.async_connect(endpoint,done); });
-}
-std::string Connection::line(std::size_t limit) {
-    // A slow byte stream must not reset the deadline for the same logical line.
-    impl_->operation_deadline = std::chrono::steady_clock::now() + impl_->timeout;
-    struct Reset { Impl& impl; ~Reset() { impl.operation_deadline.reset(); } } reset{*impl_};
-    for (;;) {
-        const auto end = impl_->buffer.find("\r\n");
-        if (end != std::string::npos) {
-            if (end > limit || impl_->buffer.find('\n') < end) throw std::length_error("invalid or oversized line");
-            auto line_value = impl_->buffer.substr(0, end);
-            impl_->buffer.erase(0, end + 2);
-            return line_value;
-        }
-        if (impl_->buffer.size() >= limit + 2) throw std::length_error("line too long");
-        impl_->buffer += impl_->receive(std::min<std::size_t>(4096, limit + 2 - impl_->buffer.size()));
-    }
-}
-std::string Connection::read(std::size_t count) {
-    impl_->operation_deadline = std::chrono::steady_clock::now() + impl_->timeout;
-    struct Reset { Impl& impl; ~Reset() { impl.operation_deadline.reset(); } } reset{*impl_};
-    std::string result = impl_->buffer.substr(0, count);
-    impl_->buffer.erase(0, result.size());
-    while (result.size() < count) result += impl_->receive(std::min<std::size_t>(65536, count - result.size()));
-    return result;
-}
-bool Connection::wait_readable(std::chrono::milliseconds timeout) {
-    if (impl_->stopping.load()) throw std::runtime_error("service stopping");
-    if (!impl_->buffer.empty()) return true;
-    auto expires = std::chrono::steady_clock::now() + std::max(timeout, std::chrono::milliseconds(0));
-    if (impl_->deadline) expires = std::min(expires, *impl_->deadline);
-    if (expires <= std::chrono::steady_clock::now()) return false;
-    impl_->io.restart();
-    asio::steady_timer timer(impl_->io);
-    bool expired = false, finished = false;
-    std::error_code result;
-    std::array<char, 4096> decrypted{};
-    std::size_t received = 0;
-    timer.expires_at(expires);
-    timer.async_wait([&](std::error_code ec) {
-        if (!ec && !finished) { expired = true; std::error_code ignored; impl_->socket.cancel(ignored); }
-    });
-    if (impl_->tls) {
-        // A handshake/read may retain ciphertext in Asio's SSL input buffer,
-        // outside both the socket and OpenSSL's SSL_pending/SSL_has_pending.
-        // Read through the SSL stream and retain any plaintext for line/read.
-        // Asio supports partial read cancellation; drain its completion before
-        // returning so a later poll or IDLE notification write can proceed.
-        impl_->tls->async_read_some(asio::buffer(decrypted), [&](std::error_code ec, std::size_t count) {
-            finished = true; result = ec; received = count; timer.cancel();
-        });
-    } else {
-        impl_->socket.async_wait(tcp::socket::wait_read, [&](std::error_code ec) {
-            finished = true; result = ec; timer.cancel();
-        });
-    }
-    impl_->io.run();
-    if (impl_->stopping.load()) throw std::runtime_error("service stopping");
-    if (received) { impl_->buffer.append(decrypted.data(), received); return true; }
-    if (expired) return false;
-    if (result) throw std::system_error(result);
-    return true;
-}
-void Connection::write(std::string_view bytes) {
-    impl_->wait([&](auto done) {
-        auto handler = [done](std::error_code ec, std::size_t) { done(ec); };
-        if (impl_->tls) asio::async_write(*impl_->tls, asio::buffer(bytes), handler);
-        else asio::async_write(impl_->socket, asio::buffer(bytes), handler);
-    });
-}
-void Connection::start_tls_server(const Config& config) {
-    if (encrypted() || !impl_->buffer.empty()) throw std::runtime_error("invalid TLS transition");
-    impl_->tls_context = server_tls_context(config.text("tls_certificate"),config.text("tls_private_key"));
-    if(const auto entries=config.values.find("domain_tls");entries!=config.values.end() && entries->is_object() && !entries->empty()) {
-        impl_->server_tls_entries=&*entries;
-        SSL_CTX_set_tlsext_servername_callback(impl_->tls_context->native_handle(),Impl::select_server_certificate);
-        SSL_CTX_set_tlsext_servername_arg(impl_->tls_context->native_handle(),impl_.get());
-    }
-    impl_->tls = std::make_unique<asio::ssl::stream<tcp::socket&>>(impl_->socket, *impl_->tls_context);
-    // Only the synchronous handshake accesses the caller's configuration.
-    // The selected context remains owned until the connection is destroyed.
-    try {impl_->wait([&](auto done) { impl_->tls->async_handshake(asio::ssl::stream_base::server, done); });}
-    catch(...){impl_->server_tls_entries=nullptr;throw;}
-    impl_->server_tls_entries=nullptr;
-}
-void Connection::start_tls_client(const std::string& hostname) {
-    if (encrypted() || !impl_->buffer.empty()) throw std::runtime_error("invalid TLS transition");
-    impl_->tls_context = std::make_unique<asio::ssl::context>(asio::ssl::context::tls_client);
-    SSL_CTX_set_min_proto_version(impl_->tls_context->native_handle(), TLS1_2_VERSION);
-    // A release may run without the package builder's OpenSSL default paths.
-    // Native/distribution roots can still provide a valid trust store; the
-    // handshake below always verifies the chain and hostname.
-    std::error_code default_paths_error;
-    impl_->tls_context->set_default_verify_paths(default_paths_error);
-    add_platform_trust_roots(SSL_CTX_get_cert_store(impl_->tls_context->native_handle()));
-    ERR_clear_error();
-    impl_->tls_context->set_verify_mode(asio::ssl::verify_peer);
-    impl_->tls = std::make_unique<asio::ssl::stream<tcp::socket&>>(impl_->socket, *impl_->tls_context);
-    impl_->tls->set_verify_callback(asio::ssl::host_name_verification(hostname));
-    if (SSL_set_tlsext_host_name(impl_->tls->native_handle(), hostname.c_str()) != 1) throw std::runtime_error("cannot set TLS hostname");
-    impl_->wait([&](auto done) { impl_->tls->async_handshake(asio::ssl::stream_base::client, done); });
-}
-namespace {
-void serve_listeners(const Config& config, const std::string& service, const std::vector<TcpListener>& listeners,
-                     ListenerSession handler, bool internal, std::function<bool()> stop_requested, bool check_ip_bans = true) {
-    asio::io_context io;
-    const auto address = asio::ip::make_address(internal ? "127.0.0.1" : config.text(service == "admin" ? "admin_bind" : "bind", "127.0.0.1"));
-    std::vector<std::unique_ptr<tcp::acceptor>> acceptors;
-    for (const auto& listener : listeners) acceptors.push_back(std::make_unique<tcp::acceptor>(io, tcp::endpoint{address, static_cast<unsigned short>(listener.port)}));
-    const auto max = config.number("max_connections", 32);
-    asio::thread_pool workers(static_cast<std::size_t>(max));
-    std::atomic<int> active = 0;
-    // Registry is only accessed from the listener executor, never from workers.
-    std::vector<std::weak_ptr<Connection>> connections;
-    asio::signal_set signals(io, SIGINT, SIGTERM);
-    asio::steady_timer stop_timer(io);
-    (void)process_stop_requested();
-    auto stop_listener = [&](bool cancel_sessions) {
-        std::error_code ec; for (auto& acceptor : acceptors) acceptor->close(ec);
-        signals.cancel(); stop_timer.cancel();
-        if (cancel_sessions) for (auto& weak : connections) if (auto connection = weak.lock()) connection->request_stop();
-    };
-    signals.async_wait([&](std::error_code ec, int) {
-        if (!ec) stop_listener(true);
-    });
-    std::function<void()> check_stop;
-    check_stop = [&] {
-        if (process_stop_requested()) { stop_listener(true); return; }
-        if (stop_requested && stop_requested()) { stop_listener(false); return; }
-        stop_timer.expires_after(std::chrono::milliseconds(100));
-        stop_timer.async_wait([&](std::error_code ec) { if (!ec) check_stop(); });
-    };
-    check_stop();
-    std::function<void(std::size_t)> accept_next;
-    accept_next = [&](std::size_t index) {
-        auto connection = std::make_shared<Connection>(std::chrono::seconds(config.number("timeout_seconds", 30)));
-        acceptors[index]->async_accept(connection->socket(), [&,connection,index](std::error_code ec) {
-            if (!ec && active.load() < max) {
-                std::erase_if(connections, [](const auto& weak) { return weak.expired(); });
-                connections.push_back(connection);
-                ++active;
-                asio::post(workers, [&,connection,index] {
-                    try {
-                        // Internal RPC and the unconfigured bootstrap wizard must
-                        // work without auth. Public services check the socket IP
-                        // before TLS, banners, request bytes or protocol handlers.
-                        bool allowed = true;
-                        if (!internal && check_ip_bans) {
-                            const auto peer = connection->socket().remote_endpoint().address().to_string();
-                            allowed = false;
-                            try {
-                                const auto result = rpc(config, "auth", {{"op", "security_check"}, {"peer_ip", peer},
-                                    {"protocol", service == "web" ? "webmail" : service}},
-                                    std::chrono::steady_clock::now() + std::chrono::seconds(2));
-                                allowed = result.at("ok").get<bool>();
-                                if (!allowed) log(service, "connection rejected ip=" + peer + " reason=" +
-                                    (result.value("code", "") == "ip_banned" ? "ip_banned" : "security_check_unavailable"), "warn");
-                            } catch (const std::exception&) {
-                                log(service, "connection rejected ip=" + peer + " reason=security_check_unavailable", "warn");
-                            }
-                        }
-                        if (allowed) {
-                            if (listeners[index].implicit_tls) connection->start_tls_server(config);
-                            handler(*connection, listeners[index]);
-                        }
-                    }
-                    catch (const std::exception&) { log(service, "session closed after I/O or protocol error", "debug"); }
-                    --active;
-                });
-            }
-            if (acceptors[index]->is_open()) accept_next(index);
-        });
-    };
-    for (std::size_t index = 0; index < listeners.size(); ++index) {
-        accept_next(index);
-        log(service, (listeners[index].name == service ? "" : listeners[index].name + " ") + "listening on " + address.to_string() + ":" + std::to_string(listeners[index].port));
-    }
-    io.run();
-    workers.join();
-}
-}
-void serve_tcp(const Config& config, const std::string& service, Session handler, bool internal, std::function<bool()> stop_requested, bool check_ip_bans) {
-    serve_listeners(config, service, {{service, config.port(service), false}},
-        [handler=std::move(handler)](Connection& connection, const TcpListener&) { handler(connection); }, internal, std::move(stop_requested), check_ip_bans);
-}
-void serve_tcp_listeners(const Config& config, const std::string& service, ListenerSession handler, std::function<bool()> stop_requested) {
-    serve_listeners(config, service, config.listeners(service), std::move(handler), false, std::move(stop_requested));
-}
+using ConnectionTimeout = NetworkTimeout;
 
 namespace {
 Json wire_encode(Json value) {
@@ -673,7 +397,7 @@ void serve_http(const Config& config, const std::string& service, HttpHandler ha
             connection.set_deadline(std::chrono::steady_clock::now() + std::chrono::seconds(config.number("timeout_seconds",30)));
             HttpRequest request;
             request.encrypted = connection.encrypted();
-            const auto peer = connection.socket().remote_endpoint().address();
+            const auto peer = connection.peer_endpoint().address();
             request.peer_address = peer.to_string();
             request.peer_loopback = peer.is_loopback();
             std::istringstream line(connection.line());
@@ -738,23 +462,45 @@ void serve_rpc(const Config& config, const std::string& service, std::function<J
         return json_response(wire_encode(handler(input)));
     });
 }
+namespace {
+pace::task<pace::http::response> rpc_exchange(int port, pace::http::request request, std::size_t maximum,
+                                           std::chrono::steady_clock::time_point deadline) {
+    auto& io = network_executor().context();
+    pace::tcp::stream socket(io);
+    pace::tcp::stream* active = &socket;
+    NetworkDeadline timer(io, deadline, [&] { io.cancel(active->native_handle()); });
+    try {
+        co_await socket.connect({"127.0.0.1", static_cast<std::uint16_t>(port)});
+        socket.set_no_delay();
+        pace::http::limits limits;
+        limits.max_header_bytes = 32768;
+        limits.max_body_bytes = maximum;
+        pace::http::client client(std::move(socket), limits);
+        active = &client.transport();
+        // The pointer is reset before client destruction, including exceptional exits.
+        struct Reset { pace::tcp::stream*& active; pace::tcp::stream& socket; ~Reset() { active = &socket; } } reset{active, socket};
+        auto response = co_await client.send(std::move(request));
+        timer.check();
+        co_return response;
+    } catch (...) { timer.check(); throw; }
+}
+}
 Json rpc(const Config& config, const std::string& service, const Json& request,
          std::optional<std::chrono::steady_clock::time_point> deadline) {
     int timeout = service == "transfer" ? (config.outbound_mode()=="direct" ? config.number("direct_timeout_seconds",120) : config.number("smarthost_timeout_seconds",30)) + 10 : config.number("timeout_seconds",30);
     if(service=="filter") timeout=std::max(timeout,(!config.text("clamav_host").empty()?config.number("clamav_timeout_seconds",15):0)+(config.flag("rspamd_enabled")?config.number("rspamd_timeout_seconds",5):0)+5);
-    Connection connection{std::chrono::seconds(timeout)};
-    connection.set_deadline(deadline);
-    connection.connect("127.0.0.1", config.port(service));
-    const auto body = wire_encode(request).dump();
-    connection.write("POST /rpc HTTP/1.1\r\nHost: localhost\r\nAuthorization: Bearer " + config.token() + "\r\nContent-Type: application/json\r\nContent-Length: " + std::to_string(body.size()) + "\r\nConnection: close\r\n\r\n");
-    connection.write(body);
-    std::istringstream status(connection.line());
-    std::string version;
-    int code = 0;
-    status >> version >> code;
-    if (version != "HTTP/1.1" || code != 200) throw std::runtime_error(service + " RPC unavailable (HTTP " + std::to_string(code) + ")");
-    const auto headers = read_headers(connection);
-    const auto result = wire_decode(Json::parse(connection.read(body_size(headers, rpc_limit(config)))));
+    pace::http::request outgoing;
+    outgoing.method = "POST";
+    outgoing.target = "/rpc";
+    outgoing.version = "HTTP/1.1";
+    outgoing.keep_alive = false;
+    outgoing.headers = {{"Host", "localhost"}, {"Authorization", "Bearer " + config.token()}, {"Content-Type", "application/json"}};
+    outgoing.body = wire_encode(request).dump();
+    auto expires = std::chrono::steady_clock::now() + std::chrono::seconds(timeout);
+    if (deadline) expires = std::min(expires, *deadline);
+    const auto response = network_executor().run(rpc_exchange(config.port(service), std::move(outgoing), rpc_limit(config), expires));
+    if (response.version != "HTTP/1.1" || response.status != 200) throw std::runtime_error(service + " RPC unavailable (HTTP " + std::to_string(response.status) + ")");
+    const auto result = wire_decode(Json::parse(response.body));
     if (!result.is_object() || !result.contains("ok") || !result.at("ok").is_boolean()) throw std::runtime_error("invalid RPC response");
     return result;
 }

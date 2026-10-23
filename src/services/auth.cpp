@@ -138,26 +138,26 @@ std::string canonical_ip(const std::string& input) {
         (ipv6 && std::count(input.begin(), input.end(), ':') < 2) ||
         (!ipv6 && std::count(input.begin(), input.end(), '.') != 3))
         throw std::invalid_argument("invalid peer IP address");
-    asio::error_code error;
-    auto address = asio::ip::make_address(input, error);
+    std::error_code error;
+    auto address = ip::make_address(input, error);
     // Windows' underlying conversion may accept an IPv4 address followed by a
     // port. Enforce address family and canonical IPv4 syntax independently.
     if (error || address.is_v6() != ipv6 || (!ipv6 && address.to_string() != input))
         throw std::invalid_argument("invalid peer IP address");
     if (address.is_v6() && address.to_v6().is_v4_mapped()) {
         const auto bytes = address.to_v6().to_bytes();
-        address = asio::ip::address_v4({bytes[12], bytes[13], bytes[14], bytes[15]});
+        address = ip::address_v4({bytes[12], bytes[13], bytes[14], bytes[15]});
     }
     return address.to_string();
 }
 
 struct IpRange {
-    asio::ip::address address;
+    ip::address address;
     int prefix;
 };
 IpRange ip_range(const std::string& value) {
     const auto slash = value.find('/');
-    const auto address = asio::ip::make_address(canonical_ip(value.substr(0, slash)));
+    const auto address = ip::make_address(canonical_ip(value.substr(0, slash)));
     int prefix = address.is_v4() ? 32 : 128;
     if (slash != value.npos) {
         const auto text = std::string_view(value).substr(slash + 1);
@@ -168,7 +168,7 @@ IpRange ip_range(const std::string& value) {
     }
     return {address, prefix};
 }
-bool in_range(const asio::ip::address& address, const IpRange& range) {
+bool in_range(const ip::address& address, const IpRange& range) {
     if (address.is_v4() != range.address.is_v4()) return false;
     auto matches = [&range](const auto& left, const auto& right) {
         for (int bit = 0; bit < range.prefix; ++bit)
@@ -417,7 +417,7 @@ private:
         return {{"policy", Json::parse(query.string(0))}, {"revision", query.integer64(1)}};
     }
     bool allowlisted(const Json& policy, const std::string& ip) const {
-        const auto address = asio::ip::make_address(ip);
+        const auto address = postplus::ip::make_address(ip);
         for (const auto& entry : policy.at("allowlist"))
             if (in_range(address, ip_range(entry.get<std::string>()))) return true;
         return false;

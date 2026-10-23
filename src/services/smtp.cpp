@@ -7,7 +7,7 @@
 using namespace postplus;
 namespace {
 bool may_auth(Connection& c, const Config& cfg) {
-    return c.encrypted() || (cfg.flag("allow_insecure_auth") && c.socket().remote_endpoint().address().is_loopback());
+    return c.encrypted() || (cfg.flag("allow_insecure_auth") && c.peer_endpoint().address().is_loopback());
 }
 bool tls_available(const Config& cfg) {
     return !cfg.text("tls_certificate").empty() && !cfg.text("tls_private_key").empty();
@@ -32,7 +32,7 @@ void smtp(Connection& c, const Config& cfg, std::chrono::seconds data_timeout, b
     const auto auth_limit = static_cast<unsigned>(std::clamp(cfg.number("max_auth_attempts", 5), 1, 20));
     const auto recipient_limit = static_cast<std::size_t>(std::clamp(cfg.number("max_recipients", 100), 1, 100));
     std::string username, credential_version, sender, helo;
-    const auto peer_ip = c.socket().remote_endpoint().address().to_string();
+    const auto peer_ip = c.peer_endpoint().address().to_string();
     std::vector<std::string> recipients;
     Json recipient_routes = Json::object();
     auto reset = [&] { have_sender = false; sender.clear(); recipients.clear(); recipient_routes.clear(); };

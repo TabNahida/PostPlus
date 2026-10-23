@@ -41,7 +41,7 @@ void send(const Config& config, const Json& input) {
     if (budget < 1 || budget > 300) throw std::invalid_argument("smarthost_timeout_seconds must be 1..300");
     peer.set_deadline(std::chrono::steady_clock::now() + std::chrono::seconds(budget));
     peer.connect(host, config.number("smarthost_port",587));
-    if (mode == "none" && !peer.socket().remote_endpoint().address().is_loopback()) throw std::runtime_error("unencrypted smarthost allowed only on loopback");
+    if (mode == "none" && !peer.peer_endpoint().address().is_loopback()) throw std::runtime_error("unencrypted smarthost allowed only on loopback");
     if (mode == "implicit") peer.start_tls_client(host);
     reply(peer,220);
     peer.write("EHLO " + config.mail_hostname() + "\r\n");

@@ -1,5 +1,6 @@
 #pragma once
 #include <postplus/core.hpp>
+#include <postplus/ip.hpp>
 #include <stdexcept>
 
 namespace postplus {
@@ -14,7 +15,7 @@ public:
 // cannot select a resolver, URL, port, deadline or transport.
 using DnsTransport=std::function<std::vector<unsigned char>(
     const std::vector<unsigned char>&,std::chrono::steady_clock::time_point)>;
-using DnsConnect=std::function<bool(const asio::ip::address&,int,
+using DnsConnect=std::function<bool(const ip::address&,int,
     std::chrono::steady_clock::time_point)>;
 struct DnsOptions {
     std::chrono::seconds timeout{10};
@@ -40,7 +41,7 @@ public:
 private:
     DnsOptions options_;
 };
-bool is_public_mail_address(const asio::ip::address& address);
+bool is_public_mail_address(const ip::address& address);
 bool valid_public_dns_name(std::string_view name);
 // Recommendations use saved server settings. Optional expected public DNS
 // values are diagnostic drafts only and never change the configuration.

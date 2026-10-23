@@ -143,7 +143,7 @@ void portal_dns(Json& result,const Config& config,const std::string& domain,cons
             const auto lookup=DnsResolver(*options).lookup(hostname,pair.second,deadline);item["observed"]=lookup.values;
             bool matched=!lookup.values.empty(),public_only=true;
             for(const auto& observed:lookup.values) {
-                std::error_code error;const auto address=asio::ip::make_address(observed,error);
+                std::error_code error;const auto address=ip::make_address(observed,error);
                 public_only=public_only && !error && is_public_mail_address(address);
                 matched=matched && (value.empty() || observed==value);
             }

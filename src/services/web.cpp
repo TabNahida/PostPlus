@@ -69,7 +69,7 @@ std::string portal_host(const HttpRequest& request) {
         if (end == std::string::npos) throw ApiError(400, "Invalid Host header.", 0, "invalid_host");
         host = authority.substr(1, end - 1);
         std::error_code error;
-        const auto address = asio::ip::make_address(host, error);
+        const auto address = ip::make_address(host, error);
         if (error || !address.is_v6()) throw ApiError(400, "Invalid Host header.", 0, "invalid_host");
         host = address.to_string();
         if (end + 1 < authority.size()) {
@@ -99,7 +99,7 @@ std::string portal_host(const HttpRequest& request) {
 bool loopback_host(const std::string& host) {
     if (host == "localhost") return true;
     std::error_code error;
-    const auto address = asio::ip::make_address(host, error);
+    const auto address = ip::make_address(host, error);
     return !error && address.is_loopback();
 }
 

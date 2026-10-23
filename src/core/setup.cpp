@@ -4,8 +4,7 @@
 #include <postplus/acme.hpp>
 #include <postplus/dns.hpp>
 #include <postplus/dkim.hpp>
-#include <asio/ssl.hpp>
-#include <openssl/ssl.h>
+#include <postplus/tls.hpp>
 #include <algorithm>
 #include <atomic>
 #include <cerrno>
@@ -211,7 +210,7 @@ Config validate_input(const Json& input, const Json& defaults, const SetupOption
         throw SetupError("weak_password", "The administrator password must contain at least 8 Unicode characters.");
     const auto bind = trim(text_field(input, "bind", "127.0.0.1", 128));
     std::error_code address_error;
-    const auto address = asio::ip::make_address(bind, address_error);
+    const auto address = ip::make_address(bind, address_error);
     if (address_error) throw SetupError("invalid_bind", "The listening address must be an IPv4 or IPv6 address.");
     values["bind"] = bind;
     values["admin_bind"] = trim(text_field(input,"admin_bind",defaults.value("admin_bind",std::string("127.0.0.1")),128));
@@ -230,11 +229,7 @@ Config validate_input(const Json& input, const Json& defaults, const SetupOption
         values["tls_certificate"] = absolute_field(certificate, parent).string();
         values["tls_private_key"] = absolute_field(key, parent).string();
         try {
-            asio::ssl::context tls(asio::ssl::context::tls_server);
-            tls.set_password_callback([](std::size_t, asio::ssl::context::password_purpose) { return std::string{}; });
-            tls.use_certificate_chain_file(config.text("tls_certificate"));
-            tls.use_private_key_file(config.text("tls_private_key"), asio::ssl::context::pem);
-            if (SSL_CTX_check_private_key(tls.native_handle()) != 1) throw std::runtime_error("TLS key mismatch");
+            (void)load_tls_certificate_pair(config.text("tls_certificate"),config.text("tls_private_key"));
         } catch (const std::exception&) { throw SetupError("invalid_tls", "TLS files must be readable PEM files with a matching, unencrypted private key."); }
     }
     const auto data = trim(text_field(input, "data_dir", defaults.at("data_dir").get<std::string>()));
@@ -262,7 +257,6 @@ Config validate_input(const Json& input, const Json& defaults, const SetupOption
         throw SetupError("setup_port_conflict", "The authentication service cannot use the active setup page port.");
     // Catch occupied or privileged ports while the user can still correct the
     // form. The supervisor checks again immediately before starting services.
-    asio::io_context probe_io;
     for (const auto& entry : defaults.at("ports").items()) {
         const auto& service = entry.key();
         const int port = service == "delivery_lock" ? values.at("delivery_lock_port").get<int>() : config.port(service);
@@ -271,21 +265,15 @@ Config validate_input(const Json& input, const Json& defaults, const SetupOption
         if (port == options.port) continue; // Released when setup completes.
         const bool internal = service == "auth" || service == "storage" || service == "filter" || service == "transfer" || service == "delivery_lock";
         std::error_code port_error;
-        tcp::acceptor probe(probe_io);
         auto listen_address=address;
         if (service=="admin") {
-            listen_address=asio::ip::make_address(config.text("admin_bind"),port_error);
+            listen_address=ip::make_address(config.text("admin_bind"),port_error);
             if (port_error) throw SetupError("invalid_bind","The administration listening address must be an IPv4 or IPv6 address.");
         }
-        const tcp::endpoint endpoint(internal ? asio::ip::address(asio::ip::address_v4::loopback()) : listen_address,
+        const tcp::endpoint endpoint(internal ? ip::address(ip::address_v4::loopback()) : listen_address,
             static_cast<unsigned short>(port));
-        probe.open(endpoint.protocol(), port_error);
-#ifndef _WIN32
-        if (!port_error) probe.set_option(tcp::acceptor::reuse_address(true), port_error);
-#endif
-        if (!port_error) probe.bind(endpoint, port_error);
-        if (!port_error) probe.listen(asio::socket_base::max_listen_connections, port_error);
-        if (port_error) throw SetupError("port_unavailable", "The " + service + " port is unavailable. Choose another port or check listening permissions.");
+        try { SocketListener probe(endpoint); }
+        catch (const std::exception&) { throw SetupError("port_unavailable", "The " + service + " port is unavailable. Choose another port or check listening permissions."); }
     }
     for (const auto* field : {"smarthost_host", "smarthost_username", "smarthost_password_env", "clamav_host"})
         values[field] = trim(text_field(input, field, defaults.at(field).get<std::string>(), 254));
@@ -330,13 +318,13 @@ bool run_setup(const SetupOptions& options, SetupProvision provision) {
     }
     const auto defaults = setup_defaults(options);
     const auto token = random_hex(32);
-    const auto address = asio::ip::make_address(options.bind);
+    const auto address = ip::make_address(options.bind);
     const bool local=address.is_loopback(), https=!options.tls_certificate.empty();
     if(https!=!options.tls_private_key.empty()) throw std::invalid_argument("provide both setup TLS certificate and private key");
     if(address.is_unspecified() && options.host.empty()) throw std::invalid_argument("--setup-host is required with a wildcard --setup-bind");
     std::string host=options.host.empty()?address.to_string():lower(options.host);
     std::error_code host_error;
-    const auto host_address=asio::ip::make_address(host,host_error);
+    const auto host_address=ip::make_address(host,host_error);
     if(host_error && (host.size()>253 || !valid_address("postmaster@"+host))) throw std::invalid_argument("invalid --setup-host; provide a hostname without a scheme, port, or path");
     if(!host_error && host_address.is_unspecified()) throw std::invalid_argument("--setup-host must identify a reachable address");
     if(!host_error && host_address.is_v6()) host="["+host+"]";
@@ -376,10 +364,7 @@ bool run_setup(const SetupOptions& options, SetupProvision provision) {
     if(https) {
         listener.values["tls_certificate"]=options.tls_certificate.string();
         listener.values["tls_private_key"]=options.tls_private_key.string();
-        asio::ssl::context tls(asio::ssl::context::tls_server);
-        tls.use_certificate_chain_file(options.tls_certificate.string());
-        tls.use_private_key_file(options.tls_private_key.string(),asio::ssl::context::pem);
-        if(SSL_CTX_check_private_key(tls.native_handle())!=1) throw std::invalid_argument("setup TLS private key does not match the certificate");
+        (void)load_tls_certificate_pair(options.tls_certificate.string(),options.tls_private_key.string());
     }
     auto preflight = [&](const HttpRequest& request) -> std::optional<HttpResponse> {
         const auto host = lower(header(request, "host"));

@@ -1,9 +1,13 @@
 #include <postplus/domain_tls.hpp>
 #include <postplus/settings.hpp>
 #include <asio/ssl.hpp>
+#include <asio/ip/tcp.hpp>
+#include <asio/read.hpp>
+#include <asio/write.hpp>
 #include <openssl/pem.h>
 #include <openssl/x509v3.h>
 #include <fstream>
+#include <future>
 #include <iostream>
 #include <thread>
 
@@ -40,24 +44,66 @@ Json certificate(const fs::path& directory,const std::string& hostname,long dura
     save(cert_path,false);save(key_path,true);
     return {{"tls_certificate",cert_path.string()},{"tls_private_key",key_path.string()}};
 }
-std::string peer_hostname(const Config& config,const std::string& requested,bool expected_failure=false) {
-    asio::io_context io;tcp::acceptor listener(io,{asio::ip::address_v4::loopback(),0});
+std::string peer_hostname(const Config& config,const std::string& requested,bool expected_failure=false,int polling=0) {
+    asio::io_context io;SocketListener listener({ip::address_v4::loopback(),0});
     const auto endpoint=listener.local_endpoint();std::exception_ptr server_error;
-    std::thread server([&]{try{Connection connection(std::chrono::seconds(5));listener.accept(connection.socket());connection.start_tls_server(config);connection.write("ok\r\n");}catch(...){server_error=std::current_exception();}});
+    std::thread server([&]{try{
+        Connection connection(std::chrono::seconds(5));listener.accept(connection);connection.start_tls_server(config);
+        for(int i=0;i<3 && polling;++i) {
+            if(polling==1)check(!connection.wait_readable(std::chrono::milliseconds(10)),"empty TLS poll did not time out");
+            else {
+                connection.set_deadline(std::chrono::steady_clock::now()+std::chrono::milliseconds(10));
+                bool canceled=false;
+                try{(void)connection.read(1);}catch(const NetworkTimeout&){canceled=true;}
+                connection.set_deadline(std::nullopt);
+                check(canceled,"empty TLS read did not time out");
+            }
+        }
+        connection.write("ok\r\n");
+        if(polling) {
+            check(connection.wait_readable(std::chrono::seconds(5)),"TLS readiness did not observe client data");
+            check(connection.line()=="done","TLS readiness consumed data or cancellation damaged the connection");
+        }
+    }catch(...){server_error=std::current_exception();}});
     JoinThread join_server{server};
     std::string hostname;std::exception_ptr client_error;
     try {
         asio::ssl::context context(asio::ssl::context::tls_client);context.set_verify_mode(asio::ssl::verify_none);
-        asio::ssl::stream<tcp::socket> client(io,context);client.lowest_layer().connect(endpoint);
+        asio::ssl::stream<asio::ip::tcp::socket> client(io,context);
+        client.lowest_layer().connect({asio::ip::make_address(endpoint.address().to_string()),endpoint.port()});
         if(!requested.empty())check(SSL_set_tlsext_host_name(client.native_handle(),requested.c_str())==1,"cannot set SNI fixture");
         client.handshake(asio::ssl::stream_base::client);
         Owned<X509,X509_free> peer(SSL_get1_peer_certificate(client.native_handle()),X509_free);check(static_cast<bool>(peer),"server did not supply a certificate");
         char name[256]{};check(X509_NAME_get_text_by_NID(X509_get_subject_name(peer.get()),NID_commonName,name,sizeof(name))>0,"peer certificate name missing");hostname=name;
         std::array<char,4> response{};asio::read(client,asio::buffer(response));check(std::string(response.data(),response.size())=="ok\r\n","TLS session did not transfer data");
+        if(polling)asio::write(client,asio::buffer(std::string("done\r\n")));
     }catch(...){client_error=std::current_exception();}
     server.join();
     if(expected_failure){check(client_error && server_error,"unreadable configured SNI certificate must fail the handshake");return {};}
     if(server_error)std::rethrow_exception(server_error);if(client_error)std::rethrow_exception(client_error);return hostname;
+}
+void readiness_pin(const Config& config,const std::string& pinned,bool accepted) {
+    SocketListener listener({ip::address_v4::loopback(),0});std::exception_ptr server_error;
+    std::thread server([&]{try{
+        Connection connection(std::chrono::seconds(5));listener.accept(connection);
+        connection.start_tls_server(config);connection.write("ok\r\n");
+    }catch(...){server_error=std::current_exception();}});
+    JoinThread join_server{server};
+    bool client_ok=false;
+    try {
+        Connection client(std::chrono::seconds(5));client.connect(listener.local_endpoint());
+        client.start_tls_pinned(pinned);client_ok=client.line()=="ok";
+    }catch(const std::exception&){}
+    server.join();
+    check(client_ok==accepted,"readiness pin did not enforce the exact configured leaf");
+    if(accepted && server_error)std::rethrow_exception(server_error);
+}
+void replace_fixture(const std::string& target,const std::string& source) {
+    const auto modified=fs::last_write_time(target);
+    std::ifstream input(source,std::ios::binary);check(input.good(),"cannot read replacement TLS fixture");
+    write(target,{std::istreambuf_iterator<char>(input),std::istreambuf_iterator<char>()});
+    // Make invalidation deterministic even on filesystems with coarse mtimes.
+    fs::last_write_time(target,modified+std::chrono::seconds(1));
 }
 }
 int main(){try {
@@ -71,7 +117,36 @@ int main(){try {
     auto missing=network;missing.values["domain_tls"]["inbox.example.net"]["tls_private_key"]=(directory/"missing.key").string();
     peer_hostname(missing,"inbox.example.net",true);
     check(peer_hostname(missing,"unknown.example.org")=="mail.example.com","broken unused domain certificate affected another hostname");
+    fs::copy_file(selected.at("tls_private_key").get<std::string>(),directory/"missing.key");
+    check(peer_hostname(missing,"inbox.example.net")=="inbox.example.net","a repaired optional certificate remained negatively cached");
+    auto concurrent_primary=std::async(std::launch::async,[&]{return peer_hostname(network,"");});
+    auto concurrent_selected=std::async(std::launch::async,[&]{return peer_hostname(network,"inbox.example.net");});
+    check(concurrent_primary.get()=="mail.example.com" && concurrent_selected.get()=="inbox.example.net","shared SNI context mixed connection state");
     std::cout<<"PASS actual TLS handshakes select SNI certificates, retain the no-SNI default and isolate broken domain credentials\n";
+    peer_hostname(network,"inbox.example.net",false,1);
+    peer_hostname(network,"inbox.example.net",false,2);
+    readiness_pin(network,fallback.at("tls_certificate").get<std::string>(),true);
+    readiness_pin(network,selected.at("tls_certificate").get<std::string>(),false);
+    Config expired_probe;expired_probe.values=certificate(directory,"mail.example.com",-60);
+    readiness_pin(expired_probe,expired_probe.text("tls_certificate"),true);
+    std::cout<<"PASS TLS polling/read cancellation retains usable connections and readiness checks pin the exact leaf\n";
+
+    Config cached;cached.values=certificate(directory,"cached.example");
+    // Exercise repeated preparations through observable certificate and data
+    // transfer behavior. Ticket resumption depends on OpenSSL session policy
+    // and shutdown behavior, so it is not a portable context-cache assertion.
+    for(int attempt=0;attempt<2;++attempt)
+        check(peer_hostname(cached,"")=="cached.example","repeated TLS preparation changed the default certificate");
+    const auto rotated=certificate(directory,"rotated.example");
+    replace_fixture(cached.text("tls_private_key"),rotated.at("tls_private_key").get<std::string>());
+    peer_hostname(cached,"",true);
+    replace_fixture(cached.text("tls_certificate"),rotated.at("tls_certificate").get<std::string>());
+    check(peer_hostname(cached,"")=="rotated.example","same-path key rotation did not replace the cached context");
+    replace_fixture(cached.text("tls_certificate"),fallback.at("tls_certificate").get<std::string>());
+    peer_hostname(cached,"",true);
+    replace_fixture(cached.text("tls_private_key"),fallback.at("tls_private_key").get<std::string>());
+    check(peer_hostname(cached,"")=="mail.example.com","same-path certificate rotation did not replace the cached context");
+    std::cout<<"PASS repeated TLS preparation, key/certificate metadata invalidation and failed-pair recovery\n";
 
     const auto path=directory/"config.json",token=directory/"token";write(token,std::string(64,'b'));
     Json values={{"domain","example.com"},{"mail_domains",Json::array({"example.com","example.net"})},

@@ -1,6 +1,5 @@
 #include <postplus/acme.hpp>
 #include <postplus/trust.hpp>
-#include <asio/ssl.hpp>
 #include <openssl/bn.h>
 #include <openssl/core_names.h>
 #include <openssl/ecdsa.h>
@@ -293,11 +292,10 @@ Key account_key(const fs::path& directory) {
 enum class NetworkStage { connecting, tls, exchange };
 [[noreturn]] void network_failure(const std::exception& error,NetworkStage stage,Clock::time_point deadline) {
     const auto* system=dynamic_cast<const std::system_error*>(&error);
-    if(Clock::now()>=deadline || (system && system->code()==asio::error::timed_out) ||
+    if(Clock::now()>=deadline || (system && system->code()==std::errc::timed_out) ||
        std::string_view(error.what())=="connection timed out" || std::string_view(error.what())=="transaction timed out")
         throw AcmeError("timeout","The certificate authority connection timed out. Check DNS resolution and outbound HTTPS (TCP port 443), then retry.",504);
-    if(system && (system->code()==asio::error::host_not_found || system->code()==asio::error::host_not_found_try_again ||
-                  system->code()==asio::error::no_data || system->code()==asio::error::no_recovery))
+    if(dynamic_cast<const NetworkDnsError*>(&error))
         throw AcmeError("ca_dns_failed","Could not resolve the Let's Encrypt server. Check this server's DNS resolver and Internet connection.",502);
     if(stage==NetworkStage::connecting)
         throw AcmeError("ca_connection_failed","Could not connect to Let's Encrypt. Allow outbound HTTPS (TCP port 443) and check the server's Internet connection.",502);
@@ -383,7 +381,7 @@ AcmeHttpResponse native_http(const std::string& method,const std::string& url,
     // deadline and size cap; TLS truncation is not treated as a clean EOF.
     while(result.body.size()<=max_response) {
         try {result.body+=connection.read(1);}
-        catch(const std::system_error& error_value) {if(error_value.code()==asio::error::eof) return result;throw;}
+        catch(const NetworkEof&) {return result;}
     }
     throw AcmeError("invalid_ca_response","Certificate authority response exceeded its size limit.",502);
 }
@@ -493,33 +491,33 @@ private:
 
 class ChallengeServer {
 public:
-    ChallengeServer(const AcmeOptions& options,HttpHandler handler):handler_(std::move(handler)),acceptor_(io_) {
+    ChallengeServer(const AcmeOptions& options,HttpHandler handler):handler_(std::move(handler)) {
         std::error_code error;
-        const auto address=asio::ip::make_address(options.challenge_bind,error);
+        const auto address=ip::make_address(options.challenge_bind,error);
         if(error) throw AcmeError("http_challenge_bind","Invalid HTTP challenge listening address.");
-        acceptor_.open(address.is_v6()?tcp::v6():tcp::v4(),error);
-#ifndef _WIN32
-        // Sequential staging/production requests reuse the same public port.
-        // POSIX TIME_WAIT must not prevent the next temporary listener bind.
-        if(!error) acceptor_.set_option(tcp::acceptor::reuse_address(true),error);
-#endif
-        if(!error) acceptor_.bind({address,static_cast<unsigned short>(options.challenge_port)},error);
-        if(!error) acceptor_.listen(asio::socket_base::max_listen_connections,error);
-        if(error) throw AcmeError("http_challenge_bind","Cannot listen for HTTP-01 on port "+std::to_string(options.challenge_port)+". Allow the port or configure your reverse proxy to forward the challenge route.",409);
-        accept();thread_=std::thread([this]{io_.run();});
+        try {listener_=std::make_unique<SocketListener>(tcp::endpoint{address,static_cast<unsigned short>(options.challenge_port)});}
+        catch(const std::exception&) {throw AcmeError("http_challenge_bind","Cannot listen for HTTP-01 on port "+std::to_string(options.challenge_port)+". Allow the port or configure your reverse proxy to forward the challenge route.",409);}
+        thread_=std::thread([this]{accept();});
     }
     ~ChallengeServer(){
-        asio::post(io_,[this]{std::error_code ignored;acceptor_.close(ignored);});
+        stopping_=true;
         if(thread_.joinable()) thread_.join();
+        try {listener_->close();} catch(const std::exception&) {}
         workers_.join();
     }
 private:
     void accept() {
-        auto connection=std::make_shared<Connection>(std::chrono::seconds(3));
-        acceptor_.async_accept(connection->socket(),[this,connection](std::error_code error){
-            if(!error && active_.load()<8) {
+        while(!stopping_) {
+            auto connection=std::make_shared<Connection>(std::chrono::seconds(3));
+            try {listener_->accept(*connection,std::chrono::milliseconds(100));}
+            catch(const NetworkTimeout&) {continue;}
+            catch(const std::exception&) {
+                if(!stopping_) std::this_thread::sleep_for(std::chrono::milliseconds(100));
+                continue;
+            }
+            if(!stopping_ && active_.load()<8) {
                 ++active_;
-                asio::post(workers_,[this,connection]{
+                workers_.post([this,connection]{
                     try {
                         connection->set_deadline(Clock::now()+std::chrono::seconds(3));
                         const auto line=connection->line(2048);
@@ -545,15 +543,14 @@ private:
                     --active_;
                 });
             }
-            if(acceptor_.is_open()) accept();
-        });
+        }
     }
     HttpHandler handler_;
-    asio::io_context io_;
-    tcp::acceptor acceptor_;
-    asio::thread_pool workers_{8};
+    std::unique_ptr<SocketListener> listener_;
+    WorkerPool workers_{8};
     std::thread thread_;
     std::atomic<int> active_{0};
+    std::atomic<bool> stopping_{false};
 };
 
 std::string certificate_expiry(const std::string& pem,EVP_PKEY* key,const std::string& domain,bool staging,const fs::path& test_ca) {
@@ -829,7 +826,7 @@ Json AcmeManager::start(const Json& request) {
         throw AcmeError("terms_required","Read the certificate authority terms and explicitly agree before requesting a certificate.");
     Json normalized=request;
     const auto domain=lower(request_text(request,"domain",253));
-    std::error_code address_error;(void)asio::ip::make_address(domain,address_error);
+    std::error_code address_error;(void)ip::make_address(domain,address_error);
     if(!dns_name(domain) || domain.find('.')==std::string::npos || !address_error || domain.find('*')!=std::string::npos)
         throw AcmeError("invalid_domain","Use a fully qualified ASCII DNS name you control. Wildcards, IP addresses and local-only names are not supported.");
     const auto email=request_text(request,"email",254);

@@ -465,11 +465,11 @@ bool wildcard(std::string pattern, const std::string& value) {
 }
 void imap(Connection& c, const Config& cfg) {
     std::string user, credential_version, selected_folder = "INBOX"; bool selected = false, readonly = false;
-    const auto peer_ip = c.socket().remote_endpoint().address().to_string();
+    const auto peer_ip = c.peer_endpoint().address().to_string();
     unsigned auth_failures = 0;
     const auto auth_limit = static_cast<unsigned>(std::clamp(cfg.number("max_auth_attempts", 5), 1, 20));
     std::vector<Json> messages; std::set<std::string> deleted,recent;
-    auto allowed = [&] { return c.encrypted() || (cfg.flag("allow_insecure_auth") && c.socket().remote_endpoint().address().is_loopback()); };
+    auto allowed = [&] { return c.encrypted() || (cfg.flag("allow_insecure_auth") && c.peer_endpoint().address().is_loopback()); };
     auto tls = [&] { return !cfg.text("tls_certificate").empty() && !cfg.text("tls_private_key").empty(); };
     auto capability = [&] {
         std::string value = "IMAP4rev1 UIDPLUS MOVE NAMESPACE ID IDLE UNSELECT LITERAL- LIST-EXTENDED SPECIAL-USE";

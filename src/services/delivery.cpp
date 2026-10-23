@@ -61,13 +61,9 @@ int main(int argc, char** argv) {
         std::signal(SIGINT,stop); std::signal(SIGTERM,stop);
         // Exclusive OS lock released automatically on crash; prevents two consumers.
         std::filesystem::create_directories(config.text("data_dir"));
-        asio::io_context lock_io;
-        tcp::acceptor worker_lock(lock_io);
-        worker_lock.open(tcp::v4());
         const int lock_port = config.number("delivery_lock_port",18085);
         if (lock_port < 1 || lock_port > 65535) throw std::invalid_argument("invalid delivery_lock_port");
-        worker_lock.bind({asio::ip::address_v4::loopback(),static_cast<unsigned short>(lock_port)});
-        worker_lock.listen(1);
+        SocketListener worker_lock({ip::address_v4::loopback(),static_cast<unsigned short>(lock_port)});
         log("delivery","queue worker started");
         while (!stopping && !process_stop_requested()) {
             try {

@@ -7,6 +7,14 @@ set_warnings("allextra")
 set_rundir("$(projectdir)")
 add_rules("mode.debug", "mode.release")
 
+add_repositories("tab-repo https://github.com/TabNahida/repo-xmake.git")
+add_requires("pace 0.1.1", {system = false, configs = {
+    tls = true, dns = true, http1 = true, websocket = false, shared = false
+}})
+-- PACE and PostPlus must share one pinned static OpenSSL implementation.
+add_requireconfs("pace.openssl3", {override = true, version = "3.6.1",
+    system = false, configs = {shared = false}})
+add_requireconfs("pace.c-ares", {override = true, system = false, configs = {shared = false}})
 add_requires("asio 1.34.2", {system = false})
 add_requires("nlohmann_json 3.12.0", {system = false})
 -- Ship OpenSSL and SQLite in the executables; packages must not depend on a
@@ -20,12 +28,11 @@ target("postplus-core")
     add_files("src/core/*.cpp")
     add_headerfiles("include/(postplus/*.hpp)")
     add_includedirs("include", {public = true})
-    add_defines("ASIO_STANDALONE", "ASIO_NO_DEPRECATED", {public = true})
     add_defines('POSTPLUS_VERSION="0.5.2"', {public = true})
-    add_packages("asio", "nlohmann_json", "openssl3", "sqlite3", "zlib", {public = true})
+    add_packages("pace", "nlohmann_json", "openssl3", "sqlite3", "zlib", {public = true})
     if is_plat("windows") then
         add_defines("_WIN32_WINNT=0x0A00", "WIN32_LEAN_AND_MEAN", "NOMINMAX", "_CRT_SECURE_NO_WARNINGS", {public = true})
-        add_syslinks("ws2_32", "mswsock", "advapi32", "crypt32", {public = true})
+        add_syslinks("ws2_32", "mswsock", "advapi32", "crypt32", "iphlpapi", {public = true})
         add_cxflags("/utf-8", {tools = {"cl", "clang_cl"}, public = true})
     else
         add_syslinks("pthread", {public = true})
@@ -111,6 +118,12 @@ target("postplus-tests")
     add_deps("postplus-core")
     add_tests("unit")
 
+target("postplus-network-tests")
+    set_kind("binary")
+    add_files("tests/network_test.cpp")
+    add_deps("postplus-core")
+    add_tests("network")
+
 target("postplus-mime-tests")
     set_kind("binary")
     add_files("tests/mime_test.cpp")
@@ -126,6 +139,9 @@ target("postplus-domains-tests")
 target("postplus-domain-tls-tests")
     set_kind("binary")
     add_files("tests/domain_tls_test.cpp")
+    -- Independent peer implementation checks interoperability with PACE.
+    add_packages("asio")
+    add_defines("ASIO_STANDALONE", "ASIO_NO_DEPRECATED")
     add_deps("postplus-core")
     add_tests("domain-tls")
 

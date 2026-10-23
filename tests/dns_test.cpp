@@ -7,6 +7,51 @@ using namespace postplus;
 namespace {
 using Bytes=std::vector<unsigned char>;
 void check(bool value,const char* message){if(!value)throw std::runtime_error(message);}
+void ip_values() {
+    const auto v4=ip::make_address_v4("192.0.2.129");
+    check(v4.to_bytes()==ip::address_v4::bytes_type{192,0,2,129} && v4.to_uint()==0xc0000281U &&
+          v4.to_string()=="192.0.2.129","IPv4 network-byte order or formatting changed");
+    check(ip::address{}.is_v4() && ip::address{}.is_unspecified() &&
+          ip::address(ip::address_v4::any()).is_unspecified() && ip::address(ip::address_v6::any()).is_unspecified(),
+          "default/wildcard address classification changed");
+    check(ip::address_v4::loopback().to_string()=="127.0.0.1" && ip::address_v6::loopback().to_string()=="::1" &&
+          ip::make_address("127.255.255.254").is_loopback() && ip::make_address("::1").is_loopback() &&
+          !ip::make_address("128.0.0.1").is_loopback(),"loopback address classification changed");
+    const auto v6=ip::make_address_v6("2001:0DB8:0:0:0:0:0:1");
+    check(v6.to_string()=="2001:db8::1" && v6==ip::make_address_v6("2001:db8::1") &&
+          v6.to_bytes()[0]==0x20 && v6.to_bytes()[1]==0x01 && v6.to_bytes()[15]==1,
+          "IPv6 canonicalization or network-byte order changed");
+    const auto scoped=ip::make_address_v6("fe80::1%17");
+    check(scoped.scope_id()==17 && scoped.to_string()=="fe80::1%17" &&
+          scoped!=ip::make_address_v6("fe80::1%18") && ip::make_address(scoped.to_string()).to_v6()==scoped,
+          "IPv6 scope must survive formatting, comparison and parsing");
+    const auto mapped=ip::make_address_v6("::ffff:127.0.0.1");
+    const auto mapped_bytes=mapped.to_bytes();
+    check(mapped.is_v4_mapped() && !mapped.is_loopback() &&
+          ip::address_v4({mapped_bytes[12],mapped_bytes[13],mapped_bytes[14],mapped_bytes[15]}).is_loopback() &&
+          !ip::make_address_v6("::127.0.0.1").is_v4_mapped(),"IPv4-mapped IPv6 normalization changed");
+    for(const auto& invalid:{std::string{},std::string("localhost"),std::string("127.1"),std::string("127.0.0.01"),
+            std::string("127.0.0.1:80"),std::string("[::1]"),std::string("::1%"),std::string("fe80::1%4294967296"),
+            std::string("fe80::1%1%2"),std::string("127.0.0.1\0extra",15),std::string("::1\0extra",9)}) {
+        std::error_code error;
+        (void)ip::make_address(invalid,error);
+        check(error==std::errc::invalid_argument,"malformed IP input was accepted");
+        bool rejected=false;
+        try {(void)ip::make_address(invalid);}catch(const std::system_error&){rejected=true;}
+        check(rejected,"throwing IP parser accepted malformed input");
+    }
+    std::error_code error=std::make_error_code(std::errc::address_in_use);
+    (void)ip::make_address("::1",error);check(!error,"successful IP parse retained a stale error");
+    (void)ip::make_address_v4("::1",error);check(bool(error),"IPv4 parser accepted IPv6 input");
+    (void)ip::make_address_v6("127.0.0.1",error);check(bool(error),"IPv6 parser accepted IPv4 input");
+    // CIDR boundary cases exercise the actual destination policy, not a copy of its masks.
+    for(const auto& value:{"100.63.255.255","100.128.0.0","172.15.255.255","172.32.0.0","93.184.216.34","2606:4700::1111"})
+        check(is_public_mail_address(ip::make_address(value)),"public CIDR boundary was blocked");
+    for(const auto& value:{"100.64.0.0","100.127.255.255","172.16.0.0","172.31.255.255","::ffff:93.184.216.34",
+            "::ffff:127.0.0.1","2002:5db8:d822::1","2606:4700::1111%2"})
+        check(!is_public_mail_address(ip::make_address(value)),"private/mapped/scoped address bypassed destination policy");
+    std::cout<<"PASS numeric IP parsing, canonicalization, scope IDs, mapped IPv4 and public CIDR boundaries\n";
+}
 void number(Bytes& packet,unsigned value){packet.push_back(static_cast<unsigned char>(value>>8));packet.push_back(static_cast<unsigned char>(value));}
 void name(Bytes& packet,std::string value){std::size_t begin=0;while(begin<value.size()){const auto dot=value.find('.',begin),end=dot==std::string::npos?value.size():dot;packet.push_back(static_cast<unsigned char>(end-begin));packet.insert(packet.end(),value.begin()+begin,value.begin()+end);begin=end+1;}packet.push_back(0);}
 struct Fixture {
@@ -15,7 +60,7 @@ struct Fixture {
     static Bytes txt(const std::string& value,bool split=false){Bytes data;const auto first=split?value.size()/2:value.size();data.push_back(static_cast<unsigned char>(first));data.insert(data.end(),value.begin(),value.begin()+first);if(split){data.push_back(static_cast<unsigned char>(value.size()-first));data.insert(data.end(),value.begin()+first,value.end());}return data;}
     static Bytes mx(unsigned preference,const std::string& host){Bytes data;number(data,preference);name(data,host);return data;}
     static Bytes srv(unsigned priority,unsigned weight,unsigned port,const std::string& host){Bytes data;number(data,priority);number(data,weight);number(data,port);name(data,host);return data;}
-    static Bytes address(const std::string& value){const auto parsed=asio::ip::make_address(value);if(parsed.is_v4()){const auto bytes=parsed.to_v4().to_bytes();return {bytes.begin(),bytes.end()};}const auto bytes=parsed.to_v6().to_bytes();return {bytes.begin(),bytes.end()};}
+    static Bytes address(const std::string& value){const auto parsed=ip::make_address(value);if(parsed.is_v4()){const auto bytes=parsed.to_v4().to_bytes();return {bytes.begin(),bytes.end()};}const auto bytes=parsed.to_v6().to_bytes();return {bytes.begin(),bytes.end()};}
     Bytes send(const Bytes& request,std::chrono::steady_clock::time_point deadline){
         ++requests;check(deadline>std::chrono::steady_clock::now(),"invalid DNS deadline");if(timeout)throw DnsError("dns_timeout","test timeout");
         std::size_t position=12;std::string owner;
@@ -37,6 +82,7 @@ Json request(){return {{"domain","example.com"},{"hostname","mail.example.com"},
 template<class F>void rejects(F call){try{call();}catch(const DnsError& error){check(error.code=="invalid_dns_input","wrong DNS validation code");return;}throw std::runtime_error("invalid DNS input accepted");}
 }
 int main(){try {
+    ip_values();
     Fixture fixture;
     fixture.answers[{"mail.example.com",1}]={Fixture::address("93.184.216.34")};
     fixture.answers[{"mail.example.com",28}]={Fixture::address("2606:4700::1111")};
@@ -62,7 +108,7 @@ int main(){try {
     Bytes reverse;name(reverse,"mail.example.com");fixture.answers[{"34.216.184.93.in-addr.arpa",12}]={reverse};
     fixture.answers[{"_imaps._tcp.example.com",33}]={Fixture::srv(0,1,993,"mail.example.com")};
     auto options=fixture.options();std::vector<std::pair<std::string,int>> probes;
-    options.connect=[&](const asio::ip::address& address,int port,auto deadline){check(deadline>std::chrono::steady_clock::now(),"expired TCP probe deadline");probes.emplace_back(address.to_string(),port);return port==25 || port==993;};
+    options.connect=[&](const ip::address& address,int port,auto deadline){check(deadline>std::chrono::steady_clock::now(),"expired TCP probe deadline");probes.emplace_back(address.to_string(),port);return port==25 || port==993;};
     Json diagnostic=request();diagnostic.erase("domain");diagnostic.erase("hostname");diagnostic["ipv4"]="";diagnostic["ipv6"]="";
     auto server=DnsChecker(options).check_server(config,diagnostic);
     check(record(server,"a").at("status")=="published","configured public DNS addresses stay visible without entering their expected values");

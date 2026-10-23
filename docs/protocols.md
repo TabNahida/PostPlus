@@ -1,6 +1,6 @@
 # Protocol support in PostPlus
 
-The following sections describe supported protocol operations and their limits. Each protocol service runs in its own process and uses standalone Asio through the shared connection layer. The test suite covers TLS authentication, folder discovery, listing, message retrieval and synchronization with independent Python and libcurl clients; it does not certify every mail application or optional protocol extension.
+The following sections describe supported protocol operations and their limits. Each protocol service runs in its own process and uses PACE through the shared connection layer. The test suite covers TLS authentication, folder discovery, listing, message retrieval and synchronization with independent Python and libcurl clients; it does not certify every mail application or optional protocol extension.
 
 ## Transport and authentication
 

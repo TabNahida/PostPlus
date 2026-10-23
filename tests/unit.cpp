@@ -77,14 +77,13 @@ int main() {
         rejects([&] { validate_settings(legacy,{{"rspamd_host","0.0.0.0"}}); });
         rejects([&] { validate_settings(legacy,{{"rspamd_host","scanner.example.net"}}); });
         // Exercise real TCP framing, buffered command boundaries and exact byte reads.
-        asio::io_context io;
-        tcp::acceptor acceptor(io,{tcp::v4(),0});
+        SocketListener acceptor({ip::address_v4::loopback(),0});
         const int port = acceptor.local_endpoint().port();
         std::exception_ptr failure;
         std::thread server([&] {
             try {
                 Connection peer;
-                acceptor.accept(peer.socket());
+                acceptor.accept(peer,std::chrono::seconds(5));
                 check(peer.line() == "one","line one");
                 check(peer.wait_readable(std::chrono::milliseconds(20)),"buffered input readiness");
                 check(peer.line() == "two","line two");
@@ -104,7 +103,7 @@ int main() {
         std::thread polling_server([&] {
             try {
                 Connection peer;
-                acceptor.accept(peer.socket());
+                acceptor.accept(peer,std::chrono::seconds(5));
                 check(!peer.wait_readable(std::chrono::milliseconds(30)),"idle input should time out");
                 peer.write("READY\r\n");
                 check(peer.wait_readable(std::chrono::seconds(2)),"new input readiness");

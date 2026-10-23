@@ -1,5 +1,6 @@
 #include <postplus/dns.hpp>
 #include <postplus/dkim.hpp>
+#include <pace/udp.hpp>
 #include <algorithm>
 #include <array>
 #include <charconv>
@@ -36,10 +37,10 @@ bool domain_name(std::string_view value,bool underscores=false) {
         }
         previous=character;
     }
-    std::error_code error;(void)asio::ip::make_address(value,error);
+    std::error_code error;(void)ip::make_address(value,error);
     return label && previous!='-' && error;
 }
-bool public_address(const asio::ip::address& address) {
+bool public_address(const ip::address& address) {
     if(address.is_v4()) {
         const auto bytes=address.to_v4().to_bytes();const auto a=bytes[0],b=bytes[1],c=bytes[2];
         return !(a==0 || a==10 || a==127 || a>=224 || (a==100 && b>=64 && b<=127) || (a==169 && b==254) ||
@@ -82,53 +83,52 @@ Bytes question(const std::string& name,std::uint16_t type) {
     result.insert(result.end(),{0,0,0,0});append_number(result,0);
     return result;
 }
+pace::task<Bytes> udp_query(const Bytes& request,Clock::time_point deadline) {
+    auto& io=network_executor().context();
+    pace::udp::socket socket(io,pace::address_family::ipv4);
+    NetworkDeadline timer(io,deadline,[&]{socket.close();});
+    try {
+        const auto sent=co_await socket.send_to(
+            std::string_view(reinterpret_cast<const char*>(request.data()),request.size()),{"1.1.1.1",53});
+        timer.check();
+        if(sent!=request.size())throw std::runtime_error("incomplete DNS datagram");
+        std::array<char,max_packet> buffer{};
+        for(;;) {
+            if(Clock::now()>=deadline)throw NetworkTimeout();
+            const auto received=co_await socket.receive_from(buffer);
+            timer.check();
+            // PACE's UDP API is unconnected: preserve connected-UDP source
+            // filtering before the DNS transaction/question checks run below.
+            if(received.sender.address!="1.1.1.1" || received.sender.port!=53 ||
+               received.sender.family!=pace::address_family::ipv4 || received.sender.scope_id!=0) {
+                co_await io.yield();
+                continue;
+            }
+            if(received.truncated || !received.size)throw std::runtime_error("invalid DNS datagram");
+            co_return Bytes(buffer.begin(),buffer.begin()+received.size);
+        }
+    }catch(...){if(timer.expired())throw NetworkTimeout();throw;}
+}
 Bytes native_query(const Bytes& request,Clock::time_point deadline) {
-    asio::io_context io;asio::ip::udp::socket socket(io);asio::steady_timer timer(io);
-    std::error_code error;
-    socket.open(asio::ip::udp::v4(),error);
-    if(!error) socket.connect({asio::ip::make_address_v4("1.1.1.1"),53},error);
-    if(error) throw DnsError("dns_unavailable","Cannot reach the public DNS resolver. Allow outbound UDP port 53 and retry.");
-    bool timed_out=false;
     const auto limit=std::min(deadline,Clock::now()+std::chrono::milliseconds(1500));
-    if(limit<=Clock::now()) throw DnsError("dns_timeout","The DNS check timed out. Retry after checking network access.");
-    timer.expires_at(limit);
-    timer.async_wait([&](std::error_code issue){if(!issue){timed_out=true;std::error_code ignored;socket.cancel(ignored);}});
-    std::array<unsigned char,max_packet> buffer{};std::size_t received=0;
-    socket.async_send(asio::buffer(request),[&](std::error_code issue,std::size_t count){
-        if(issue || count!=request.size()) {error=issue?issue:asio::error::message_size;timer.cancel();return;}
-        socket.async_receive(asio::buffer(buffer),[&](std::error_code failure,std::size_t size){error=failure;received=size;timer.cancel();});
-    });
-    io.run();
-    if(timed_out) throw DnsError("dns_timeout","The public DNS resolver did not answer in time. Allow outbound UDP port 53 and retry.");
-    if(error || !received) throw DnsError("dns_unavailable","Cannot read a response from the public DNS resolver. Check network access and retry.");
-    return {buffer.begin(),buffer.begin()+received};
+    try {return network_executor().run(udp_query(request,limit));}
+    catch(const NetworkTimeout&){throw DnsError("dns_timeout","The public DNS resolver did not answer in time. Allow outbound UDP port 53 and retry.");}
+    catch(const std::exception&){throw DnsError("dns_unavailable","Cannot read a response from the public DNS resolver. Check network access and retry.");}
 }
 Bytes native_tcp_query(const Bytes& request,Clock::time_point deadline) {
-    asio::io_context io;tcp::socket socket(io);asio::steady_timer timer(io);
-    std::error_code error;bool timed_out=false;Bytes response;
     const auto limit=std::min(deadline,Clock::now()+std::chrono::seconds(3));
-    if(limit<=Clock::now())throw DnsError("dns_timeout","The DNS lookup timed out.");
-    timer.expires_at(limit);
-    timer.async_wait([&](std::error_code issue){if(!issue){timed_out=true;std::error_code ignored;socket.cancel(ignored);socket.close(ignored);}});
-    Bytes framed;append_number(framed,static_cast<std::uint16_t>(request.size()));framed.insert(framed.end(),request.begin(),request.end());
-    std::array<unsigned char,2> prefix{};
-    socket.async_connect({asio::ip::make_address_v4("1.1.1.1"),53},[&](std::error_code issue){
-        if(issue){error=issue;timer.cancel();return;}
-        asio::async_write(socket,asio::buffer(framed),[&](std::error_code failure,std::size_t){
-            if(failure){error=failure;timer.cancel();return;}
-            asio::async_read(socket,asio::buffer(prefix),[&](std::error_code failure,std::size_t){
-                if(failure){error=failure;timer.cancel();return;}
-                const auto size=static_cast<std::size_t>((prefix[0]<<8)|prefix[1]);
-                if(size<12 || size>max_packet){error=asio::error::message_size;timer.cancel();return;}
-                response.resize(size);
-                asio::async_read(socket,asio::buffer(response),[&](std::error_code failure,std::size_t){error=failure;timer.cancel();});
-            });
-        });
-    });
-    io.run();
-    if(timed_out)throw DnsError("dns_timeout","The public DNS resolver did not answer over TCP in time.");
-    if(error || response.empty())throw DnsError("dns_unavailable","Cannot read a TCP DNS response. Allow outbound TCP port 53 and retry.");
-    return response;
+    try {
+        Connection socket(std::chrono::seconds(3));socket.set_deadline(limit);
+        socket.connect({ip::make_address_v4("1.1.1.1"),53});
+        Bytes framed;append_number(framed,static_cast<std::uint16_t>(request.size()));framed.insert(framed.end(),request.begin(),request.end());
+        socket.write(std::string_view(reinterpret_cast<const char*>(framed.data()),framed.size()));
+        const auto prefix=socket.read(2);
+        const auto size=static_cast<std::size_t>((static_cast<unsigned char>(prefix[0])<<8)|static_cast<unsigned char>(prefix[1]));
+        if(size<12 || size>max_packet)throw std::runtime_error("invalid TCP DNS length");
+        const auto response=socket.read(size);
+        return {response.begin(),response.end()};
+    }catch(const NetworkTimeout&){throw DnsError("dns_timeout","The public DNS resolver did not answer over TCP in time.");}
+    catch(const std::exception&){throw DnsError("dns_unavailable","Cannot read a TCP DNS response. Allow outbound TCP port 53 and retry.");}
 }
 std::string read_name(const Bytes& packet,std::size_t& offset) {
     std::string result;std::size_t position=offset;bool jumped=false;
@@ -176,9 +176,9 @@ DnsLookup parse(const Bytes& packet,const Bytes& request,const std::string& name
         const auto end=position+size;std::string value;
         if(index<answers && rr_class==1) {
             if(rr_type==type_a) {
-                if(size!=4)malformed();asio::ip::address_v4::bytes_type bytes{};std::copy_n(packet.begin()+position,4,bytes.begin());value=asio::ip::address_v4(bytes).to_string();
+                if(size!=4)malformed();ip::address_v4::bytes_type bytes{};std::copy_n(packet.begin()+position,4,bytes.begin());value=ip::address_v4(bytes).to_string();
             } else if(rr_type==type_aaaa) {
-                if(size!=16)malformed();asio::ip::address_v6::bytes_type bytes{};std::copy_n(packet.begin()+position,16,bytes.begin());value=asio::ip::address_v6(bytes).to_string();
+                if(size!=16)malformed();ip::address_v6::bytes_type bytes{};std::copy_n(packet.begin()+position,16,bytes.begin());value=ip::address_v6(bytes).to_string();
             } else if(rr_type==type_cname || rr_type==type_ptr || rr_type==type_mx || rr_type==type_srv) {
                 auto cursor=position;
                 if(rr_type==type_mx) {if(size<3)malformed();value=std::to_string(number(packet,cursor))+" ";cursor+=2;}
@@ -271,7 +271,7 @@ std::string first_version(const std::string& record) {
     if(equal==std::string::npos || lower(trim(first.substr(0,equal)))!="v")return {};
     return lower(trim(first.substr(equal+1)));
 }
-std::string reverse_name(const asio::ip::address& address) {
+std::string reverse_name(const ip::address& address) {
     if(address.is_v4()) {
         const auto bytes=address.to_v4().to_bytes();std::string value;
         for(int index=3;index>=0;--index)value+=std::to_string(bytes[index])+".";
@@ -282,13 +282,14 @@ std::string reverse_name(const asio::ip::address& address) {
     for(int index=15;index>=0;--index){value+=hex[bytes[index]&15];value+='.';value+=hex[bytes[index]>>4];value+='.';}
     return value+"ip6.arpa";
 }
-bool native_connect(const asio::ip::address& address,int port,Clock::time_point deadline) {
+bool native_connect(const ip::address& address,int port,Clock::time_point deadline) {
     if(Clock::now()>=deadline)return false;
-    asio::io_context io;tcp::socket socket(io);asio::steady_timer timer(io);bool connected=false;
-    timer.expires_at(std::min(deadline,Clock::now()+std::chrono::milliseconds(1200)));
-    timer.async_wait([&](std::error_code error){if(!error){std::error_code ignored;socket.cancel(ignored);socket.close(ignored);}});
-    socket.async_connect({address,static_cast<unsigned short>(port)},[&](std::error_code error){connected=!error;timer.cancel();});
-    io.run();return connected;
+    try {
+        Connection socket(std::chrono::seconds(2));
+        socket.set_deadline(std::min(deadline,Clock::now()+std::chrono::milliseconds(1200)));
+        socket.connect({address,static_cast<unsigned short>(port)});
+        return true;
+    }catch(const std::exception&){return false;}
 }
 Json expected_input(const Config& config,const Json& input) {
     if(!input.is_object())throw DnsError("invalid_dns_input","DNS checks require a JSON object.");
@@ -301,7 +302,7 @@ Json expected_input(const Config& config,const Json& input) {
     for(const auto& key:allowed)if(key!="domain" && input.contains(key))request[key]=field(input,key,(key=="dkim_name"?253:key=="ipv4" || key=="ipv6"?64:4096));
     for(const auto* key:{"ipv4","ipv6"}) {
         const auto text=request.at(key).get<std::string>();if(text.empty())continue;
-        std::error_code error;const auto address=asio::ip::make_address(text,error);
+        std::error_code error;const auto address=ip::make_address(text,error);
         if(error || !public_address(address) || (std::string_view(key)=="ipv4"?!address.is_v4():!address.is_v6()))
             throw DnsError("invalid_dns_input","Enter public IPv4 and IPv6 addresses in their matching fields.");
         request[key]=address.to_string();
@@ -328,7 +329,7 @@ Json expected_input(const Config& config,const Json& input) {
 }
 }
 
-bool is_public_mail_address(const asio::ip::address& address){return public_address(address);}
+bool is_public_mail_address(const ip::address& address){return public_address(address);}
 bool valid_public_dns_name(std::string_view name){return domain_name(name);}
 Json dns_recommendations(const Config& config,const Json& input) {
     auto expected=expected_input(config,input);const auto domain=expected.at("domain").get<std::string>(),hostname=expected.at("hostname").get<std::string>();
@@ -346,7 +347,7 @@ Json dns_recommendations(const Config& config,const Json& input) {
     bool reverse=false;
     for(const auto& pair:{std::pair{"ipv4","ptr4"},std::pair{"ipv6","ptr6"}}) {
         const auto value=expected.at(pair.first).get<std::string>();if(value.empty())continue;
-        record(pair.second,reverse_name(asio::ip::make_address(value)),"PTR",hostname+".",config.outbound_mode()=="direct");reverse=true;
+        record(pair.second,reverse_name(ip::make_address(value)),"PTR",hostname+".",config.outbound_mode()=="direct");reverse=true;
     }
     if(!reverse)record("ptr","","PTR",hostname+".",config.outbound_mode()=="direct");
     const bool tls=!config.text("tls_certificate").empty() && !config.text("tls_private_key").empty();
@@ -390,7 +391,7 @@ Json DnsChecker::check(const Json& request) const {
     if(!domain_name(domain) || !domain_name(hostname))throw DnsError("invalid_dns_input","Enter a valid public ASCII mail domain and server hostname.");
     auto ipv4=field(request,"ipv4",64),ipv6=field(request,"ipv6",64);
     for(auto* value:{&ipv4,&ipv6})if(!value->empty()) {
-        std::error_code error;const auto address=asio::ip::make_address(*value,error);
+        std::error_code error;const auto address=ip::make_address(*value,error);
         if(error || (value==&ipv4 && !address.is_v4()) || (value==&ipv6 && !address.is_v6()) || !public_address(address))
             throw DnsError("invalid_dns_input","Enter public IPv4 and IPv6 addresses in their matching fields; private and documentation addresses cannot receive Internet mail.");
         *value=address.to_string();
@@ -470,14 +471,14 @@ Json DnsChecker::check_server(const Config& config,const Json& input) const {
     auto result=dns_recommendations(config,input),expected=result.at("expected");
     auto checked=check(expected);result["checked_at"]=checked.at("checked_at");result["resolver"]=checked.at("resolver");
     result["limitations"]="TCP probes run from this server to its published public addresses. They do not prove external inbound reachability, NAT forwarding, TLS validity, outbound port 25 access, IP reputation or mail delivery.";
-    std::vector<asio::ip::address> addresses;
+    std::vector<ip::address> addresses;
     for(auto& record:result["records"]) {
         const auto id=record.at("id").get<std::string>();
         for(const auto& observation:checked.at("records"))if(observation.at("id")==id) {
             for(const auto* key:{"status","code","message","observed"})record[key]=observation.at(key);
             if(id=="a" || id=="aaaa") {
                 for(const auto& value:observation.at("observed")) {
-                    std::error_code error;const auto address=asio::ip::make_address(value.get<std::string>(),error);
+                    std::error_code error;const auto address=ip::make_address(value.get<std::string>(),error);
                     if(error || !public_address(address)) {record["status"]="mismatch";record["code"]="dns_private_address";continue;}
                     if(addresses.size()<4 && std::find(addresses.begin(),addresses.end(),address)==addresses.end())addresses.push_back(address);
                 }

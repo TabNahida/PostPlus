@@ -3,7 +3,6 @@
 #include <openssl/pem.h>
 #include <openssl/x509v3.h>
 #include <algorithm>
-#include <atomic>
 #include <cstdlib>
 #include <iostream>
 #include <map>
@@ -19,7 +18,7 @@ struct DnsFixture {
     std::map<std::pair<std::string,unsigned>,std::vector<Bytes>> rows;
     std::map<std::string,unsigned> rcodes;unsigned requests=0,tcp_requests=0;bool truncate=false;
     static Bytes mx(unsigned priority,const std::string& host){Bytes data;number(data,priority);name(data,host);return data;}
-    static Bytes address(const std::string& value){const auto parsed=asio::ip::make_address(value);if(parsed.is_v4()){const auto data=parsed.to_v4().to_bytes();return {data.begin(),data.end()};}const auto data=parsed.to_v6().to_bytes();return {data.begin(),data.end()};}
+    static Bytes address(const std::string& value){const auto parsed=ip::make_address(value);if(parsed.is_v4()){const auto data=parsed.to_v4().to_bytes();return {data.begin(),data.end()};}const auto data=parsed.to_v6().to_bytes();return {data.begin(),data.end()};}
     Bytes send(const Bytes& question,bool tcp=false) {
         if(tcp)++tcp_requests;else ++requests;
         std::size_t position=12;std::string owner;
@@ -44,11 +43,11 @@ Config config(){Config result;result.values={{"domain","example.com"},{"mail_hos
 const std::string raw="From: alice@example.com\r\nTo: bob@example.net\r\nSubject: test\r\n\r\n.leading\nlast";
 template<class F>void rejects(F call,const std::string& code,bool permanent=false){try{call();}catch(const OutboundError& error){if(error.code!=code)throw std::runtime_error("Expected "+code+", got "+error.code+": "+error.what());check(error.permanent==permanent,"wrong outbound error permanence");return;}throw std::runtime_error("outbound failure was accepted");}
 class Server {
-    asio::io_context io_;tcp::acceptor acceptor_{io_,{asio::ip::make_address("127.0.0.1"),0}};
-    std::thread thread_;std::atomic<bool> stop_{false};std::exception_ptr failure_;
+    SocketListener acceptor_{{ip::address_v4::loopback(),0}};
+    std::thread thread_;std::exception_ptr failure_;
 public:
-    template<class F>explicit Server(F handler){acceptor_.non_blocking(true);thread_=std::thread([this,handler]{try{Connection peer{std::chrono::seconds(2)};const auto deadline=Clock::now()+std::chrono::seconds(5);for(;;){std::error_code error;acceptor_.accept(peer.socket(),error);if(!error)break;if(error!=asio::error::would_block && error!=asio::error::try_again)throw std::system_error(error);if(stop_ || Clock::now()>=deadline)return;std::this_thread::sleep_for(std::chrono::milliseconds(5));}peer.set_deadline(Clock::now()+std::chrono::seconds(5));handler(peer);}catch(...){failure_=std::current_exception();}});}
-    ~Server(){stop_=true;if(thread_.joinable())thread_.join();}
+    template<class F>explicit Server(F handler){thread_=std::thread([this,handler]{try{Connection peer{std::chrono::seconds(2)};acceptor_.accept(peer,std::chrono::seconds(5));peer.set_deadline(Clock::now()+std::chrono::seconds(5));handler(peer);}catch(...){failure_=std::current_exception();}});}
+    ~Server(){acceptor_.close();if(thread_.joinable())thread_.join();}
     int port()const{return acceptor_.local_endpoint().port();}
     void finish(){if(thread_.joinable())thread_.join();if(failure_)std::rethrow_exception(failure_);}
 };
@@ -74,7 +73,7 @@ std::string capture(Connection& peer,const std::string& sender="alice@example.co
     for(;;){auto line=peer.line();if(line==".")break;if(line.starts_with(".."))line.erase(0,1);received+=line+"\r\n";}
     peer.write("250 accepted\r\n");return received;
 }
-OutboundOptions options(DnsFixture& dns,Server& server,std::vector<std::string>* tried=nullptr){OutboundOptions result;result.dns=dns.options();result.connect=[&server,tried](Connection& peer,const tcp::endpoint& endpoint,const std::string& host){check(is_public_mail_address(endpoint.address()) && endpoint.port()==25,"non-public destination passed to connector");if(tried)tried->push_back(host);peer.connect({asio::ip::make_address("127.0.0.1"),static_cast<unsigned short>(server.port())});};return result;}
+OutboundOptions options(DnsFixture& dns,Server& server,std::vector<std::string>* tried=nullptr){OutboundOptions result;result.dns=dns.options();result.connect=[&server,tried](Connection& peer,const tcp::endpoint& endpoint,const std::string& host){check(is_public_mail_address(endpoint.address()) && endpoint.port()==25,"non-public destination passed to connector");if(tried)tried->push_back(host);peer.connect({ip::address_v4::loopback(),static_cast<unsigned short>(server.port())});};return result;}
 void deliver(const Config& settings,OutboundOptions opts){deliver_direct(settings,"alice@example.com","bob@example.net",raw,std::move(opts));}
 void environment(const char* key,const std::string& value){
 #ifdef _WIN32
@@ -110,7 +109,7 @@ int main(){try {
     dns.rcodes["absent.example.net"]=3;lookup=resolver.lookup("absent.example.net",DnsType::mx,Clock::now()+std::chrono::seconds(5));check(lookup.nxdomain,"NXDOMAIN was not distinct from NODATA");lookup=resolver.lookup("empty.example.net",DnsType::mx,Clock::now()+std::chrono::seconds(5));check(!lookup.nxdomain && lookup.values.empty(),"NODATA was reported as NXDOMAIN");
     Bytes alias;name(alias,"mx1.example.net");dns.rows[{"alias.example.net",5}]={alias};lookup=resolver.lookup("alias.example.net",DnsType::a,Clock::now()+std::chrono::seconds(5));check(lookup.alias && lookup.values==std::vector<std::string>{"93.184.216.34"} && lookup.alias_hops==1,"cross-packet CNAME follow-up failed");
     Bytes loop;name(loop,"loop2.example.net");dns.rows[{"loop1.example.net",5}]={loop};loop.clear();name(loop,"loop1.example.net");dns.rows[{"loop2.example.net",5}]={loop};bool loop_failed=false;try{resolver.lookup("loop1.example.net",DnsType::a,Clock::now()+std::chrono::seconds(5));}catch(const DnsError&){loop_failed=true;}check(loop_failed,"DNS alias loop was unbounded");
-    for(const auto& value:{"127.0.0.1","10.0.0.1","100.64.0.1","169.254.1.1","192.168.1.1","192.88.99.1","198.51.100.1","::ffff:127.0.0.1","2002:7f00:1::1","2001:0:1234::1","2001:db8::1","3fff::1"})check(!is_public_mail_address(asio::ip::make_address(value)),"unsafe mail destination accepted");
+    for(const auto& value:{"127.0.0.1","10.0.0.1","100.64.0.1","169.254.1.1","192.168.1.1","192.88.99.1","198.51.100.1","::ffff:127.0.0.1","2002:7f00:1::1","2001:0:1234::1","2001:db8::1","3fff::1"})check(!is_public_mail_address(ip::make_address(value)),"unsafe mail destination accepted");
     // A production destination is always validated before a native test hook.
     auto settings=config();
     {auto multiple=settings;multiple.values["additional_domains"]=Json::array({"example.org"});DnsFixture fixture;fixture.standard();std::string received;Server server([&](Connection& peer){greet(peer);received=capture(peer,"alice@example.org");});deliver_direct(multiple,"alice@example.org","bob@example.net",raw,options(fixture,server));server.finish();check(!received.empty(),"hosted secondary envelope sender was rejected");}
@@ -128,7 +127,7 @@ int main(){try {
     {DnsFixture fixture;fixture.standard();Bytes target;name(target,"target.example.net");fixture.rows.erase({"mx1.example.net",1});fixture.rows[{"mx1.example.net",5}]={target};fixture.rows[{"target.example.net",1}]={DnsFixture::address("93.184.216.34")};OutboundOptions opts;opts.dns=fixture.options();bool connected=false;opts.connect=[&](auto&,const auto&,const auto&){connected=true;};rejects([&]{deliver(settings,opts);},"dns_mx_alias");check(!connected,"explicit MX alias reached connector");}
     {DnsFixture fixture;Bytes target;name(target,"target.example.net");fixture.rows[{"example.net",5}]={target};fixture.rows[{"target.example.net",1}]={DnsFixture::address("93.184.216.34")};Server server([](Connection& peer){greet(peer);mail(peer);});deliver(settings,options(fixture,server));server.finish();}
     {DnsFixture fixture;fixture.standard();fixture.rows[{"mx1.example.net",1}]={DnsFixture::address("127.0.0.1")};OutboundOptions opts;opts.dns=fixture.options();bool connected=false;opts.connect=[&](auto&,const auto&,const auto&){connected=true;};rejects([&]{deliver(settings,opts);},"dns_private_destination");check(!connected,"private destination reached test connector");}
-    {DnsFixture fixture;fixture.standard();fixture.rows[{"example.net",15}]={DnsFixture::mx(20,"mx2.example.net"),DnsFixture::mx(10,"mx1.example.net")};fixture.rows[{"mx2.example.net",1}]={DnsFixture::address("93.184.216.35")};std::vector<std::string> tried;Server first([](Connection& peer){peer.write("550 server unavailable\r\n");});Server second([](Connection& peer){greet(peer);mail(peer);});auto opts=options(fixture,second,&tried);opts.connect=[&](Connection& peer,const tcp::endpoint&,const std::string& host){tried.push_back(host);peer.connect({asio::ip::make_address("127.0.0.1"),static_cast<unsigned short>(host=="mx1.example.net"?first.port():second.port())});};deliver(settings,std::move(opts));first.finish();second.finish();check(tried==std::vector<std::string>{"mx1.example.net","mx2.example.net"},"MX priority or greeting 5xx failover failed");}
+    {DnsFixture fixture;fixture.standard();fixture.rows[{"example.net",15}]={DnsFixture::mx(20,"mx2.example.net"),DnsFixture::mx(10,"mx1.example.net")};fixture.rows[{"mx2.example.net",1}]={DnsFixture::address("93.184.216.35")};std::vector<std::string> tried;Server first([](Connection& peer){peer.write("550 server unavailable\r\n");});Server second([](Connection& peer){greet(peer);mail(peer);});auto opts=options(fixture,second,&tried);opts.connect=[&](Connection& peer,const tcp::endpoint&,const std::string& host){tried.push_back(host);peer.connect({ip::address_v4::loopback(),static_cast<unsigned short>(host=="mx1.example.net"?first.port():second.port())});};deliver(settings,std::move(opts));first.finish();second.finish();check(tried==std::vector<std::string>{"mx1.example.net","mx2.example.net"},"MX priority or greeting 5xx failover failed");}
     for(const int status:{450,550}){DnsFixture fixture;fixture.standard();Server server([status](Connection& peer){greet(peer);mail(peer,status);});auto opts=options(fixture,server);rejects([&]{deliver(settings,opts);},status==550?"smtp_rejected":"smtp_temporary_failure",status==550);server.finish();}
     {DnsFixture fixture;fixture.standard();Server server([](Connection& peer){greet(peer);mail(peer,250,550);});auto opts=options(fixture,server);rejects([&]{deliver(settings,opts);},"smtp_rejected",true);server.finish();}
     {DnsFixture fixture;fixture.standard();fixture.rows[{"example.net",15}].push_back(DnsFixture::mx(20,"mx2.example.net"));fixture.rows[{"mx2.example.net",1}]={DnsFixture::address("93.184.216.35")};unsigned attempts=0;Server server([](Connection& peer){greet(peer);mail(peer,250,250,true);});auto opts=options(fixture,server);const auto connector=opts.connect;opts.connect=[&](auto& peer,const auto& endpoint,const auto& host){++attempts;connector(peer,endpoint,host);};rejects([&]{deliver(settings,opts);},"delivery_unknown");server.finish();check(attempts==1,"unconfirmed final DATA was retried against a second MX");}

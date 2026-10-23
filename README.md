@@ -57,6 +57,8 @@ Keep the executables and `web` folder together. No compiler, Python, or Node.js 
 
 Install [xmake](https://xmake.io/) 2.9.8 or newer and a C++20 compiler. Windows users need Visual Studio 2022's **Desktop development with C++** workload; Linux users can use GCC 12 or newer; macOS users need current Xcode Command Line Tools.
 
+Xmake resolves PACE 0.1.1 from [tab-repo](https://github.com/TabNahida/repo-xmake), with HTTP/1, TLS, and DNS enabled. PACE and PostPlus use the same static OpenSSL 3.6.1; c-ares 1.34.8 supplies asynchronous DNS. See [build dependencies](docs/build-dependencies.md) for package configuration and repository troubleshooting.
+
 From the repository root:
 
 ```sh
@@ -116,7 +118,7 @@ For external recipients, select built-in direct delivery and publish the generat
 
 ## Architecture and development
 
-PostPlus uses **C++20**, **standalone Asio**, **OpenSSL 3**, **SQLite**, and **xmake**. Authentication and storage each own their SQLite database. Other services use authenticated loopback RPC instead of accessing those databases directly.
+PostPlus uses **C++20**, **PACE**, **OpenSSL 3**, **SQLite**, and **xmake**. Authentication and storage each own their SQLite database. Other services use authenticated loopback RPC instead of accessing those databases directly. See [network integration](docs/pace-migration.md) for the PACE boundary and compatibility behavior.
 
 | Executable | Responsibility | Default listener |
 | --- | --- | --- |

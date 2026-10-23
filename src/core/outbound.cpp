@@ -103,14 +103,14 @@ std::vector<Exchange> exchanges(const DnsResolver& resolver,const std::string& d
     std::stable_sort(result.begin(),result.end(),[](const auto& left,const auto& right){return left.preference<right.preference;});
     return result;
 }
-std::vector<asio::ip::address> addresses(const DnsResolver& resolver,const std::string& host,Clock::time_point deadline,bool implicit) {
-    std::vector<asio::ip::address> result;std::optional<DnsError> failure;bool any_answer=false,blocked=false;
+std::vector<ip::address> addresses(const DnsResolver& resolver,const std::string& host,Clock::time_point deadline,bool implicit) {
+    std::vector<ip::address> result;std::optional<DnsError> failure;bool any_answer=false,blocked=false;
     for(const auto type:{DnsType::a,DnsType::aaaa}) {
         try {
             const auto answer=resolver.lookup(host,type,deadline);any_answer=true;
             if(answer.alias && !implicit)throw OutboundError("dns_mx_alias","An explicit MX target must publish direct A or AAAA records rather than a CNAME alias.");
             for(const auto& value:answer.values) {
-                std::error_code error;const auto address=asio::ip::make_address(value,error);
+                std::error_code error;const auto address=ip::make_address(value,error);
                 if(error || !is_public_mail_address(address)){blocked=true;continue;}
                 if(std::find(result.begin(),result.end(),address)==result.end())result.push_back(address);
             }
@@ -145,7 +145,7 @@ void deliver_direct(const Config& config,const std::string& sender,const std::st
         const auto hosts=exchanges(resolver,domain,deadline);OutboundError last("smtp_unavailable","No destination MX accepted the message.");unsigned attempts=0;
         for(std::size_t index=0;index<hosts.size();++index) {
             if(Clock::now()>=deadline)throw OutboundError("delivery_timeout","Direct delivery reached its total time limit.");
-            const auto& host=hosts[index].hostname;std::vector<asio::ip::address> destinations;
+            const auto& host=hosts[index].hostname;std::vector<ip::address> destinations;
             try {destinations=addresses(resolver,host,deadline,hosts[index].implicit);}
             catch(const DnsError& error){last=OutboundError(error.code,error.what());continue;}
             catch(const OutboundError& error){last=error;continue;}

@@ -2,7 +2,7 @@
 #include <postplus/domains.hpp>
 #include <postplus/settings.hpp>
 #include <postplus/restart.hpp>
-#include <asio/ssl.hpp>
+#include <postplus/tls.hpp>
 #include <openssl/evp.h>
 #include <openssl/ssl.h>
 #include <openssl/x509v3.h>
@@ -65,12 +65,8 @@ std::string path_field(const Json& request,const char* key,const Config& config)
 }
 void validate_pair(const std::string& hostname,const std::string& certificate,const std::string& key) {
     try {
-        asio::ssl::context context(asio::ssl::context::tls_server);
-        context.set_password_callback([](std::size_t,asio::ssl::context::password_purpose){return std::string{};});
-        context.use_certificate_chain_file(certificate);
-        context.use_private_key_file(key,asio::ssl::context::pem);
-        if(SSL_CTX_check_private_key(context.native_handle())!=1)throw std::runtime_error("TLS key mismatch");
-        auto* leaf=SSL_CTX_get0_certificate(context.native_handle());
+        const auto pair=load_tls_certificate_pair(certificate,key);
+        auto* leaf=pair.get();
         if(!leaf || X509_check_host(leaf,hostname.c_str(),hostname.size(),X509_CHECK_FLAG_NO_PARTIAL_WILDCARDS,nullptr)!=1)
             throw SettingsError("tls_certificate","The certificate does not cover the selected hostname.");
         if(X509_cmp_current_time(X509_get0_notBefore(leaf))>=0 || X509_cmp_current_time(X509_get0_notAfter(leaf))<=0)

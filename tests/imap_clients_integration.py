@@ -9,6 +9,7 @@ from pathlib import Path
 import re
 import secrets
 import socket
+import ssl
 import time
 
 from integration import PASSWORD, ROOT, Suite
@@ -87,6 +88,82 @@ class Wire:
 
     def login(self, user):
         return self.command("login", 'LOGIN "' + user + '" "' + PASSWORD + '"')
+
+
+class RecordWire(Wire):
+    """A verified TLS peer that can withhold the tail of an encrypted record."""
+    def __init__(self, suite, version):
+        self.sock = socket.create_connection(("127.0.0.1", suite.ports["imaps"]), timeout=10)
+        self.incoming, self.outgoing = ssl.MemoryBIO(), ssl.MemoryBIO()
+        configuration = context()
+        configuration.minimum_version = configuration.maximum_version = version
+        self.tls = configuration.wrap_bio(self.incoming, self.outgoing, server_hostname="localhost")
+        self.pending = bytearray()
+        self.reader = self
+        try:
+            while True:
+                try:
+                    self.tls.do_handshake()
+                    self.flush()
+                    break
+                except ssl.SSLWantReadError:
+                    self.flush()
+                    self.receive()
+            assert self.line().startswith(b"* OK")
+        except BaseException:
+            self.sock.close()
+            raise
+
+    def close(self):
+        self.sock.close()
+
+    def flush(self):
+        while self.outgoing.pending:
+            self.sock.sendall(self.outgoing.read())
+
+    def receive(self):
+        encrypted = self.sock.recv(65536)
+        assert encrypted, "TLS peer closed while a record was incomplete"
+        self.incoming.write(encrypted)
+
+    def fill(self):
+        while True:
+            try:
+                plain = self.tls.read(65536)
+                assert plain, "TLS peer closed"
+                self.pending.extend(plain)
+                return
+            except ssl.SSLWantReadError:
+                self.flush()
+                self.receive()
+
+    def read(self, count):
+        while len(self.pending) < count:
+            self.fill()
+        result = bytes(self.pending[:count])
+        del self.pending[:count]
+        return result
+
+    def line(self):
+        while b"\r\n" not in self.pending:
+            assert len(self.pending) < 100000, "oversized IMAP response"
+            self.fill()
+        return self.read(self.pending.index(b"\r\n") + 2)
+
+    def send(self, value):
+        value = value if isinstance(value, bytes) else value.encode()
+        assert self.tls.write(value) == len(value)
+        self.flush()
+
+    def split_record(self, value):
+        assert not self.outgoing.pending
+        assert self.tls.write(value) == len(value)
+        encrypted = self.outgoing.read()
+        assert len(encrypted) > 6 and encrypted[0] == 23, "expected TLS application record"
+        # Include a complete record header, but withhold its final byte. The
+        # server must process a poll timeout with a partial record buffered.
+        self.sock.sendall(encrypted[:-1])
+        return encrypted[-1:]
 
 
 def run(s):
@@ -340,6 +417,25 @@ def run(s):
         assert s.rpc("auth", op="change_password", username=idle_user, password=PASSWORD + "changed")["ok"]
         assert wire.line() == b"* BYE Account credentials changed\r\n"
     print("PASS TLS IDLE EXISTS/FLAGS/EXPUNGE, DONE+next command in one record, credential revocation, LITERAL- APPEND and mailbox framing", flush=True)
+    for version in (ssl.TLSVersion.TLSv1_2, ssl.TLSVersion.TLSv1_3):
+        partial_user = f"partial-{version.value}@localhost"
+        assert s.rpc("auth", op="create", username=partial_user, password=PASSWORD)["ok"]
+        with closing(RecordWire(s, version)) as wire:
+            wire.login(partial_user)
+            wire.command("select", "SELECT INBOX")
+            wire.send("idle IDLE\r\n")
+            assert wire.line().startswith(b"+ ")
+            tail = wire.split_record(b"DONE\r\nnext NOOP\r\n")
+            added = s.rpc("storage", op="append", username=partial_user, folder="INBOX", raw=first_raw)
+            assert added["ok"], added
+            # A notification must arrive while the client still withholds the
+            # record tail: completion requires surviving the TLS input poll.
+            assert wire.line() == b"* 1 EXISTS\r\n"
+            assert wire.line() == b"* 1 RECENT\r\n"
+            wire.sock.sendall(tail)
+            wire.response("idle")
+            wire.response("next")
+    print("PASS TLS 1.2/1.3 partial records survive IDLE poll expiry, allow server notifications and preserve DONE plus the next command", flush=True)
 
 
 if __name__ == "__main__":

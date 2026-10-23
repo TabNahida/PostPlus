@@ -4,7 +4,7 @@
 #include <postplus/restart.hpp>
 #include <postplus/dkim.hpp>
 #include <postplus/domains.hpp>
-#include <asio/ssl.hpp>
+#include <postplus/tls.hpp>
 #include <openssl/evp.h>
 #include <openssl/ssl.h>
 #include <algorithm>
@@ -232,7 +232,7 @@ void safe_text(const std::string& key,const Json& value,std::size_t maximum=2048
 }
 bool mail_domain(const std::string& value) {
     std::error_code error;
-    (void)asio::ip::make_address(value,error);
+    (void)ip::make_address(value,error);
     return error && valid_dkim_domain(value) && valid_address("postmaster@"+value);
 }
 fs::path dkim_path(const Config& config) {
@@ -435,18 +435,14 @@ Config validate_settings(const Config& existing,const Json& patch) {
     if(certificate!=!result.text("tls_private_key").empty()) throw SettingsError("tls_certificate","Provide both a TLS certificate and private key.");
     for(const auto* field:{"bind","admin_bind"}) {
         std::error_code error;
-        const auto address=asio::ip::make_address(result.text(field,"127.0.0.1"),error);
+        const auto address=ip::make_address(result.text(field,"127.0.0.1"),error);
         if(error) throw SettingsError(field,"The listening address must be an IPv4 or IPv6 address.");
         if(!address.is_loopback() && (!certificate || result.flag("allow_insecure_auth"))) throw SettingsError(field,"Public listening addresses require TLS and disabled insecure authentication.");
     }
     if(!certificate && !result.flag("allow_insecure_auth")) throw SettingsError("tls_certificate","Provide TLS files or explicitly enable local plaintext authentication.");
     if(certificate) {
         try {
-            asio::ssl::context tls(asio::ssl::context::tls_server);
-            tls.set_password_callback([](std::size_t,asio::ssl::context::password_purpose){return std::string{};});
-            tls.use_certificate_chain_file(result.text("tls_certificate"));
-            tls.use_private_key_file(result.text("tls_private_key"),asio::ssl::context::pem);
-            if(SSL_CTX_check_private_key(tls.native_handle())!=1) throw std::runtime_error("TLS mismatch");
+            (void)load_tls_certificate_pair(result.text("tls_certificate"),result.text("tls_private_key"));
         } catch(const std::exception&) {throw SettingsError("tls_certificate","TLS files must be readable PEM files with a matching, unencrypted private key.");}
     }
     std::set<int> ports;
@@ -456,7 +452,7 @@ Config validate_settings(const Config& existing,const Json& patch) {
     for(const auto* key:{"smarthost_host","smarthost_username","clamav_host"}) if(result.text(key).size()>253) throw SettingsError(key,"Hostnames and usernames must not exceed 253 bytes.");
     {
         std::error_code error;
-        const auto address=asio::ip::make_address(result.text("rspamd_host","127.0.0.1"),error);
+        const auto address=ip::make_address(result.text("rspamd_host","127.0.0.1"),error);
         if(error || !address.is_loopback()) throw SettingsError("rspamd_host","Use a loopback IP address for the local Rspamd worker.");
     }
     const auto env=result.text("smarthost_password_env");
@@ -536,7 +532,6 @@ Json save_settings(const Config& config,const Json& request) {
     std::set<int> active_ports{active.number("delivery_lock_port",18085)};
     for(const auto* service:{"auth","storage","filter","transfer","smtp","pop3","imap","web","admin"})
         for(const auto& listener:active.listeners(service)) active_ports.insert(listener.port);
-    asio::io_context context;
     for(const auto* service:{"auth","storage","filter","transfer","smtp","submission","smtps","pop3","pop3s","imap","imaps","web","admin","delivery"}) {
         const std::string name(service);
         const int port=name=="delivery" ? updated.number("delivery_lock_port",18085) : updated.port(name);
@@ -544,16 +539,9 @@ Json save_settings(const Config& config,const Json& request) {
         if(!port || (optional && updated.text("tls_certificate").empty())) continue;
         if(active_ports.contains(port)) continue;
         const bool internal=name=="auth" || name=="storage" || name=="filter" || name=="transfer" || name=="delivery";
-        const auto address=asio::ip::make_address(internal ? "127.0.0.1" : updated.text(name=="admin" ? "admin_bind" : "bind","127.0.0.1"));
-        tcp::acceptor probe(context);
-        std::error_code error;
-        probe.open(address.is_v6()?tcp::v6():tcp::v4(),error);
-#ifndef _WIN32
-        if(!error) probe.set_option(tcp::acceptor::reuse_address(true),error);
-#endif
-        if(!error) probe.bind({address,static_cast<unsigned short>(port)},error);
-        if(!error) probe.listen(asio::socket_base::max_listen_connections,error);
-        if(error) throw SettingsError(name=="delivery" ? "delivery_lock_port" : "ports."+name,"The requested service port is unavailable. Choose another port or check listening permissions.");
+        const auto address=ip::make_address(internal ? "127.0.0.1" : updated.text(name=="admin" ? "admin_bind" : "bind","127.0.0.1"));
+        try { SocketListener probe({address,static_cast<unsigned short>(port)}); }
+        catch(const std::exception&) { throw SettingsError(name=="delivery" ? "delivery_lock_port" : "ports."+name,"The requested service port is unavailable. Choose another port or check listening permissions."); }
     }
     RemoveOnExit secret_cleanup;
     if(values.contains("smarthost_password") && !values.at("smarthost_password").get<std::string>().empty()) {

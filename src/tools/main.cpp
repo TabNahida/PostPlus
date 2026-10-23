@@ -4,8 +4,6 @@
 #include <postplus/settings.hpp>
 #include <postplus/data_lock.hpp>
 #include <postplus/maintenance.hpp>
-#include <asio/ssl.hpp>
-#include <openssl/pem.h>
 
 #include <algorithm>
 #include <charconv>
@@ -132,7 +130,7 @@ void ensure_alive(ProcessGroup& children) {
 }
 
 std::string public_probe_host(const Config& config, const std::string& service) {
-    const auto address = asio::ip::make_address(config.text(service == "admin" ? "admin_bind" : "bind", "127.0.0.1"));
+    const auto address = ip::make_address(config.text(service == "admin" ? "admin_bind" : "bind", "127.0.0.1"));
     if (address.is_unspecified()) return address.is_v6() ? "::1" : "127.0.0.1";
     return address.to_string();
 }
@@ -149,21 +147,13 @@ bool internal_service(const std::string& service) {
 void port_available(const Config& config, const std::string& service) {
     const auto listeners = service == "delivery" ? std::vector<TcpListener>{{service, service_port(config, service), false}} : config.listeners(service);
     for (const auto& listener : listeners) {
-    const int port = listener.port;
-    if (port < 1 || port > 65535) throw std::invalid_argument("invalid " + listener.name + " port");
-    const auto address = asio::ip::make_address(internal_service(service) ? "127.0.0.1" : config.text(service == "admin" ? "admin_bind" : "bind", "127.0.0.1"));
-    asio::io_context context;
-    tcp::acceptor test(context);
-    std::error_code error;
-    test.open(address.is_v6() ? tcp::v6() : tcp::v4(), error);
-#ifndef _WIN32
-    // Match Asio's listener policy so a stopped service's TIME_WAIT sockets
-    // do not prevent immediate startup (notably after administrator setup).
-    if (!error) test.set_option(tcp::acceptor::reuse_address(true), error);
-#endif
-    if (!error) test.bind({address, static_cast<unsigned short>(port)}, error);
-    if (!error) test.listen(asio::socket_base::max_listen_connections, error);
-    if (error) throw std::runtime_error(listener.name + " cannot bind " + address.to_string() + ":" + std::to_string(port));
+        const int port = listener.port;
+        if (port < 1 || port > 65535) throw std::invalid_argument("invalid " + listener.name + " port");
+        const auto address = ip::make_address(internal_service(service) ? "127.0.0.1" : config.text(service == "admin" ? "admin_bind" : "bind", "127.0.0.1"));
+        try { SocketListener test({address, static_cast<unsigned short>(port)}); }
+        catch (const std::exception&) {
+            throw std::runtime_error(listener.name + " cannot bind " + address.to_string() + ":" + std::to_string(port));
+        }
     }
 }
 
@@ -220,59 +210,21 @@ void readiness_https(const Config& config, const std::string& service,
     const auto path = std::filesystem::path(config.text("tls_certificate"));
     require_plain_path(path);
     if (std::filesystem::file_size(path) > 1024 * 1024) throw std::runtime_error("readiness certificate is too large");
-    std::ifstream file(path, std::ios::binary);
-    if (!file) throw std::runtime_error("cannot read readiness certificate");
-    const std::string pem{std::istreambuf_iterator<char>(file), std::istreambuf_iterator<char>()};
-    std::unique_ptr<BIO, decltype(&BIO_free)> input(BIO_new_mem_buf(pem.data(), static_cast<int>(pem.size())), BIO_free);
-    if (!input) throw std::runtime_error("cannot load readiness certificate");
-    std::shared_ptr<X509> expected(PEM_read_bio_X509(input.get(), nullptr, nullptr, nullptr), X509_free);
-    if (!expected) throw std::runtime_error("invalid readiness certificate");
-    asio::io_context context;
-    asio::ssl::context tls(asio::ssl::context::tls_client);
-    tls.set_verify_mode(asio::ssl::verify_peer);
-    tls.set_verify_callback([expected](bool, asio::ssl::verify_context& verification) {
-        const auto native = verification.native_handle();
-        if (X509_STORE_CTX_get_error_depth(native) != 0) return true;
-        const auto presented = X509_STORE_CTX_get_current_cert(native);
-        return presented && X509_cmp(expected.get(), presented) == 0;
-    });
-    asio::ssl::stream<tcp::socket> stream(context, tls);
-    asio::steady_timer timer(context, std::min(deadline, std::chrono::steady_clock::now() + std::chrono::seconds(1)));
-    asio::streambuf response(8192);
-    const std::string request = "GET /health HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n";
-    std::error_code failure;
-    bool finished = false, healthy = false;
-    auto finish = [&](std::error_code error) {
-        if (finished) return;
-        finished = true;
-        failure = error;
-        timer.cancel();
-        std::error_code ignored;
-        stream.lowest_layer().close(ignored);
-    };
-    timer.async_wait([&](std::error_code error) { if (!error) finish(asio::error::timed_out); });
-    const tcp::endpoint endpoint(asio::ip::make_address(public_probe_host(config, service)),
-                                 static_cast<unsigned short>(service_port(config, service)));
-    stream.next_layer().async_connect(endpoint, [&](std::error_code error) {
-        if (error) { finish(error); return; }
-        stream.async_handshake(asio::ssl::stream_base::client, [&](std::error_code error) {
-            if (error) { finish(error); return; }
-            asio::async_write(stream, asio::buffer(request), [&](std::error_code error, std::size_t) {
-                if (error) { finish(error); return; }
-                asio::async_read_until(stream, response, "\r\n\r\n", [&](std::error_code error, std::size_t) {
-                    if (!error) {
-                        std::istream input(&response);
-                        std::string line;
-                        std::getline(input, line);
-                        healthy = line.starts_with("HTTP/1.1 200 ");
-                    }
-                    finish(error);
-                });
-            });
-        });
-    });
-    context.run();
-    if (failure || !healthy) throw std::runtime_error("HTTPS application readiness probe failed");
+    Connection connection(std::chrono::seconds(1));
+    connection.set_deadline(std::min(deadline, std::chrono::steady_clock::now() + std::chrono::seconds(1)));
+    connection.connect({ip::make_address(public_probe_host(config, service)),
+                        static_cast<unsigned short>(service_port(config, service))});
+    connection.start_tls_pinned(config.text("tls_certificate"));
+    connection.write("GET /health HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n");
+    const auto status = connection.line(8190);
+    if (!status.starts_with("HTTP/1.1 200 ")) throw std::runtime_error("HTTPS application readiness probe failed");
+    std::size_t remaining = 8192 - status.size() - 2;
+    while (remaining >= 2) {
+        const auto line = connection.line(remaining - 2);
+        remaining -= line.size() + 2;
+        if (line.empty()) return;
+    }
+    throw std::runtime_error("HTTPS application readiness probe failed");
 }
 
 void wait_ready(ProcessGroup& children, const Config& config, const std::string& service) {

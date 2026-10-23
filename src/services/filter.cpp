@@ -34,7 +34,7 @@ public:
         if (clamav_host_.size() > 253 || clamav_host_.find_first_of("\r\n\0", 0, 3) != std::string::npos)
             throw std::invalid_argument("invalid ClamAV host");
         std::error_code address_error;
-        const auto scanner_address = asio::ip::make_address(rspamd_host_, address_error);
+        const auto scanner_address = ip::make_address(rspamd_host_, address_error);
         if (address_error || !scanner_address.is_loopback() || rspamd_port_ < 1 || rspamd_port_ > 65535 ||
             rspamd_timeout_ < 1 || rspamd_timeout_ > 30)
             throw std::invalid_argument("Rspamd must use a loopback IP and valid port/timeout");
@@ -499,54 +499,33 @@ private:
     }
     ScanResult scan_clamav(std::string_view payload, std::chrono::steady_clock::time_point deadline) const {
         if (std::chrono::steady_clock::now() >= deadline) throw std::runtime_error("ClamAV scan deadline");
-        asio::io_context context;
-        tcp::resolver resolver(context);
-        tcp::socket socket(context);
-        asio::steady_timer timer(context, deadline);
-        std::exception_ptr failure;
-        auto result = ScanResult::clean;
-        timer.async_wait([&](const std::error_code& error) {
-            if (!error) {
-                resolver.cancel();
-                std::error_code ignored;
-                socket.cancel(ignored);
-                socket.close(ignored);
+        Connection connection{std::chrono::seconds(clamav_timeout_)};
+        // The caller shares this absolute deadline across all MIME parts.
+        connection.set_deadline(deadline);
+        connection.connect(clamav_host_, clamav_port_);
+        connection.write(std::string_view("zINSTREAM\0", 10));
+        for (std::size_t position = 0; position < payload.size();) {
+            const auto count = std::min<std::size_t>(65536, payload.size() - position);
+            const std::array<char, 4> size_bytes{
+                static_cast<char>((count >> 24) & 255), static_cast<char>((count >> 16) & 255),
+                static_cast<char>((count >> 8) & 255), static_cast<char>(count & 255)};
+            connection.write(std::string_view(size_bytes.data(), size_bytes.size()));
+            connection.write(payload.substr(position, count));
+            position += count;
+        }
+        connection.write(std::string_view("\0\0\0\0", 4));
+        std::string reply;
+        while (reply.size() < 4096) {
+            const auto byte = connection.read(1).front();
+            if (byte == '\0' || byte == '\n') {
+                if (reply == "stream: OK") return ScanResult::clean;
+                if (reply.starts_with("stream: ") && reply.ends_with(" FOUND"))
+                    return ScanResult::infected;
+                throw std::runtime_error("ClamAV rejected stream");
             }
-        });
-        asio::co_spawn(context, [&]() -> asio::awaitable<void> {
-            const auto endpoints = co_await resolver.async_resolve(clamav_host_, std::to_string(clamav_port_), asio::use_awaitable);
-            if (std::chrono::steady_clock::now() >= deadline) throw std::runtime_error("ClamAV scan deadline");
-            co_await asio::async_connect(socket, endpoints, asio::use_awaitable);
-            co_await asio::async_write(socket, asio::buffer("zINSTREAM\0", 10), asio::use_awaitable);
-            for (std::size_t position = 0; position < payload.size();) {
-                const auto count = std::min<std::size_t>(65536, payload.size() - position);
-                const std::array<char, 4> size_bytes{
-                    static_cast<char>((count >> 24) & 255), static_cast<char>((count >> 16) & 255),
-                    static_cast<char>((count >> 8) & 255), static_cast<char>(count & 255)};
-                co_await asio::async_write(socket, asio::buffer(size_bytes), asio::use_awaitable);
-                co_await asio::async_write(socket, asio::buffer(payload.data() + position, count), asio::use_awaitable);
-                position += count;
-            }
-            co_await asio::async_write(socket, asio::buffer("\0\0\0\0", 4), asio::use_awaitable);
-            std::string reply;
-            while (reply.size() < 4096) {
-                char byte = 0;
-                co_await asio::async_read(socket, asio::buffer(&byte, 1), asio::use_awaitable);
-                if (byte == '\0' || byte == '\n') {
-                    if (reply == "stream: OK") co_return;
-                    if (reply.starts_with("stream: ") && reply.ends_with(" FOUND")) {
-                        result = ScanResult::infected;
-                        co_return;
-                    }
-                    throw std::runtime_error("ClamAV rejected stream");
-                }
-                reply += byte;
-            }
-            throw std::runtime_error("oversized ClamAV reply");
-        }, [&](std::exception_ptr error) { failure = error; timer.cancel(); });
-        context.run();
-        if (failure) std::rethrow_exception(failure);
-        return result;
+            reply += byte;
+        }
+        throw std::runtime_error("oversized ClamAV reply");
     }
     static constexpr std::string_view eicar_ = "X5O!P%@AP[4\\PZX54(P^)7CC)7}$EICAR-STANDARD-ANTIVIRUS-TEST-FILE!$H+H*";
     static constexpr std::string_view gtube_ = "XJS*C4JDBQADN1.NSBN3*2IDNEN*GTUBE-STANDARD-ANTI-UBE-TEST-EMAIL*C.34X";

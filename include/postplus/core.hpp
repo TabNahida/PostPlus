@@ -1,5 +1,5 @@
 #pragma once
-#include <asio.hpp>
+#include <postplus/network.hpp>
 #include <nlohmann/json.hpp>
 #include <chrono>
 #include <filesystem>
@@ -14,7 +14,6 @@
 
 namespace postplus {
 using Json = nlohmann::json;
-using tcp = asio::ip::tcp;
 struct TcpListener {
     std::string name;
     int port;
@@ -54,12 +53,13 @@ void log(const std::string& service, const std::string& message, const std::stri
 Json read_logs(const Config& config, const std::string& service = "", const std::string& level = "", std::size_t limit = 100,
                const std::string& search = "", const std::string& cursor = "");
 
-// Each connection owns its executor. Operations enforce a per-operation deadline.
+class SocketListener;
+// Synchronous protocol facade over the shared PACE reactor, with absolute budgets.
 class Connection {
 public:
     explicit Connection(std::chrono::seconds timeout = std::chrono::seconds(30));
     ~Connection();
-    tcp::socket& socket();
+    tcp::endpoint peer_endpoint() const;
     void connect(const std::string& host, int port);
     void connect(const tcp::endpoint& endpoint);
     std::string line(std::size_t limit = 8192); // strips CRLF; requires CRLF
@@ -72,6 +72,20 @@ public:
     bool encrypted() const;
     void set_deadline(std::optional<std::chrono::steady_clock::time_point> deadline);
     void request_stop(); // Thread safe; active operation exits within its deadline.
+    // Private readiness probes pin the configured leaf, independently of DNS/CA.
+    void start_tls_pinned(const std::string& certificate_file);
+private:
+    friend class SocketListener;
+    struct Impl;
+    std::unique_ptr<Impl> impl_;
+};
+class SocketListener {
+public:
+    explicit SocketListener(const tcp::endpoint& endpoint);
+    ~SocketListener();
+    tcp::endpoint local_endpoint() const;
+    void accept(Connection& connection, std::chrono::milliseconds timeout = std::chrono::seconds(30));
+    void close();
 private:
     struct Impl;
     std::unique_ptr<Impl> impl_;
