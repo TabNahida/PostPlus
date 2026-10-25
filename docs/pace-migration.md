@@ -1,6 +1,6 @@
 # PACE backend integration
 
-PostPlus uses the unmodified PACE 0.1.1 Xmake package. Production source no longer
+PostPlus uses the unmodified PACE 0.2.0 Xmake package. Production source no longer
 depends on Asio; an independent Asio TLS client remains in interoperability tests.
 The public APIs, configuration schema, and on-disk formats are unchanged.
 
@@ -45,7 +45,7 @@ connections retain their own certificate-selection state.
 
 ## High-level API boundaries
 
-PACE 0.1.1's HTTP admission callback is synchronous on the reactor. PostPlus
+PACE 0.2.0's HTTP admission callback is synchronous on the reactor. PostPlus
 preflight can call authentication RPC, so moving it directly into that callback
 would either deadlock or serialize network progress. The server keeps its current
 header-first authorization, Host/CSRF checks, duplicate/framing rejection, request

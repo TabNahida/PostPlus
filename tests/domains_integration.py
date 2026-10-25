@@ -63,6 +63,17 @@ def run(s):
     assert s.http("admin", "POST", "/api/admin/users", dict(username="user@new.example.org", password=PASSWORD), administrator)[0] == 400
     print("PASS pending domains, legacy migration, CSRF, conflicts and DNS draft isolation", flush=True)
 
+    acknowledgement = dict(revision=revision, domain="new.example.org", dns={"ipv4": "8.8.8.8", "ipv6": ""})
+    assert s.http("admin", "POST", base + "/mark-checked", acknowledgement, {"Cookie": administrator["Cookie"]})[0] == 403
+    status, _, marked = s.http("admin", "POST", base + "/mark-checked", acknowledgement, administrator)
+    assert status == 200 and marked["record"]["dns_status"] == "manual_checked" and marked["record"]["checked_manually"], marked
+    assert marked["record"]["can_activate"] and marked["record"]["status"] == "pending" and not marked["restart_required"]
+    assert s.http("admin", "POST", base + "/mark-checked", acknowledgement, administrator)[0] == 409
+    revision = marked["revision"]
+    stored = s.http("admin", "GET", base + "?q=new.example.org", headers=administrator)[2]["items"][0]
+    assert stored["dns_status"] == "manual_checked" and stored["checked_at"] and stored["dns"]["ipv4"] == "8.8.8.8"
+    print("PASS manual DNS acknowledgement, persisted expectations, explicit activation and revision conflicts", flush=True)
+
     status, _, key = s.http("admin", "POST", "/api/admin/api-keys",
                             dict(name="Domain reader", permissions=["config:read"]), administrator)
     assert status == 201, key
@@ -71,6 +82,7 @@ def run(s):
     assert s.http("admin", "POST", base + "/preview", dict(domain="new.example.org"), reader)[0] == 200
     assert s.http("admin", "POST", base, dict(revision=revision, domain="denied.example.org"), reader)[0] == 403
     assert s.http("admin", "POST", base + "/check", dict(revision=revision, domain="new.example.org"), reader)[0] == 403
+    assert s.http("admin", "POST", base + "/mark-checked", dict(revision=revision, domain="new.example.org"), reader)[0] == 403
     assert s.http("admin", "POST", base + "/remove", dict(revision=revision, domain="example.com"), administrator)[0] == 409
     status, _, removed = s.http("admin", "POST", base + "/remove", dict(revision=revision, domain="new.example.org"), administrator)
     assert status == 200 and removed["accounts_retained"] and not removed["restart_required"], removed

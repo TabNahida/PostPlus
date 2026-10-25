@@ -444,6 +444,8 @@ public:
             load_static(root, "/admin-access.css", "admin-access.css", "text/css; charset=utf-8");
             load_static(root, "/admin-security.js", "admin-security.js", "application/javascript; charset=utf-8");
             load_static(root, "/admin-security.css", "admin-security.css", "text/css; charset=utf-8");
+            load_static(root, "/admin-abuseipdb.js", "admin-abuseipdb.js", "application/javascript; charset=utf-8");
+            load_static(root, "/admin-abuseipdb.css", "admin-abuseipdb.css", "text/css; charset=utf-8");
             load_static(root, "/admin-settings.css", "admin-settings.css", "text/css; charset=utf-8");
         } else {
             load_static(root, "/app.js", "app.js", "application/javascript; charset=utf-8");
@@ -525,6 +527,7 @@ private:
         if (trim(config_.text("admin_hostname")).empty()) return;
         if (local_development(request, host)) return;
         const auto path = lower(request.path.substr(0, request.path.find('?')));
+        if (path == "/abuseipdb-verification.html" && request.method == "GET" && host == lower(config_.mail_hostname())) return;
         if (!admin_only && host == lower(config_.mail_hostname()) &&
             (path == "/mail/config-v1.1.xml" || path == "/.well-known/autoconfig/mail/config-v1.1.xml" ||
              path == "/autodiscover/autodiscover.xml")) return;
@@ -776,6 +779,12 @@ private:
 
     HttpResponse route(const HttpRequest& request) {
         require_portal(request);
+        if (request.method == "GET" && request.path == "/abuseipdb-verification.html") {
+            const auto verification=rpc(config_,"auth",{{"op","abuseipdb_verification"}});
+            const auto token=verification.value("verification_token",std::string{});
+            if(token.empty())throw ApiError(404,"Verification file is not configured.");
+            return HttpResponse{200,"text/html; charset=utf-8",token+"\n",{{"Cache-Control","no-store"},{"X-Content-Type-Options","nosniff"}}};
+        }
         if (forbidden_portal_route(request))
             throw ApiError(404, "API route not found.");
         if (request.method == "GET" && request.path == "/health")
@@ -933,6 +942,26 @@ private:
             if (!session.api_key_id.empty() && request.method != "GET")
                 log(service_name, "API key " + session.api_key_id + " owned by administrator " + session.username +
                     " requested " + request.method + " " + path);
+            if (path == "/api/admin/abuseipdb" || path.starts_with("/api/admin/abuseipdb/")) {
+                Json command{{"actor",session.username}};
+                if(path == "/api/admin/abuseipdb" && request.method == "GET")command["op"]="abuseipdb_get";
+                else if(path == "/api/admin/abuseipdb/settings" && request.method == "PUT") {
+                    const auto input=request_json(request);
+                    for(const auto& [name,value]:input.items()) {
+                        if(name!="revision" && name!="settings")throw ApiError(400,"Unexpected AbuseIPDB settings field.");
+                        command[name]=value;
+                    }
+                    command["op"]="abuseipdb_settings";
+                } else if(request.method=="POST" && path.starts_with("/api/admin/abuseipdb/")) {
+                    command["op"]="abuseipdb_action";command["endpoint"]=path.substr(std::string("/api/admin/abuseipdb/").size());command["input"]=request_json(request);
+                } else throw ApiError(405,"Unsupported AbuseIPDB operation.");
+                const auto result=rpc(config_,"auth",command,Clock::now()+std::chrono::seconds(25));
+                if(!result.value("ok",false)) {
+                    const int status=result.value("status",400);
+                    return json_response(result,status==409?409:status==429?429:status==403 && result.value("code",std::string{})=="administrator_required"?403:status>=500 || status==401 || status==402 || status==403?502:400);
+                }
+                return json_response(result);
+            }
             if (path == "/api/admin/security" || path.starts_with("/api/admin/security/")) {
                 Json command{{"actor",session.username}};
                 if (path == "/api/admin/security" && request.method == "GET") command["op"] = "security_get";
@@ -1150,7 +1179,7 @@ private:
                 try {
                     if(request.method=="GET") {
                         if(query.size()>1 || (!query.empty() && !query.contains("domain")))throw ApiError(400,"Select a configured mail domain.");
-                        return json_response(dns_recommendations(saved,query.empty()?Json::object():Json{{"domain",parameter("domain")}}));
+                        return json_response(dns_recommendations(saved,dns_public_ip_defaults(query.empty()?Json::object():Json{{"domain",parameter("domain")}})));
                     }
                     return json_response(DnsChecker().check_server(saved,request_json(request)));
                 } catch(const DnsError& error) {
@@ -1177,8 +1206,12 @@ private:
                         }
                         return json_response(domains_list(config_, filters));
                     }
-                    if (request.method == "POST" && path == "/api/admin/domains/preview")
-                        return json_response(domains_preview(config_, request_json(request)));
+                    if (request.method == "POST" && path == "/api/admin/domains/preview") {
+                        auto input=request_json(request);
+                        if(!input.is_object())throw ApiError(400,"Send a JSON object.");
+                        input["dns"]=dns_public_ip_defaults(input.value("dns",Json::object()));
+                        return json_response(domains_preview(config_, input));
+                    }
                     if (request.method != "POST") throw ApiError(405, "Use POST for domain changes.");
                     const auto input = request_json(request);
                     std::lock_guard lock(maintenance_mutex_);
@@ -1189,6 +1222,7 @@ private:
                     else if (path == "/api/admin/domains/tls") result = save_domain_tls(config_, input);
                     else if (path == "/api/admin/domains/update") result = domains_update(config_, input);
                     else if (path == "/api/admin/domains/check") result = domains_check(config_, input);
+                    else if (path == "/api/admin/domains/mark-checked") result = domains_mark_checked(config_, input);
                     else if (path == "/api/admin/domains/activate") result = domains_activate(config_, input);
                     else if (path == "/api/admin/domains/remove") result = domains_remove(config_, input);
                     else throw ApiError(404, "API route not found.");

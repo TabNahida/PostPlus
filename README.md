@@ -29,6 +29,7 @@
 - **Find recent verification codes and links.** Webmail recognizes codes and account verification links from recent Inbox or Trash mail without marking it read. Copy a code or inspect a link's destination before opening it; integrations can use the owner-bound API.
 - **Host many independent mail domains.** Add domains through a DNS verification wizard, find them in a searchable, paginated list, and keep each full mailbox address independent. Administration has one designated hostname; Webmail uses each mailbox domain, with an optional shared login hostname.
 - **Route mailbox prefixes.** Wildcard forwarding sends matching local addresses to an existing local inbox.
+- **Review IP reputation.** Connect AbuseIPDB to inspect endpoint usage and capacity, query or report IPs, and automatically block or report repeated abusive sign-ins. Publish the Webmaster verification token directly from administration. See [AbuseIPDB setup](docs/abuseipdb.md).
 - **Limit integration access.** Choose API key permissions independently for administration and personal mailbox APIs. See [mailbox features and permissions](docs/access.md).
 
 <p align="center">
@@ -57,7 +58,7 @@ Keep the executables and `web` folder together. No compiler, Python, or Node.js 
 
 Install [xmake](https://xmake.io/) 2.9.8 or newer and a C++20 compiler. Windows users need Visual Studio 2022's **Desktop development with C++** workload; Linux users can use GCC 12 or newer; macOS users need current Xcode Command Line Tools.
 
-Xmake resolves PACE 0.1.1 from [tab-repo](https://github.com/TabNahida/repo-xmake), with HTTP/1, TLS, and DNS enabled. PACE and PostPlus use the same static OpenSSL 3.6.1; c-ares 1.34.8 supplies asynchronous DNS. See [build dependencies](docs/build-dependencies.md) for package configuration and repository troubleshooting.
+Xmake resolves PACE 0.2.0 from the bundled, checksum-pinned [package recipe](packages/p/pace/xmake.lua), with HTTP/1, TLS, and DNS enabled. PACE and PostPlus use the same static OpenSSL 3.6.1; c-ares 1.34.8 supplies asynchronous DNS. See [build dependencies](docs/build-dependencies.md) for package configuration and repository troubleshooting.
 
 From the repository root:
 

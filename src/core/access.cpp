@@ -39,6 +39,11 @@ std::optional<std::string> required_api_permission(std::string_view method, std:
     if (path == "/api/admin/quota") return read ? "quota:read" : "quota:write";
     if (path == "/api/admin/password-policy") return read ? "policy:read" : "policy:write";
     if (path == "/api/admin/security" && read) return "security:read";
+    if (path == "/api/admin/abuseipdb" && read) return "security:read";
+    if (path == "/api/admin/abuseipdb/settings" && method == "PUT") return "security:write";
+    if (method == "POST" && (path == "/api/admin/abuseipdb/check" || path == "/api/admin/abuseipdb/reports" ||
+        path == "/api/admin/abuseipdb/blacklist" || path == "/api/admin/abuseipdb/check-block" || path == "/api/admin/abuseipdb/bulk-check")) return "security:read";
+    if (method == "POST" && (path == "/api/admin/abuseipdb/report" || path == "/api/admin/abuseipdb/bulk-report" || path == "/api/admin/abuseipdb/clear-address")) return "security:write";
     if ((path == "/api/admin/security/policy" && method == "PUT") ||
         ((path == "/api/admin/security/ban" || path == "/api/admin/security/unban") && method == "POST")) return "security:write";
     if (path == "/api/admin/stats") return read ? std::optional<std::string>("stats:read") : std::nullopt;

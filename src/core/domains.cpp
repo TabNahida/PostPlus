@@ -6,7 +6,10 @@
 #include <algorithm>
 #include <array>
 #include <fstream>
+#include <ctime>
+#include <iomanip>
 #include <set>
+#include <sstream>
 
 namespace postplus {
 std::string webmail_hostname(const Config& config,std::string_view domain) {
@@ -64,6 +67,15 @@ std::string read(const std::filesystem::path& path) {
     return {std::istreambuf_iterator<char>(file),std::istreambuf_iterator<char>()};
 }
 std::int64_t now() {return std::chrono::duration_cast<std::chrono::seconds>(std::chrono::system_clock::now().time_since_epoch()).count();}
+std::string checked_timestamp() {
+    const auto value=std::time(nullptr);std::tm utc{};
+#ifdef _WIN32
+    gmtime_s(&utc,&value);
+#else
+    gmtime_r(&value,&utc);
+#endif
+    std::ostringstream text;text<<std::put_time(&utc,"%Y-%m-%dT%H:%M:%SZ");return text.str();
+}
 Snapshot snapshot(const Config& running) {
     Snapshot result;
     if(running.source.empty()){result.config=running;result.raw=running.values.dump();}
@@ -165,9 +177,17 @@ bool can_activate(const Config& config,const std::string& domain,const Json& ite
 Json record(const Config& config,const std::string& domain,const Json& item) {
     const bool primary=domain==config.text("domain","localhost");
     const auto dns=item.value("dns",Json::object());
+    auto dns_status=dns.value("status",std::string("unchecked"));
+    if(dns_status=="manual_checked") {
+        try {
+            const auto fingerprint=dns_fingerprint(config,domain,item.value("dns_input",Json{{"domain",domain}}));
+            if(!secure_equal(dns.value("fingerprint",std::string{}),fingerprint))dns_status="stale";
+        }catch(const std::exception&){dns_status="stale";}
+    }
     Json result={{"domain",domain},{"primary",primary},{"status",config.hosts_domain(domain)?"active":"pending"},
         {"webmail_hostname",webmail_hostname(config,domain)},{"webmail_hostname_overridden",webmail_hostname(config,domain)!=domain},
-        {"dns_status",dns.value("status",std::string("unchecked"))},{"checked_at",dns.value("checked_at",std::string{})},
+        {"dns_status",dns_status},{"checked_at",dns.value("checked_at",std::string{})},
+        {"checked_manually",dns_status=="manual_checked"},
         {"can_activate",!config.hosts_domain(domain) && can_activate(config,domain,item)},{"can_remove",!primary}};
     auto expectations=item.value("dns_input",Json::object());expectations.erase("domain");result["dns"]=std::move(expectations);
     return result;
@@ -249,6 +269,20 @@ Json domains_check(const Config& running,const Json& request,DnsOptions options)
     entries[domain]["dns"]={{"ready",ready},{"status",ready?(warnings?"warnings":"verified"):"incomplete"},
         {"checked_at",checked.at("checked_at")},{"checked_epoch",now()},{"fingerprint",dns_fingerprint(state.config,domain,input)}};
     store(state,entries);auto result=response(running,state.config,domain,entries.at(domain));result["dns"]=std::move(checked);return result;
+}
+Json domains_mark_checked(const Config& running,const Json& request) {
+    fields(request,{"revision","domain","dns"});const auto domain=domain_field(request);auto state=snapshot(running);editable(running,state,request);
+    auto entries=registry(state.config);if(!entries.contains(domain))throw SettingsError("domain","Add this domain before marking its DNS checked.",404);
+    const auto input=request.contains("dns")?dns_input(request,domain):entries.at(domain).value("dns_input",Json{{"domain",domain}});
+    // Manual attestation is separate evidence, never fabricated resolver output.
+    // The normal revision, relevant-settings fingerprint and pending-domain
+    // evidence lifetime still apply to an administrator's acknowledgement.
+    const auto fingerprint=dns_fingerprint(state.config,domain,input);
+    entries[domain]["dns_input"]=input;
+    entries[domain]["dns"]={{"ready",true},{"status","manual_checked"},{"manual",true},
+        {"checked_at",checked_timestamp()},{"checked_epoch",now()},{"fingerprint",fingerprint}};
+    store(state,entries);log("admin","administrator manually marked DNS checked for "+domain);
+    return response(running,state.config,domain,entries.at(domain));
 }
 Json domains_activate(const Config& running,const Json& request) {
     fields(request,{"revision","domain"});const auto domain=domain_field(request);auto state=snapshot(running);editable(running,state,request);

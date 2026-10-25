@@ -58,6 +58,7 @@ function fixture(){
       return {ok:true,revision:String(revision),record:entries.get(body.domain),dns:{...report(body.domain,body.dns),checked_at:"2026-10-20T12:00:00Z",records:report(body.domain).records.map(record=>({...record,status:"matched",observed:[record.value]}))}};
     }
     if(route==="/api/admin/domains/activate"){assert.equal(entries.get(body.domain).can_activate,true);entries.set(body.domain,{...entries.get(body.domain),status:"active",can_activate:false});}
+    if(route==="/api/admin/domains/mark-checked")entries.set(body.domain,{...entries.get(body.domain),dns_status:"manual_checked",checked_manually:true,checked_at:"2026-10-25T12:00:00Z",can_activate:entries.get(body.domain).status!=="active",...(body.dns?{dns:body.dns}:{})});
     if(route==="/api/admin/domains/remove")entries.delete(body.domain);
     if(route==="/api/admin/domains/update")entries.set(body.domain,{...entries.get(body.domain),webmail_hostname:body.webmail_hostname||body.domain,webmail_hostname_overridden:Boolean(body.webmail_hostname)});
     if(route==="/api/admin/domains/tls")certificates.set(body.hostname,{tls_certificate:body.tls_certificate,tls_private_key:body.tls_private_key,inherited:false});
@@ -68,6 +69,10 @@ function fixture(){
   return {container,component,id,label,buttons,requests,entries,saved,notices,certificates,i18n:sandbox.PostPlusI18n,api:sandbox.window.PostPlusAdminDomains,defer:handler=>{deferred=handler;}};
 }
 async function main(){
+  const manual=fixture();await manual.component.refresh();await manual.buttons("Mark as checked")[0].click();await tick();
+  assert.equal(manual.entries.get("example.com").dns_status,"manual_checked");assert.equal(manual.entries.get("example.com").status,"active");assert.match(manual.container.textContent,/DNS manually checked/);
+  await manual.buttons("Manage domain")[0].click();await tick();manual.id("hosted-domain-dns-ipv4").value="8.8.8.8";await manual.id("hosted-domain-dns-ipv4").fire("input");await manual.id("hosted-domain-dns-mark-checked").click();await tick();
+  assert.equal(manual.entries.get("example.com").dns.ipv4,"8.8.8.8","Manual acknowledgement retains the expected address draft");assert.match(manual.container.textContent,/marked checked by an administrator/);assert.equal(manual.requests.filter(item=>item.url.endsWith("/check")).length,0,"Manual acknowledgement never fabricates a DNS query result");manual.component.dispose();
   const delayed=fixture();await delayed.component.refresh();let finishLoad;
   delayed.defer(()=>new Promise(resolve=>{finishLoad=resolve;}));await delayed.id("domain-tab-portals").click();
   const policyInputs=["domain-admin-hostname","domain-shared-hostname","domain-shared-enabled"];

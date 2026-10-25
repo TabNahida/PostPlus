@@ -6,6 +6,7 @@
 #include <charconv>
 #include <ctime>
 #include <iomanip>
+#include <mutex>
 #include <set>
 #include <sstream>
 
@@ -291,6 +292,44 @@ bool native_connect(const ip::address& address,int port,Clock::time_point deadli
         return true;
     }catch(const std::exception&){return false;}
 }
+std::string native_public_ip(bool ipv6,Clock::time_point deadline) {
+    // Fixed HTTPS services: a browser cannot redirect this fetch or select an
+    // internal target. TLS checks the service's public certificate.
+    const std::string host=ipv6?"api6.ipify.org":"api.ipify.org";
+    Connection peer(std::chrono::seconds(2));peer.set_deadline(deadline);
+    peer.connect(host,443);peer.start_tls_client(host);
+    peer.write("GET / HTTP/1.1\r\nHost: "+host+"\r\nAccept: text/plain\r\nAccept-Encoding: identity\r\nConnection: close\r\n\r\n");
+    const auto status=peer.line(1024);
+    if(!status.starts_with("HTTP/1.1 200 ") && !status.starts_with("HTTP/1.0 200 "))throw std::runtime_error("public IP lookup failed");
+    std::map<std::string,std::string> headers;std::size_t total=0;bool complete=false;
+    for(unsigned index=0;index<32;++index) {
+        const auto line=peer.line(1024);total+=line.size();
+        if(total>8192)throw std::runtime_error("public IP response headers too large");
+        if(line.empty()){complete=true;break;}
+        const auto colon=line.find(':');if(colon==line.npos || !colon)throw std::runtime_error("invalid public IP response");
+        const auto name=lower(line.substr(0,colon));
+        if(!headers.emplace(name,trim(line.substr(colon+1))).second)throw std::runtime_error("duplicate public IP header");
+    }
+    if(!complete || (headers.contains("content-encoding") && lower(headers.at("content-encoding"))!="identity"))throw std::runtime_error("invalid public IP encoding");
+    auto size=[](const std::string& text,int base=10) {
+        unsigned value=0;const auto [end,error]=std::from_chars(text.data(),text.data()+text.size(),value,base);
+        if(text.empty() || error!=std::errc{} || end!=text.data()+text.size() || value>128)throw std::runtime_error("invalid public IP body length");
+        return value;
+    };
+    std::string body;
+    if(headers.contains("transfer-encoding")) {
+        if(headers.contains("content-length") || lower(headers.at("transfer-encoding"))!="chunked")throw std::runtime_error("invalid public IP framing");
+        for(unsigned index=0;index<16;++index) {
+            const auto line=peer.line(128);const auto count=size(line.substr(0,line.find(';')),16);
+            if(!count)return trim(body);
+            if(body.size()+count>128)throw std::runtime_error("public IP response too large");
+            body+=peer.read(count);if(peer.read(2)!="\r\n")throw std::runtime_error("invalid public IP chunk");
+        }
+        throw std::runtime_error("too many public IP chunks");
+    }
+    if(!headers.contains("content-length"))throw std::runtime_error("missing public IP length");
+    return trim(peer.read(size(headers.at("content-length"))));
+}
 Json expected_input(const Config& config,const Json& input) {
     if(!input.is_object())throw DnsError("invalid_dns_input","DNS checks require a JSON object.");
     const std::set<std::string> allowed{"domain","ipv4","ipv6","spf","dkim_name","dkim_type","dkim_value","dmarc"};
@@ -331,6 +370,33 @@ Json expected_input(const Config& config,const Json& input) {
 
 bool is_public_mail_address(const ip::address& address){return public_address(address);}
 bool valid_public_dns_name(std::string_view name){return domain_name(name);}
+Json dns_public_ip_defaults(const Json& input,PublicIpLookup lookup) {
+    if(!input.is_object())throw DnsError("invalid_dns_input","DNS checks require a JSON object.");
+    auto result=input;
+    struct Cached {std::string value;Clock::time_point expires{};};
+    static std::mutex mutex;static std::array<Cached,2> cache;
+    // Network discovery has a separate short budget and never makes the DNS
+    // checker, evidence fingerprints, or activation depend on an HTTP service.
+    for(unsigned index=0;index<2;++index) {
+        const auto key=index?"ipv6":"ipv4";if(result.contains(key))continue;
+        std::string value;
+        try {
+            if(lookup)value=trim(lookup(index!=0,Clock::now()+std::chrono::seconds(2)));
+            else {
+                std::lock_guard lock(mutex);auto& entry=cache[index];
+                if(Clock::now()>=entry.expires) {
+                    entry.value.clear();
+                    try {entry.value=native_public_ip(index!=0,Clock::now()+std::chrono::seconds(2));}catch(const std::exception&){}
+                    entry.expires=Clock::now()+(entry.value.empty()?std::chrono::seconds(30):std::chrono::seconds(300));
+                }
+                value=entry.value;
+            }
+            std::error_code error;const auto address=ip::make_address(value,error);
+            if(!error && public_address(address) && (index?address.is_v6():address.is_v4()))result[key]=address.to_string();
+        }catch(const std::exception&){} // A manual address remains available on lookup failure.
+    }
+    return result;
+}
 Json dns_recommendations(const Config& config,const Json& input) {
     auto expected=expected_input(config,input);const auto domain=expected.at("domain").get<std::string>(),hostname=expected.at("hostname").get<std::string>();
     Json result={{"ok",true},{"domain",domain},{"domains",config.mail_domains()},{"hostname",hostname},{"outbound_mode",config.outbound_mode()},{"expected",expected},{"records",Json::array()}};

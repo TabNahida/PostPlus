@@ -12,7 +12,7 @@ let backupVersion=0,backupTimer=null,shutdownPending=false;
 let updateControl=null,updateBusy=false;
 let passwordPolicyData=null, passwordPolicyVersion=0, userDialogVersion=0, policySaving=false;
 let apiKeysData=null,apiKeysVersion=0,apiKeyDialogVersion=0,apiKeyCreating=false,apiKeyRevoking=false,apiKeyRevokeTarget=null;
-let keyPermissionEditor=null,accessControl=null,securityControl=null,domainControl=null;
+let keyPermissionEditor=null,accessControl=null,securityControl=null,domainControl=null,abuseControl=null;
 let usersData=[];
 let restartJob=null,restartVersion=0,restartTimer=null,restartStarted=0,restartBusy=false,restartText="",restartSubmitting=false;
 let restartServiceTarget=null;
@@ -99,6 +99,7 @@ function signedOut() {
   state.user = null;
   usersData=[];$("users-search").value="";$("users-count").textContent="";$("users-empty").hidden=true;
   accessControl?.dispose();accessControl=null;keyPermissionEditor?.clear();keyPermissionEditor=null;
+  abuseControl?.dispose();abuseControl=null;
   securityControl?.dispose();securityControl=null;
   domainControl?.dispose();domainControl=null;
   clearRestart();
@@ -149,8 +150,10 @@ async function signedIn(user) {
   state.user = user;
   domainControl?.dispose();
   if(window.PostPlusAdminDomains)domainControl=PostPlusAdminDomains.mount($("view-domains"),{api,notice:showNotice,canChange:()=>!settingsSaving&&!restartBusy&&!updateBusy&&!shutdownPending,onSaved:applyDomainChanges});
+  abuseControl?.dispose();
   securityControl?.dispose();
   if(window.PostPlusAdminSecurity)securityControl=PostPlusAdminSecurity.mount($("view-security"),{api,notice:showNotice});
+  if(window.PostPlusAdminAbuseIPDB){const panel=element("section","abuse-panel");$("view-security").append(panel);abuseControl=PostPlusAdminAbuseIPDB.mount(panel,{api,notice:showNotice});}
   accessControl?.dispose();
   if(window.PostPlusAdminAccess)accessControl=PostPlusAdminAccess.mount($("view-accounts"),{api,notice:showNotice,inviteActions:$("account-create-actions"),afterDelete:loadAdmin});
   $("login-screen").hidden = true;
@@ -210,13 +213,13 @@ async function switchView(view) {
   showAdminView(view);
   if (view === "logs") await loadLogs();
   else if (view === "domains") await domainControl?.refresh();
-  else if (view === "security") await securityControl?.refresh();
+  else if (view === "security") await Promise.allSettled([securityControl?.refresh(),abuseControl?.refresh()]);
   else if (view === "api-keys") await loadApiKeys();
   else if (["settings","maintenance","restart"].includes(view)) { if (!settingsData) await loadSettings(); }
   else {await loadAdmin();if(view==="accounts")await accessControl?.refresh();}
 }
 document.querySelectorAll("[data-view]").forEach(button => button.addEventListener("click", () => switchView(button.dataset.view)));
-$("admin-refresh").addEventListener("click", () => state.view === "domains" ? domainControl?.refresh() : state.view === "logs" ? loadLogs() : state.view === "security" ? securityControl?.refresh() : state.view === "api-keys" ? loadApiKeys() : Promise.allSettled([loadAdmin(),state.view==="accounts" ? accessControl?.refresh() : null]));
+$("admin-refresh").addEventListener("click", () => state.view === "domains" ? domainControl?.refresh() : state.view === "logs" ? loadLogs() : state.view === "security" ? Promise.allSettled([securityControl?.refresh(),abuseControl?.refresh()]) : state.view === "api-keys" ? loadApiKeys() : Promise.allSettled([loadAdmin(),state.view==="accounts" ? accessControl?.refresh() : null]));
 
 function renderUsers() {
   const query=$("users-search").value.trim().toLowerCase(),accounts=usersData.filter(account=>account.username.toLowerCase().includes(query));
@@ -739,6 +742,7 @@ document.addEventListener("postplus:language", () => {
   updateSettingsCount();
   updateControl?.translate();
   securityControl?.translate();
+  abuseControl?.translate();
   domainControl?.translate();
   renderPasswordHint();
   renderInspection();

@@ -46,6 +46,10 @@ bool valid_public_dns_name(std::string_view name);
 // Recommendations use saved server settings. Optional expected public DNS
 // values are diagnostic drafts only and never change the configuration.
 Json dns_recommendations(const Config& config,const Json& input=Json::object());
+// Only absent address fields receive defaults. Explicit values, including an
+// intentionally empty field, are retained. The native hook keeps tests offline.
+using PublicIpLookup=std::function<std::string(bool,std::chrono::steady_clock::time_point)>;
+Json dns_public_ip_defaults(const Json& input=Json::object(),PublicIpLookup lookup={});
 class DnsChecker {
 public:
     explicit DnsChecker(DnsOptions options={});

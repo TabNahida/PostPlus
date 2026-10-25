@@ -15,6 +15,7 @@ Json domains_add(const Config& running,const Json& request);
 Json domains_update(const Config& running,const Json& request);
 Json domains_preview(const Config& running,const Json& request);
 Json domains_check(const Config& running,const Json& request,DnsOptions options={});
+Json domains_mark_checked(const Config& running,const Json& request);
 Json domains_activate(const Config& running,const Json& request);
 Json domains_remove(const Config& running,const Json& request);
 }

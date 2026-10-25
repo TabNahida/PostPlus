@@ -1,5 +1,5 @@
 set_project("PostPlus")
-set_version("1.1.0")
+set_version("1.2.0")
 set_xmakever("2.9.8")
 set_languages("c++20")
 set_warnings("allextra")
@@ -7,8 +7,9 @@ set_warnings("allextra")
 set_rundir("$(projectdir)")
 add_rules("mode.debug", "mode.release")
 
-add_repositories("tab-repo https://github.com/TabNahida/repo-xmake.git")
-add_requires("pace 0.1.1", {system = false, configs = {
+-- Keep the PACE release digest with the project until tab-repo supplies it.
+add_repositories("postplus-packages .")
+add_requires("pace 0.2.0", {system = false, configs = {
     tls = true, dns = true, http1 = true, websocket = false, shared = false
 }})
 -- PACE and PostPlus must share one pinned static OpenSSL implementation.
@@ -28,7 +29,7 @@ target("postplus-core")
     add_files("src/core/*.cpp")
     add_headerfiles("include/(postplus/*.hpp)")
     add_includedirs("include", {public = true})
-    add_defines('POSTPLUS_VERSION="1.1.0"', {public = true})
+    add_defines('POSTPLUS_VERSION="1.2.0"', {public = true})
     add_packages("pace", "nlohmann_json", "openssl3", "sqlite3", "zlib", {public = true})
     if is_plat("windows") then
         add_defines("_WIN32_WINNT=0x0A00", "WIN32_LEAN_AND_MEAN", "NOMINMAX", "_CRT_SECURE_NO_WARNINGS", {public = true})
@@ -192,6 +193,12 @@ target("postplus-dns-tests")
     add_files("tests/dns_test.cpp")
     add_deps("postplus-core")
     add_tests("dns")
+
+target("postplus-abuseipdb-tests")
+    set_kind("binary")
+    add_files("tests/abuseipdb_test.cpp")
+    add_deps("postplus-core")
+    add_tests("abuseipdb")
 
 target("postplus-dkim-tests")
     set_kind("binary")

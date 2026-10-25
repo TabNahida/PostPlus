@@ -6,7 +6,7 @@ the `licenses` directory or beside the corresponding web assets.
 
 | Component | Version | License | Source |
 | --- | --- | --- | --- |
-| PACE | 0.1.1 | MIT | <https://github.com/TabNahida/PACE/tree/v0.1.1> |
+| PACE | 0.2.0 | MIT | <https://github.com/TabNahida/PACE/tree/v0.2.0> |
 | c-ares | 1.34.8 | MIT | <https://github.com/c-ares/c-ares/tree/v1.34.8> |
 | JSON for Modern C++ | 3.12.0 | MIT | <https://github.com/nlohmann/json/tree/v3.12.0> |
 | OpenSSL | 3.6.1 | Apache-2.0 | <https://github.com/openssl/openssl/tree/openssl-3.6.1> |
@@ -15,7 +15,7 @@ the `licenses` directory or beside the corresponding web assets.
 | Tabler Icons | 3.34.1 | MIT | <https://github.com/tabler/tabler-icons/tree/v3.34.1> |
 
 PACE copyright (c) 2026 Tab Nahida. Its complete MIT license is in
-`licenses/pace-0.1.1.txt`.
+`licenses/pace-0.2.0.txt`.
 c-ares copyright (c) 1998 Massachusetts Institute of Technology and
 copyright (c) 2007–2023 Daniel Stenberg with many contributors. Its complete
 MIT license is in `licenses/c-ares-1.34.8.txt`.

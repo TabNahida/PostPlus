@@ -1,0 +1,16 @@
+.abuse-panel { margin-top:40px; padding-top:32px; border-top:1px solid var(--line); }
+.abuse-panel h3 { margin:0 0 14px; font-size:16px; font-weight:600; }
+.abuse-settings,.abuse-tools { padding:26px 28px; }
+.abuse-settings>.checkbox-label { margin:18px 0; }
+.abuse-settings .security-policy-grid { margin-top:20px; }
+.abuse-settings>.field-hint { max-width:95ch; margin:14px 0 28px; }
+.abuse-settings input[type=password],.abuse-settings input[type=text] { max-width:100%; }
+.abuse-capacity { margin:30px 0; }
+.abuse-capacity progress { display:block; width:100%; height:10px; margin:0 0 8px; accent-color:var(--green); }
+.abuse-capacity td:nth-child(3) { min-width:160px; width:32%; }
+.abuse-tools select { max-width:340px; }
+.abuse-tools .security-policy-grid { margin-top:24px; }
+.abuse-tools textarea { min-height:130px; resize:vertical; }
+.abuse-result { overflow:auto; max-height:480px; padding:18px; border:1px solid var(--line); border-radius:8px; background:var(--paper); white-space:pre; font:12px/1.7 Consolas,monospace; }
+.abuse-summary { overflow-wrap:anywhere; }
+@media(max-width:600px) { .abuse-settings,.abuse-tools { padding:20px 16px; } }

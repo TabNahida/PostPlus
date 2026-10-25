@@ -27,7 +27,7 @@ jobs:
         with:
           xmake-version: '3.1.1'
           actions-cache-folder: '.xmake-cache'
-          actions-cache-key: '${{ runner.os }}-${{ runner.arch }}-${{ matrix.mode }}-pace-static-v2'
+          actions-cache-key: '${{ runner.os }}-${{ runner.arch }}-${{ matrix.mode }}-pace-020-static-v3'
       - uses: actions/setup-python@v5
         with:
           python-version: '3.13'
@@ -63,6 +63,8 @@ jobs:
         run: |
           node tests/api_keys_ui_test.js
           node tests/security_ui_test.js
+          node tests/abuseipdb_ui_test.js
+          node tests/abuseipdb_ui_test.js
           node tests/verification_code_ui_test.js
           node tests/multi_domain_ui_test.js
           node tests/domain_management_ui_test.js

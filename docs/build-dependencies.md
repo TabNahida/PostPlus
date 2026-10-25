@@ -12,11 +12,11 @@ PostPlus executables do not require Xmake, CMake, or the package cache at runtim
 
 ## PACE configuration
 
-`xmake.lua` uses the upstream package repository and a pinned version:
+`xmake.lua` uses a bundled package recipe and a pinned upstream source archive:
 
 ```lua
-add_repositories("tab-repo https://github.com/TabNahida/repo-xmake.git")
-add_requires("pace 0.1.1", {system = false, configs = {
+add_repositories("postplus-packages .")
+add_requires("pace 0.2.0", {system = false, configs = {
     tls = true, dns = true, http1 = true, websocket = false, shared = false
 }})
 add_requireconfs("pace.openssl3", {override = true, version = "3.6.1",
@@ -24,6 +24,10 @@ add_requireconfs("pace.openssl3", {override = true, version = "3.6.1",
 add_requireconfs("pace.c-ares", {override = true, system = false,
     configs = {shared = false}})
 ```
+
+The local recipe pins the official v0.2.0 source archive with SHA-256
+`f909829aa3f6ba430b4cd772f66a091ad8e142e0919693a9749f066d780460fb`.
+It is included so clean builds do not depend on an external recipe update.
 
 The selected modules are `pace_runtime`, `pace_net`, `pace_http1`, `pace_tls`, and
 `pace_dns`. WebSocket, HTTP/2, QUIC, HTTP/3, and intrusive profiling are disabled.
@@ -51,7 +55,6 @@ cache may predate that version. Update the official repository specifically:
 
 ```sh
 xmake repo --update xmake-repo
-xmake repo --update tab-repo
 xmake f -m release -y
 ```
 

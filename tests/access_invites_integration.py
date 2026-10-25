@@ -2,6 +2,7 @@
 import argparse
 from concurrent.futures import ThreadPoolExecutor
 import hashlib
+import ipaddress
 import json
 import imaplib
 import poplib
@@ -64,7 +65,8 @@ def run(s):
         status, _, result = s.http("admin", method, route, body, bearer(diagnostics_key))
         assert status == 400 and result["code"] == "invalid_dns_input", (status, result)
     assert s.http("admin", "POST", "/api/admin/dns/check", {}, {"Cookie": administrator["Cookie"]})[0] == 403
-    # GET prepares every recommendation without a DNS query or configuration write.
+    # GET prepares every recommendation using optional server-side public-IP
+    # discovery, without testing the mail domain's DNS or writing configuration.
     before = s.path.read_bytes()
     saved = json.loads(before); saved["domain"] = "example.com"; saved["mail_hostname"] = "mail.example.com"
     s.path.write_text(json.dumps(saved), encoding="utf-8")
@@ -72,7 +74,18 @@ def run(s):
         snapshot = s.path.read_bytes()
         status, _, result = s.http("admin", "GET", "/api/admin/dns", headers=bearer(diagnostics_key))
         assert status == 200 and result["domain"] == "example.com" and result["hostname"] == "mail.example.com", (status, result)
-        assert {"a", "aaaa", "mx", "spf", "dkim", "dmarc", "ptr"} <= {record["id"] for record in result["records"]}
+        records = {record["id"]: record for record in result["records"]}
+        assert {"a", "aaaa", "mx", "spf", "dkim", "dmarc"} <= records.keys()
+        discovered = False
+        for field, ptr_id in (("ipv4", "ptr4"), ("ipv6", "ptr6")):
+            address = result["expected"][field]
+            if address:
+                discovered = True
+                assert records[ptr_id]["type"] == "PTR"
+                assert records[ptr_id]["name"] == ipaddress.ip_address(address).reverse_pointer
+                assert records[ptr_id]["value"] == "mail.example.com."
+        if not discovered:
+            assert records["ptr"]["type"] == "PTR" and not records["ptr"]["name"]
         assert s.path.read_bytes() == snapshot, "DNS recommendations must never change server configuration"
         status, _, result = s.http("admin", "POST", "/api/admin/dns/check", {"hostname": "elsewhere.example.org"}, bearer(diagnostics_key))
         assert status == 400 and result["code"] == "invalid_dns_input", (status, result)

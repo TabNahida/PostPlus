@@ -2,6 +2,14 @@
 // Only an explicit choice is persisted. A fresh browser always starts in English.
 window.PostPlusI18n = (() => {
   const chinese = {
+    "Mark as checked":"标记为已检查",
+    "Add this domain before marking its DNS checked.":"请先添加此域名，再手动将其 DNS 标记为已检查。",
+    "Mark DNS checked for {domain}":"将 {domain} 的 DNS 标记为已检查",
+    "DNS manually checked":"DNS 已手动检查",
+    "DNS manually marked as checked.":"DNS 已手动标记为已检查。",
+    "DNS was marked checked by an administrator. The public DNS results below remain unchanged until a new test runs.":"管理员已将 DNS 标记为已检查。下方公网 DNS 查询结果会在再次测试后更新。",
+    "DNS is manually acknowledged. Activate this domain when you are satisfied its records are correct.":"DNS 已由管理员手动确认。请在确认记录正确后启用此域名。",
+    "The server discovers its public IP addresses through HTTPS when no expected address is saved. Check the detected addresses and override them if your mail server uses another public IP. Discovery failures leave the fields available for manual entry.":"未保存预期地址时，服务器会通过 HTTPS 自动获取本机公网 IP。请核对自动获取的地址；若邮件服务使用其他公网 IP，可以手动修改。获取失败时也可手动填写。",
     "Enter a public ASCII domain without a scheme, port or path that fits a mailbox address.":"请输入长度符合邮箱地址限制的公网 ASCII 域名，不要包含协议、端口或路径。",
     "Domain activated. Applying the saved mail configuration…":"域名已启用，正在应用已保存的邮件配置…",
     "DNS incomplete":"DNS 尚未完成",
@@ -1313,7 +1321,86 @@ window.PostPlusI18n = (() => {
     "AAAA · shared Webmail IPv6 (optional)":"AAAA · 统一 Webmail IPv6 地址（可选）",
     "Generate or load the public signing key under DKIM below, or enter your relay's public record above.":"可在下方 DKIM 设置中生成或加载签名公钥，或在上方填写中继服务的公钥记录。"
   });
+  Object.assign(chinese, {
+    "AbuseIPDB": "AbuseIPDB",
+    "Check IP reputation, review API capacity, and act on abusive sign-in attempts.": "查询 IP 信誉、查看 API 配额，并处理异常登录行为。",
+    "Refresh AbuseIPDB": "刷新 AbuseIPDB",
+    "Connection and verification": "连接与站长验证",
+    "Enable AbuseIPDB": "启用 AbuseIPDB",
+    "AbuseIPDB API key": "AbuseIPDB API 密钥",
+    "API key environment variable": "API 密钥环境变量",
+    "Remove the saved API key": "移除已保存的 API 密钥",
+    "Webmaster verification token": "站长验证令牌",
+    "Copy the token from AbuseIPDB Webmaster Settings. The server publishes it at /abuseipdb-verification.html; finish verification on AbuseIPDB.": "填写 AbuseIPDB Webmaster Settings 中的令牌。服务器将在 /abuseipdb-verification.html 提供验证文件，然后请前往 AbuseIPDB 完成验证。",
+    "AbuseIPDB security policy": "AbuseIPDB 安全策略",
+    "Automatic checks run after a failed sign-in. IP allowlists are respected. Reports include local failure counts and protocol, without account names or passwords.": "登录失败后自动查询信誉，遵循 IP 白名单。报告包含本机记录的失败次数和协议，不包含账号名称或密码。",
+    "Automatically block IPs with high abuse confidence": "自动封禁高滥用置信度的 IP",
+    "Minimum abuse confidence (%)": "最低滥用置信度（%）",
+    "Minimum reputation reports": "最低信誉报告数",
+    "Reputation block duration (seconds)": "信誉封禁时长（秒）",
+    "Report lookback (days)": "报告回溯天数",
+    "Reputation cache (seconds)": "信誉缓存时长（秒）",
+    "Local failed sign-ins before reporting": "自动报告所需的本机登录失败次数",
+    "Report cooldown per IP (seconds)": "每个 IP 的报告冷却时间（秒）",
+    "Report categories (comma-separated IDs)": "报告类别（ID 以逗号分隔）",
+    "Automatically report repeated failed sign-ins": "自动报告重复登录失败行为",
+    "Category 18 is brute force. Automatic reporting shares the source IP and observed failure evidence with AbuseIPDB.": "类别 18 表示暴力破解。自动报告会将来源 IP 和记录到的失败证据提交给 AbuseIPDB。",
+    "Save AbuseIPDB settings": "保存 AbuseIPDB 设置",
+    "API usage and capacity": "API 用量与容量",
+    "Limits come from AbuseIPDB response headers after each request. Unknown means no limit has been observed. Refreshing this panel does not consume API requests.": "每次请求后从 AbuseIPDB 响应头读取配额。“未知”表示尚未获取到配额。刷新此面板不消耗 API 请求次数。",
+    "Endpoint": "接口",
+    "Usage / capacity": "用量 / 容量",
+    "Utilization": "使用率",
+    "Quota resets": "配额重置时间",
+    "IP reputation tools": "IP 信誉工具",
+    "Run AbuseIPDB request": "执行 AbuseIPDB 请求",
+    "Include report details": "包含报告详情",
+    "Page": "页码",
+    "Reports per page": "每页报告数",
+    "Maximum IPs": "最多 IP 数量",
+    "Network (CIDR)": "网络（CIDR）",
+    "Observed abuse evidence": "已观察到的滥用证据",
+    "IP addresses (one per line)": "IP 地址（每行一个）",
+    "Report CSV": "报告 CSV",
+    "Upload report CSV": "上传报告 CSV",
+    "Use a CSV file of up to 1 MiB.": "CSV 文件大小不能超过 1 MiB。",
+    "Unable to read the CSV file.": "无法读取 CSV 文件。",
+    "Bulk checks use individual check requests (up to 20 IPs). Each IP consumes check capacity; no separate bulk-check allowance is assumed.": "批量查询会逐个调用 check 接口（最多 20 个 IP）。每个 IP 消耗 check 配额，不假定存在独立的 bulk-check 配额。",
+    "Paste or upload CSV with IP, Categories, ReportDate and Comment columns. Quote categories containing commas. Submit only abuse you observed.": "粘贴或上传包含 IP、Categories、ReportDate、Comment 列的 CSV。类别中有逗号时需加引号。仅提交你已观察到的滥用行为。",
+    "Remove your own reports for this IP from AbuseIPDB. This does not remove other users' reports or local IP blocks.": "从 AbuseIPDB 移除你对该 IP 提交的报告。其他用户的报告和本地 IP 封禁不受影响。",
+    "Submit only abuse you observed. The IP, categories and comment are sent to AbuseIPDB.": "仅提交已观察到的滥用行为。IP、类别和说明将发送至 AbuseIPDB。",
+    "Requests use the server's saved API key. Available capacity and access depend on your AbuseIPDB account.": "请求使用服务器保存的 API 密钥。可用容量和接口权限由你的 AbuseIPDB 账号决定。",
+    "Use category IDs from 1 to 23, separated by commas.": "请填写 1 至 23 的类别 ID，以逗号分隔。",
+    "The report CSV has an unclosed quoted field.": "报告 CSV 中存在未闭合的引号。",
+    "Check the report CSV columns and quoting.": "请检查报告 CSV 的列数和引号格式。",
+    "Use 1 to 1,000 CSV rows with IP, Categories and Comment columns.": "CSV 应包含 1 至 1,000 行报告，以及 IP、Categories、Comment 列。",
+    "Uses check capacity": "使用 check 配额",
+    "Individual checks": "逐个查询",
+    "Unknown": "未知",
+    "An API key is configured. Leave the key field blank to keep it.": "已配置 API 密钥。密钥输入框留空可保留现有密钥。",
+    "No API key is configured. Enter a key or configure the environment variable on the server.": "尚未配置 API 密钥。请填写密钥或在服务器上设置环境变量。",
+    "Loading AbuseIPDB…": "正在加载 AbuseIPDB…",
+    "AbuseIPDB settings loaded.": "AbuseIPDB 设置已加载。",
+    "AbuseIPDB settings saved. Policy changes apply immediately.": "AbuseIPDB 设置已保存，安全策略立即生效。",
+    "Requesting AbuseIPDB…": "正在请求 AbuseIPDB…",
+    "Abuse confidence: {score}% · Reports: {reports}": "滥用置信度：{score}% · 报告数：{reports}",
+    "AbuseIPDB request completed.": "AbuseIPDB 请求已完成。"
+});
+  Object.assign(chinese, {
+    "AbuseIPDB reputation": "AbuseIPDB 信誉封禁",
+    "Check the AbuseIPDB field: {field}.": "请检查 AbuseIPDB 字段：{field}。",
+    "AbuseIPDB settings changed. Reload before saving.": "AbuseIPDB 设置已发生更改，请重新加载后再保存。",
+    "AbuseIPDB is disabled or its API key is missing.": "AbuseIPDB 未启用，或尚未配置 API 密钥。",
+    "AbuseIPDB requests are busy. Retry shortly.": "AbuseIPDB 请求繁忙，请稍后重试。",
+    "Unable to reach AbuseIPDB over verified HTTPS.": "无法通过受验证的 HTTPS 连接访问 AbuseIPDB。",
+    "AbuseIPDB quota is exhausted. Retry after the reset.": "AbuseIPDB 配额已用尽，请在重置后重试。",
+    "AbuseIPDB rejected the request. Check the API key, subscription, and parameters.": "AbuseIPDB 拒绝了请求，请检查 API 密钥、账号权限和请求参数。",
+    "AbuseIPDB returned an invalid response.": "AbuseIPDB 返回了无效响应。"
+});
+  Object.assign(chinese, {"Partial batch: {completed} of {requested} IPs processed. Retry the remaining IPs.":"批量查询部分完成：已处理 {completed}/{requested} 个 IP。请重试剩余 IP。"});
   function error(data) {
+    if(data?.code==="invalid_abuseipdb")return t("Check the AbuseIPDB field: {field}.",{field:data.field||""});
+    if(data?.code==="abuseipdb_settings_conflict")return t("AbuseIPDB settings changed. Reload before saving.");
     if(data?.code==="ip_banned")return t(data.permanent===true?"Authentication blocked. Contact the administrator to restore access.":"Authentication temporarily blocked. Try again later.");
     if(data?.code==="invalid_security_policy")return t("Check the login security policy fields.");
     if(data?.code==="security_policy_conflict")return t("Login security policy changed. Reload it before saving again.");

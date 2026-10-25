@@ -83,6 +83,14 @@ template<class F>void rejects(F call){try{call();}catch(const DnsError& error){c
 }
 int main(){try {
     ip_values();
+    unsigned ip_requests=0;
+    const PublicIpLookup discovered=[&](bool ipv6,auto deadline){++ip_requests;check(deadline>std::chrono::steady_clock::now(),"public IP discovery needs a bounded future deadline");return ipv6?"2606:4700::1111":"93.184.216.34";};
+    auto defaults=dns_public_ip_defaults(Json::object(),discovered);
+    check(defaults.at("ipv4")=="93.184.216.34" && defaults.at("ipv6")=="2606:4700::1111" && ip_requests==2,"public address defaults must come from the server-side lookup");
+    ip_requests=0;defaults=dns_public_ip_defaults({{"ipv4","8.8.8.8"},{"ipv6",""}},discovered);
+    check(defaults.at("ipv4")=="8.8.8.8" && defaults.at("ipv6")=="" && ip_requests==0,"explicit addresses and intentionally empty IPv6 must skip discovery");
+    defaults=dns_public_ip_defaults(Json::object(),[](bool,auto){return "127.0.0.1";});check(defaults.empty(),"private or wrong-family public API results must be rejected");
+    defaults=dns_public_ip_defaults(Json::object(),[](bool,auto)->std::string{throw std::runtime_error("offline");});check(defaults.empty(),"failed public IP lookups must leave manual entry available");
     Fixture fixture;
     fixture.answers[{"mail.example.com",1}]={Fixture::address("93.184.216.34")};
     fixture.answers[{"mail.example.com",28}]={Fixture::address("2606:4700::1111")};

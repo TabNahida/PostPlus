@@ -2,6 +2,7 @@
 #include <postplus/data_lock.hpp>
 #include <postplus/password_policy.hpp>
 #include <postplus/access.hpp>
+#include <postplus/abuseipdb.hpp>
 #include <openssl/evp.h>
 #include <openssl/rand.h>
 #include <sqlite3.h>
@@ -276,6 +277,14 @@ public:
                     "PRAGMA user_version=4;");
                 migration.commit();
             }
+            execute("CREATE TABLE IF NOT EXISTS abuseipdb_settings (id INTEGER PRIMARY KEY CHECK(id=1),settings TEXT NOT NULL,revision INTEGER NOT NULL);");
+            {
+                Statement initial(db_, "INSERT OR IGNORE INTO abuseipdb_settings VALUES(1,?,1)");
+                initial.text(1, abuseipdb_defaults().dump()); initial.done();
+                Statement saved(db_, "SELECT settings FROM abuseipdb_settings WHERE id=1");
+                if (saved.step() != SQLITE_ROW) throw std::runtime_error("cannot read AbuseIPDB settings");
+                abuseipdb_ = std::make_unique<AbuseIpDb>(); abuseipdb_->configure(Json::parse(saved.string(0)));
+            }
 #ifndef _WIN32
             std::filesystem::permissions(directory / "auth.sqlite3", std::filesystem::perms::owner_read | std::filesystem::perms::owner_write);
 #endif
@@ -293,6 +302,12 @@ public:
         if (operation == "api_key_verify") return verify_api_key(request);
         if (operation == "security_check") return security_check(request);
         if (operation == "security_failure") return security_failure(request);
+        if (operation == "abuseipdb_verification") {
+            std::lock_guard guard(mutex_);
+            return {{"ok",true},{"verification_token",abuseipdb_->settings().at("verification_token")}};
+        }
+        if (operation == "abuseipdb_get" || operation == "abuseipdb_settings" || operation == "abuseipdb_action")
+            return manage_abuseipdb(request, operation);
         if (operation == "security_get" || operation == "security_policy_set" || operation == "security_unban" || operation == "security_ban")
             return manage_security(request, operation);
         if (operation == "api_key_list" || operation == "api_key_create" || operation == "api_key_update" || operation == "api_key_revoke")
@@ -455,6 +470,24 @@ private:
         auth_audit(peer, "blocked", "ip_banned");
         return banned_response(query.integer64(0), now);
     }
+    // Called with the DB mutex held. All upstream work runs on the independent
+    // AbuseIPDB worker; this indexed/cache-only path also covers a second AUTH
+    // attempt made on the same SMTP, IMAP or POP3 connection.
+    std::optional<Json> cached_abuse_ban(const AuthPeer& peer,std::int64_t now) {
+        const auto reputation=abuseipdb_->reputation(peer.ip,true);
+        if(!reputation)return {};
+        const auto settings=abuseipdb_->settings();
+        if(!settings.at("enabled").get<bool>() || !settings.at("auto_ban").get<bool>() ||
+            reputation->at("abuseConfidenceScore").get<std::int64_t>()<settings.at("score_threshold").get<int>() ||
+            reputation->at("totalReports").get<std::int64_t>()<settings.at("min_reports").get<int>())return {};
+        Statement size(db_,"SELECT COUNT(*) FROM security_bans");
+        if(size.step()!=SQLITE_ROW || size.integer(0)>=max_security_ips)return {};
+        const auto expires=now+settings.at("ban_seconds").get<int>();
+        Statement ban(db_,"INSERT OR REPLACE INTO security_bans VALUES(?,?,?,'abuseipdb_reputation',0,0)");
+        ban.text(1,peer.ip);ban.integer64(2,now);ban.integer64(3,expires);ban.done();
+        log("auth","login IP banned ip="+peer.ip+" reason=abuseipdb_reputation score="+std::to_string(reputation->at("abuseConfidenceScore").get<int>()),"warn");
+        return banned_response(expires,now);
+    }
     // Called under mutex_ before a hash. Reservations bound concurrent expensive
     // work while failures are still being calculated; a success releases only its
     // own reservation and never erases previous failed attempts.
@@ -465,6 +498,7 @@ private:
         if (peer.ip.empty()) return {};
         const auto policy = security_policy_view().at("policy");
         if (!policy.at("enabled").get<bool>() || allowlisted(policy, peer.ip)) return {};
+        if (const auto banned = cached_abuse_ban(peer,now)) return banned;
         int failures = 0, unknown_failures = 0;
         bool exists = false;
         Statement count(db_, "SELECT failures,unknown_failures,window_start FROM security_attempts WHERE ip=?"); count.text(1, peer.ip);
@@ -531,6 +565,7 @@ private:
         Statement count(db_, "SELECT failures,unknown_failures FROM security_attempts WHERE ip=?"); count.text(1, peer.ip);
         if (count.step() != SQLITE_ROW) throw std::runtime_error("cannot read login security counter");
         const int failures = count.integer(0), unknown = count.integer(1);
+        abuseipdb_->observe_failures(peer.ip, peer.protocol, failures);
         if (failures < policy.at("failure_threshold").get<int>() && unknown < policy.at("unknown_user_threshold").get<int>()) return {};
         Statement size(db_, "SELECT COUNT(*) FROM security_bans");
         if (size.step() != SQLITE_ROW || size.integer(0) >= max_security_ips) return {};
@@ -552,7 +587,11 @@ private:
         required_string(request, "protocol", 32);
         const auto peer = auth_peer(request);
         std::lock_guard guard(mutex_);
-        if (const auto banned = active_ban(peer, unix_seconds())) return *banned;
+        const auto now=unix_seconds();
+        if (const auto banned=active_ban(peer,now))return *banned;
+        const auto policy=security_policy_view().at("policy");
+        if(policy.at("enabled").get<bool>() && !allowlisted(policy,peer.ip))
+            if(const auto banned=cached_abuse_ban(peer,now))return *banned;
         return {{"ok", true}};
     }
     Json security_failure(const Json& request) {
@@ -582,6 +621,45 @@ private:
                 {"reason", query.string(3)}, {"failures", query.integer(4)}, {"unknown_failures", query.integer(5)}});
         }
         return result;
+    }
+    Json abuseipdb_view() {
+        Statement saved(db_, "SELECT revision FROM abuseipdb_settings WHERE id=1");
+        if (saved.step()!=SQLITE_ROW) throw std::runtime_error("cannot read AbuseIPDB settings revision");
+        auto result=abuseipdb_->view();result["revision"]=saved.integer64(0);result["restart_required"]=false;return result;
+    }
+    Json manage_abuseipdb(const Json& request,const std::string& operation) {
+        try {
+            const auto actor=lower(trim(required_string(request,"actor",254)));
+            if(!valid_address(actor))throw std::invalid_argument("invalid actor");
+            {
+                std::lock_guard guard(mutex_);
+                Statement admin(db_,"SELECT admin FROM users WHERE username=?");admin.text(1,actor);
+                if(admin.step()!=SQLITE_ROW || admin.integer(0)!=1)return {{"ok",false},{"status",403},{"code","administrator_required"},{"error","Administrator access is required."}};
+                if(operation=="abuseipdb_get")return abuseipdb_view();
+                if(operation=="abuseipdb_settings") {
+                    if(!request.contains("settings") || !request.contains("revision") || !request.at("revision").is_number_integer() ||
+                        (request.at("revision").is_number_unsigned() && request.at("revision").get<std::uint64_t>()>INT64_C(9007199254740990)) || request.at("revision").get<std::int64_t>()<1)
+                        throw AbuseError("revision","Provide the current settings revision.");
+                    const auto current=abuseipdb_view();
+                    if(request.at("revision")!=current.at("revision")) {
+                        auto result=current;result["ok"]=false;result["status"]=409;result["code"]="abuseipdb_settings_conflict";result["error"]="AbuseIPDB settings changed. Reload before saving.";return result;
+                    }
+                    const auto settings=validate_abuseipdb_settings(abuseipdb_->settings(),request.at("settings"));
+                    if(settings!=abuseipdb_->settings()) {
+                        Statement save(db_,"UPDATE abuseipdb_settings SET settings=?,revision=revision+1 WHERE id=1");save.text(1,settings.dump());save.done();
+                        abuseipdb_->configure(settings);
+                        log("auth","AbuseIPDB settings changed actor="+audit_value(actor));
+                    }
+                    return abuseipdb_view();
+                }
+            }
+            const auto endpoint=required_string(request,"endpoint",32);
+            if(!request.contains("input"))throw AbuseError("input","Provide AbuseIPDB parameters.");
+            auto result=abuseipdb_->perform(endpoint,request.at("input"));
+            if(endpoint=="report" || endpoint=="bulk-report" || endpoint=="clear-address")
+                log("auth","AbuseIPDB "+endpoint+" actor="+audit_value(actor)+" outcome="+(result.value("ok",false)?"success":"failed"));
+            return result;
+        } catch(const AbuseError& error) {return {{"ok",false},{"status",400},{"code","invalid_abuseipdb"},{"field",error.field},{"error",error.what()}};}
     }
     Json manage_security(const Json& request, const std::string& operation) {
         const auto actor = lower(trim(required_string(request, request.contains("actor") ? "actor" : "username", 254)));
@@ -1184,6 +1262,7 @@ private:
     std::string dummy_salt_, domain_;
     std::vector<std::string> domains_;
     std::mutex mutex_;
+    std::unique_ptr<AbuseIpDb> abuseipdb_;
     struct Rate { std::chrono::steady_clock::time_point expires; unsigned count = 0; };
     std::map<std::string, Rate> attempts_;
     Rate global_attempts_{};

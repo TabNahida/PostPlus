@@ -1,8 +1,8 @@
 # Binary releases
 
 Download an archive for your computer from [GitHub Releases](https://github.com/TabNahida/PostPlus/releases).
-See the [1.1.0 release notes](releases/1.1.0.md) for the refreshed Webmail and
-administration interface and upgrade guidance.
+See the [1.2.0 release notes](releases/1.2.0.md) for DNS review controls, AbuseIPDB integration, PACE 0.2.0,
+and upgrade guidance.
 Each archive contains the native launcher, its service executables, web pages,
 documentation, the example configuration, and license notices. No compiler,
 xmake, Python, Node.js, or separate OpenSSL/SQLite installation is needed to run
@@ -27,25 +27,25 @@ SHA-256 value against its entry before extracting it:
 
 ```powershell
 # Windows PowerShell
-Get-FileHash .\postplus-1.1.0-windows-x64.zip -Algorithm SHA256
-Expand-Archive .\postplus-1.1.0-windows-x64.zip -DestinationPath .
-Set-Location .\postplus-1.1.0
+Get-FileHash .\postplus-1.2.0-windows-x64.zip -Algorithm SHA256
+Expand-Archive .\postplus-1.2.0-windows-x64.zip -DestinationPath .
+Set-Location .\postplus-1.2.0
 .\postplus.exe
 ```
 
 ```sh
 # Linux
-sha256sum postplus-1.1.0-linux-x86_64.tar.gz
-tar -xzf postplus-1.1.0-linux-x86_64.tar.gz
-cd postplus-1.1.0
+sha256sum postplus-1.2.0-linux-x86_64.tar.gz
+tar -xzf postplus-1.2.0-linux-x86_64.tar.gz
+cd postplus-1.2.0
 ./postplus
 ```
 
 ```sh
 # macOS
-shasum -a 256 postplus-1.1.0-macosx-arm64.tar.gz
-tar -xzf postplus-1.1.0-macosx-arm64.tar.gz
-cd postplus-1.1.0
+shasum -a 256 postplus-1.2.0-macosx-arm64.tar.gz
+tar -xzf postplus-1.2.0-macosx-arm64.tar.gz
+cd postplus-1.2.0
 ./postplus
 ```
 
