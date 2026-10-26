@@ -5,6 +5,7 @@
 #include <future>
 #include <iostream>
 #include <mutex>
+#include <set>
 #include <thread>
 
 using namespace postplus;
@@ -102,6 +103,69 @@ int main(){try{
     check(background.reputation("8.8.8.8",true).has_value() && background_calls==1,"failed sign-in did not cache background intelligence");
     check(required_api_permission("POST","/api/admin/abuseipdb/check")=="security:read","read permission missing");
     check(required_api_permission("POST","/api/admin/abuseipdb/report")=="security:write","write permission missing");
+    check(required_api_permission("POST","/api/admin/abuseipdb/quotas/refresh")=="security:write","quota refresh must require write permission");
+    {
+        int probes=0;std::set<std::string> queried;
+        AbuseIpDb capacity([&](const AbuseHttpRequest& request,const auto& key,auto deadline){
+            check(request.method=="GET" && request.body.empty(),"capacity discovery performed a mutation");
+            check(key=="private-test-secret","quota probe used a different secret");
+            check(deadline<=std::chrono::steady_clock::now()+std::chrono::seconds(4),"quota probe lacks bounded deadline");
+            queried.insert(request.target.substr(0,request.target.find('?')));++probes;
+            return AbuseHttpResponse{200,{{"x-ratelimit-limit","1000"},{"x-ratelimit-remaining","999"}},R"({"data":{}})"};
+        });
+        auto disabled=settings();disabled["enabled"]=false;capacity.configure(disabled);
+        check(capacity.perform("check",{{"ipAddress","8.8.8.8"}}).at("code")=="abuseipdb_not_configured","ordinary requests bypassed disabled state");
+        const auto discovered=capacity.refresh_quotas();
+        check(discovered.at("status")=="complete" && probes==4 && queried==std::set<std::string>{"check","reports","blacklist","check-block"},"quota discovery did not use exactly four safe read endpoints");
+        check(!capacity.settings().at("enabled").get<bool>(),"quota refresh enabled protection");
+        check(capacity.refresh_quotas().at("status")=="cooldown" && probes==4,"capacity refresh repeated scarce API requests");
+        const auto capacity_view=capacity.view();
+        for(const auto& row:capacity_view.at("quotas"))if(row.at("endpoint")=="report" || row.at("endpoint")=="bulk-report" || row.at("endpoint")=="clear-address")
+            check(row.at("limit").is_null() && row.at("used").is_null(),"mutation-only quota was invented");
+        disabled["api_key"]="";capacity.configure(disabled);
+        check(capacity.refresh_quotas().at("status")=="not_configured" && probes==4,"key removal left quota probing enabled");
+    }
+    {
+        int probes=0;AbuseIpDb invalid_key([&](const auto&,const auto&,auto){++probes;return AbuseHttpResponse{401,{},"{}"};});
+        invalid_key.configure(settings());
+        check(invalid_key.refresh_quotas().at("status")=="failed" && probes==1,"invalid key spent additional endpoint requests");
+        check(invalid_key.view().at("api_key_configured")==true,"quota failure deleted the saved key");
+    }
+    {
+        int probes=0;AbuseIpDb no_budget([&](const auto&,const auto&,auto){++probes;return AbuseHttpResponse{};});no_budget.configure(settings());
+        const auto budget_result=no_budget.refresh_quotas(std::chrono::milliseconds(0));
+        check(budget_result.at("status")=="failed" && probes==0,"zero budget sent an upstream request");
+        for(const auto& probe:budget_result.at("probes"))check(probe.at("code")=="skipped","expired probe not marked skipped");
+    }
+    {
+        std::promise<void> began,release;auto released=release.get_future().share();std::atomic<int> newer_calls{0};
+        AbuseIpDb rotated([&](const auto&,const std::string& key,auto){
+            if(key=="private-test-secret"){began.set_value();released.wait_for(std::chrono::seconds(2));}
+            else{check(key=="replacement-secret","unexpected rotated key");++newer_calls;}
+            return AbuseHttpResponse{200,{{"x-ratelimit-limit",key=="private-test-secret"?"1000":"3000"},{"x-ratelimit-remaining","2999"}},R"({"data":{}})"};
+        });
+        auto configured=settings();rotated.configure(configured);
+        auto old=std::async(std::launch::async,[&]{return rotated.refresh_quotas();});
+        if(began.get_future().wait_for(std::chrono::seconds(2))!=std::future_status::ready){release.set_value();check(false,"old key probe failed to start");}
+        check(rotated.refresh_quotas().at("status")=="busy","same-key refresh was not deduplicated");
+        configured["api_key"]="replacement-secret";rotated.configure(configured);
+        const auto next=rotated.refresh_quotas();release.set_value();const auto stale=old.get();
+        check(next.at("status")=="complete" && newer_calls==4,"rotated key could not discover its own capacities");
+        check(stale.at("status")=="settings_changed","old-key refresh overwrote current state");
+        check(rotated.view().at("quota_refresh").at("status")=="complete","old refresh discarded new-key observations");
+    }
+    {
+        std::promise<void> release;auto released=release.get_future().share();std::atomic<int> active_calls{0};
+        AbuseIpDb occupied([&](const auto&,const auto&,auto){++active_calls;released.wait_for(std::chrono::seconds(2));return AbuseHttpResponse{200,{{"x-ratelimit-limit","1000"},{"x-ratelimit-remaining","998"}},R"({"data":{}})"};});occupied.configure(settings());
+        auto first=std::async(std::launch::async,[&]{return occupied.perform("check",{{"ipAddress","8.8.8.8"}});});
+        auto second=std::async(std::launch::async,[&]{return occupied.perform("reports",{{"ipAddress","8.8.8.8"}});});
+        const auto occupied_deadline=std::chrono::steady_clock::now()+std::chrono::seconds(2);
+        while(active_calls<2 && std::chrono::steady_clock::now()<occupied_deadline)std::this_thread::sleep_for(std::chrono::milliseconds(1));
+        if(active_calls!=2){release.set_value();check(false,"fixture failed to occupy upstream slots");}
+        const auto busy=occupied.refresh_quotas();release.set_value();first.get();second.get();
+        check(busy.at("status")=="busy" && busy.at("checked_at").is_null(),"unsent quota probes entered cooldown");
+        check(occupied.refresh_quotas().at("status")=="complete","capacity remained blocked after request slots freed");
+    }
     check(!required_api_permission("POST","/api/admin/abuseipdb/unknown"),"unknown endpoint permitted");
     std::cout<<"AbuseIPDB request validation, quotas, caching, backoff, report evidence and permissions passed\n";return 0;
 }catch(const std::exception& error){std::cerr<<error.what()<<'\n';return 1;}}

@@ -1398,6 +1398,43 @@ window.PostPlusI18n = (() => {
     "AbuseIPDB returned an invalid response.": "AbuseIPDB 返回了无效响应。"
 });
   Object.assign(chinese, {"Partial batch: {completed} of {requested} IPs processed. Retry the remaining IPs.":"批量查询部分完成：已处理 {completed}/{requested} 个 IP。请重试剩余 IP。"});
+  Object.assign(chinese, {
+    "Security": "安全",
+    "Weeks": "周",
+    "Saved API key": "已保存的 API 密钥",
+    "Modify API key": "修改 API 密钥",
+    "New API key": "新 API 密钥",
+    "Advanced key source": "高级密钥来源",
+    "An environment key takes precedence over a saved key. Leave the new key blank to keep the saved key.": "环境变量中的密钥优先于已保存的密钥。新密钥留空可保留现有密钥。",
+    "API key configured": "已配置 API 密钥",
+    "No API key configured": "尚未配置 API 密钥",
+    "The configured key is hidden. Choose Modify API key to replace it.": "已配置的密钥已隐藏。点击“修改 API 密钥”可更换。",
+    "Add an API key to connect AbuseIPDB.": "添加 API 密钥以连接 AbuseIPDB。",
+    "Save API key": "保存 API 密钥",
+    "Webmaster verification": "站长验证",
+    "Save verification token": "保存验证令牌",
+    "Reputation block duration": "信誉封禁时长",
+    "Report lookback": "报告回溯时间",
+    "Reputation cache duration": "信誉缓存时长",
+    "Report cooldown per IP": "每个 IP 的报告冷却时间",
+    "Use {min} to {max} whole days.": "请设置 {min} 至 {max} 天，换算后须为整数天。",
+    "Use {min} to {max} whole seconds.": "请设置 {min} 至 {max} 秒，换算后须为整数秒。",
+    "Save AbuseIPDB policy": "保存 AbuseIPDB 策略",
+    "Saving an API key checks capacity with one request to each read endpoint: check, reports, blacklist and check-block. Report, bulk-report and clear-address quotas appear after a real operation.": "保存 API 密钥后，会分别调用 check、reports、blacklist、check-block 各一次以获取配额。report、bulk-report、clear-address 的配额在实际执行相应操作后显示。",
+    "Refresh capacity": "刷新配额",
+    "Fetching available capacity…": "正在获取可用配额…",
+    "Available capacity refreshed.": "可用配额已刷新。",
+    "Some capacity information is unavailable. Unobserved limits remain unknown.": "部分配额信息暂不可用。未获取到的额度仍显示为未知。",
+    "Capacity refresh failed. Your saved API key is retained.": "配额刷新失败，已保存的 API 密钥仍然保留。",
+    "Configure an API key before refreshing capacity.": "请先配置 API 密钥，再刷新配额。",
+    "Capacity was refreshed recently. Try again later.": "刚刚已刷新过配额，请稍后重试。",
+    "Capacity refresh is already running.": "配额刷新正在进行中。",
+    "AbuseIPDB API key saved.": "AbuseIPDB API 密钥已保存。",
+    "Webmaster verification token saved.": "站长验证令牌已保存。",
+    "AbuseIPDB policy saved. Changes apply immediately.": "AbuseIPDB 策略已保存，更改立即生效。",
+    "Enter a replacement key or remove the saved key, not both.": "请选择更换密钥或移除已保存的密钥，不能同时执行。",
+    "Quota refresh does not accept parameters.": "配额刷新不接受额外参数。"
+});
   function error(data) {
     if(data?.code==="invalid_abuseipdb")return t("Check the AbuseIPDB field: {field}.",{field:data.field||""});
     if(data?.code==="abuseipdb_settings_conflict")return t("AbuseIPDB settings changed. Reload before saving.");

@@ -1,6 +1,18 @@
 .abuse-panel { margin-top:40px; padding-top:32px; border-top:1px solid var(--line); }
 .abuse-panel h3 { margin:0 0 14px; font-size:16px; font-weight:600; }
-.abuse-settings,.abuse-tools { padding:26px 28px; }
+.abuse-settings,.abuse-tools,.abuse-key-card,.abuse-verification-card { padding:26px 28px; }
+.abuse-credentials { display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); gap:24px; margin:24px 0; }
+.abuse-credentials .settings-group { min-width:0; margin:0; }
+.abuse-credentials .security-field>input { max-width:100%; }
+.abuse-credentials .field-hint { margin:14px 0 20px; max-width:70ch; }
+.abuse-key-state { font-size:12px; line-height:1.7; color:var(--muted); }
+.abuse-key-summary>input { width:100%; margin-top:0; }
+.abuse-key-summary>input::placeholder { color:var(--muted); }
+.abuse-key-editor { margin-top:20px; }
+.abuse-key-editor>.checkbox-label { margin:18px 0; }
+.abuse-key-advanced { margin:20px 0; }
+.abuse-key-advanced>summary { font-size:13px; cursor:pointer; margin-bottom:18px; }
+.abuse-credentials .security-policy-actions { flex-wrap:wrap; margin-top:20px; }
 .abuse-settings>.checkbox-label { margin:18px 0; }
 .abuse-settings .security-policy-grid { margin-top:20px; }
 .abuse-settings>.field-hint { max-width:95ch; margin:14px 0 28px; }
@@ -13,4 +25,5 @@
 .abuse-tools textarea { min-height:130px; resize:vertical; }
 .abuse-result { overflow:auto; max-height:480px; padding:18px; border:1px solid var(--line); border-radius:8px; background:var(--paper); white-space:pre; font:12px/1.7 Consolas,monospace; }
 .abuse-summary { overflow-wrap:anywhere; }
-@media(max-width:600px) { .abuse-settings,.abuse-tools { padding:20px 16px; } }
+@media(max-width:900px) { .abuse-credentials { grid-template-columns:minmax(0,1fr); } }
+@media(max-width:600px) { .abuse-settings,.abuse-tools,.abuse-key-card,.abuse-verification-card { padding:20px 16px; } }

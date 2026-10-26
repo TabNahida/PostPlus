@@ -28,6 +28,9 @@ public:
     void configure(const Json& settings);
     Json settings() const;
     Json view() const;
+    // Fixed read-only probes discover observed endpoint limits, even while
+    // protection is disabled. Never submits or removes an abuse report.
+    Json refresh_quotas(std::chrono::milliseconds budget = std::chrono::seconds(18));
     Json perform(const std::string& endpoint, const Json& input);
     // Public addresses only. Cached checks and unavailable upstreams fail open.
     std::optional<Json> reputation(const std::string& ip, bool cached_only = false);

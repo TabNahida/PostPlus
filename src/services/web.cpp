@@ -952,6 +952,9 @@ private:
                         command[name]=value;
                     }
                     command["op"]="abuseipdb_settings";
+                } else if(request.method=="POST" && path=="/api/admin/abuseipdb/quotas/refresh") {
+                    if(!request_json(request).empty())throw ApiError(400,"Quota refresh does not accept parameters.");
+                    command["op"]="abuseipdb_quotas_refresh";
                 } else if(request.method=="POST" && path.starts_with("/api/admin/abuseipdb/")) {
                     command["op"]="abuseipdb_action";command["endpoint"]=path.substr(std::string("/api/admin/abuseipdb/").size());command["input"]=request_json(request);
                 } else throw ApiError(405,"Unsupported AbuseIPDB operation.");

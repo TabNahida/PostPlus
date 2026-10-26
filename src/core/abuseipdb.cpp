@@ -102,7 +102,7 @@ std::uint64_t unsigned_text(const std::string& text, int base = 10) {
 AbuseHttpResponse native_transport(const AbuseHttpRequest& request, const std::string& key, Clock::time_point deadline) {
     Connection connection(std::chrono::seconds(4)); connection.set_deadline(deadline);
     connection.connect("api.abuseipdb.com",443); connection.start_tls_client("api.abuseipdb.com");
-    std::string wire = request.method + " /api/v2/" + request.target + " HTTP/1.1\r\nHost: api.abuseipdb.com\r\nAccept: application/json\r\nAccept-Encoding: identity\r\nKey: " + key + "\r\nUser-Agent: PostPlus/1.2.0\r\nConnection: close\r\n";
+    std::string wire = request.method + " /api/v2/" + request.target + " HTTP/1.1\r\nHost: api.abuseipdb.com\r\nAccept: application/json\r\nAccept-Encoding: identity\r\nKey: " + key + "\r\nUser-Agent: PostPlus/" POSTPLUS_VERSION "\r\nConnection: close\r\n";
     if (!request.body.empty() || request.method == "POST" || request.method == "DELETE")
         wire += "Content-Type: " + request.content_type + "\r\nContent-Length: " + std::to_string(request.body.size()) + "\r\n";
     connection.write(wire + "\r\n" + request.body);
@@ -238,6 +238,8 @@ struct AbuseIpDb::Impl {
     Json config=abuseipdb_defaults(), quotas=Json::object();
     AbuseTransport transport;
     unsigned active=0;
+    std::set<std::string> quota_refresh_keys;
+    Json quota_refresh={{"status","not_refreshed"},{"checked_at",nullptr},{"probes",Json::array()}};
     std::uint64_t generation=0;
     struct Cached { std::int64_t expires; std::optional<Json> data; };
     std::map<std::string,Cached> cache;
@@ -281,7 +283,8 @@ struct AbuseIpDb::Impl {
         }
         return result;
     }
-    Json perform(const std::string& endpoint,const Json& input,Clock::time_point deadline=Clock::time_point::max()) {
+    Json perform(const std::string& endpoint,const Json& input,Clock::time_point deadline=Clock::time_point::max(),bool quota_probe=false,const std::string& expected_key={}) {
+        if(quota_probe && endpoint!="check" && endpoint!="reports" && endpoint!="blacklist" && endpoint!="check-block")invalid("endpoint");
         if(endpoint=="bulk-check") {
             if(!input.is_object() || !input.contains("ips") || !input.at("ips").is_array() || input.at("ips").empty() || input.at("ips").size()>20) invalid("ips");
             for(const auto& [name,value]:input.items()){(void)value;if(name!="ips" && name!="maxAgeInDays")invalid(name);}
@@ -301,7 +304,8 @@ struct AbuseIpDb::Impl {
         const auto request=abuseipdb_request(endpoint,input);
         std::string key; {
             std::lock_guard lock(mutex);key=key_for(config);
-            if(!config.at("enabled").get<bool>() || key.empty())return {{"ok",false},{"status",400},{"code","abuseipdb_not_configured"},{"error","Enable AbuseIPDB and configure an API key."}};
+            if((!quota_probe && !config.at("enabled").get<bool>()) || key.empty())return {{"ok",false},{"status",400},{"code","abuseipdb_not_configured"},{"error","Enable AbuseIPDB and configure an API key."}};
+            if(quota_probe && key!=expected_key)return {{"ok",false},{"status",409},{"code","abuseipdb_settings_conflict"}};
             const auto now=now_seconds();
             if(quotas.contains(endpoint)) {
                 const auto& quota=quotas.at(endpoint);
@@ -360,13 +364,58 @@ AbuseIpDb::~AbuseIpDb()=default;
 void AbuseIpDb::configure(const Json& settings) {
     const auto validated=validate_abuseipdb_settings(abuseipdb_defaults(),settings);
     std::lock_guard lock(impl_->mutex);
-    if(key_for(validated)!=key_for(impl_->config))impl_->quotas=Json::object();
+    if(key_for(validated)!=key_for(impl_->config)) {
+        impl_->quotas=Json::object();
+        impl_->quota_refresh={{"status","not_refreshed"},{"checked_at",nullptr},{"probes",Json::array()}};
+    }
     impl_->config=validated;++impl_->generation;impl_->cache.clear();impl_->pending_checks.clear();impl_->reports.clear();
 }
 Json AbuseIpDb::settings() const {std::lock_guard lock(impl_->mutex);return impl_->config;}
 Json AbuseIpDb::view() const {
     std::lock_guard lock(impl_->mutex);auto settings=impl_->config;settings.erase("api_key");
-    return {{"ok",true},{"settings",settings},{"api_key_configured",!key_for(impl_->config).empty()},{"quotas",impl_->quota_view()},{"verification_path","/abuseipdb-verification.html"}};
+    return {{"ok",true},{"settings",settings},{"api_key_configured",!key_for(impl_->config).empty()},{"quotas",impl_->quota_view()},{"quota_refresh",impl_->quota_refresh},{"verification_path","/abuseipdb-verification.html"}};
+}
+Json AbuseIpDb::refresh_quotas(std::chrono::milliseconds budget) {
+    std::string key;
+    {
+        std::lock_guard lock(impl_->mutex);key=key_for(impl_->config);
+        if(key.empty())return {{"status","not_configured"},{"checked_at",nullptr},{"probes",Json::array()}};
+        if(impl_->quota_refresh_keys.contains(key) || impl_->quota_refresh_keys.size()>=2)return {{"status","busy"},{"checked_at",nullptr},{"probes",Json::array()}};
+        if(impl_->quota_refresh.at("checked_at").is_number_integer() && now_seconds()-impl_->quota_refresh.at("checked_at").get<std::int64_t>()<60) {
+            auto result=impl_->quota_refresh;result["status"]="cooldown";return result;
+        }
+        impl_->quota_refresh_keys.insert(key);
+    }
+    // No account-wide quota endpoint exists. Use small documented GETs only;
+    // report/bulk-report/clear-address stay unobserved until a real operation.
+    Json refresh={{"status","failed"},{"checked_at",now_seconds()},{"probes",Json::array()},
+        {"queried_endpoints",Json::array({"check","reports","blacklist","check-block"})}};
+    const auto deadline=Clock::now()+std::clamp(budget,std::chrono::milliseconds(0),std::chrono::milliseconds(18000));
+    std::size_t observed=0,busy=0;bool stop=false;
+    try {
+        for(const auto& [endpoint,input]:std::vector<std::pair<std::string,Json>>{
+            {"check",{{"ipAddress","8.8.8.8"},{"maxAgeInDays",1}}},
+            {"reports",{{"ipAddress","8.8.8.8"},{"maxAgeInDays",1},{"page",1},{"perPage",1}}},
+            {"blacklist",{{"confidenceMinimum",100},{"limit",1}}},
+            {"check-block",{{"network","8.8.8.8/32"},{"maxAgeInDays",1}}}}) {
+            if(stop || Clock::now()>=deadline){refresh["probes"].push_back({{"endpoint",endpoint},{"ok",false},{"status",0},{"code","skipped"},{"capacity_observed",false}});continue;}
+            const auto result=impl_->perform(endpoint,input,deadline,true,key);
+            if(result.value("code",std::string{})=="abuseipdb_busy")++busy;
+            bool capacity=false;
+            if(result.contains("quotas"))for(const auto& row:result.at("quotas"))
+                if(row.at("endpoint")==endpoint && row.at("limit").is_number() && row.at("observed_at").is_number_integer() &&
+                    row.at("observed_at").get<std::int64_t>()>=refresh.at("checked_at").get<std::int64_t>())capacity=true;
+            Json probe={{"endpoint",endpoint},{"ok",result.value("ok",false)},{"status",result.value("status",502)},{"capacity_observed",capacity}};
+            if(result.contains("code"))probe["code"]=result.at("code");
+            refresh["probes"].push_back(std::move(probe));if(capacity)++observed;
+            stop=result.value("status",0)==401 || result.value("status",0)==409 || result.value("code",std::string{})=="abuseipdb_not_configured";
+        }
+        refresh["status"]=observed==4?"complete":observed?"partial":"failed";
+    }catch(const std::exception&){refresh["status"]=observed?"partial":"failed";}
+    std::lock_guard lock(impl_->mutex);impl_->quota_refresh_keys.erase(key);
+    if(key!=key_for(impl_->config)){refresh["status"]="settings_changed";return refresh;}
+    if(busy==4){refresh["status"]="busy";refresh["checked_at"]=nullptr;return refresh;}
+    impl_->quota_refresh=refresh;return refresh;
 }
 Json AbuseIpDb::perform(const std::string& endpoint,const Json& input){return impl_->perform(endpoint,input);}
 std::optional<Json> AbuseIpDb::reputation(const std::string& input,bool cached_only) {

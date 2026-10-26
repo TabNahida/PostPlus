@@ -33,7 +33,7 @@ window.PostPlusAdminSecurity={mount(root,{api,notice=()=>{}}){
     const duration={input,unit,wrap,read,valid,set,translate,validate(){const ok=valid();input.setCustomValidity(ok?"":t(rangeKey));return ok;},disable(value){input.disabled=value;unit.disabled=value;}};durations.push(duration);if(value!==undefined)set(value);else translate();return duration;
   }
   root.replaceChildren();
-  const intro=node("div",null,"settings-intro"),title=node("h2","Login security"),help=node("p","Review login attempts in Service logs and limit repeated authentication failures from the same IP.","muted");intro.append(title,help);
+  const intro=node("div",null,"settings-intro"),title=node("h2","Security"),help=node("p","Review login attempts in Service logs and limit repeated authentication failures from the same IP.","muted");intro.append(title,help);
   const error=node("p",null,"form-error"),status=node("p",null,"muted security-status");error.hidden=true;error.setAttribute("role","alert");status.setAttribute("role","status");status.setAttribute("aria-live","polite");
   const panel=node("section",null,"settings-group security-policy"),heading=node("h3","Automatic protection"),explain=node("p","Temporarily reject new connections when an IP reaches either failure threshold within the observation window. Connections already open are not forcibly closed.","field-hint"),form=node("form");
   const enabledLabel=node("label",null,"checkbox-label security-enabled"),enabled=node("input"),enabledText=node("span","Enable automatic login protection");enabled.type="checkbox";enabled.id="security-enabled";enabledLabel.append(enabled,enabledText);

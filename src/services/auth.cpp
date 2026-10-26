@@ -192,6 +192,7 @@ public:
         : rounds_(config.number("auth_pbkdf2_iterations", 600000)),
           max_password_(config.number("max_password_bytes", 1024)), dummy_salt_(salt()),
           domain_(lower(trim(config.text("domain", "localhost")))), domains_(config.mail_domains()) {
+        quota_refresh_budget_=std::chrono::seconds(std::clamp(config.number("timeout_seconds",30)-2,0,18));
         if (!valid_address("postmaster@" + domain_)) throw std::invalid_argument("invalid invitation domain");
         if (rounds_ < 600000 || rounds_ > 2000000)
             throw std::invalid_argument("auth_pbkdf2_iterations must be 600000..2000000");
@@ -306,7 +307,7 @@ public:
             std::lock_guard guard(mutex_);
             return {{"ok",true},{"verification_token",abuseipdb_->settings().at("verification_token")}};
         }
-        if (operation == "abuseipdb_get" || operation == "abuseipdb_settings" || operation == "abuseipdb_action")
+        if (operation == "abuseipdb_get" || operation == "abuseipdb_settings" || operation == "abuseipdb_action" || operation == "abuseipdb_quotas_refresh")
             return manage_abuseipdb(request, operation);
         if (operation == "security_get" || operation == "security_policy_set" || operation == "security_unban" || operation == "security_ban")
             return manage_security(request, operation);
@@ -652,6 +653,10 @@ private:
                     }
                     return abuseipdb_view();
                 }
+            }
+            if(operation=="abuseipdb_quotas_refresh") {
+                const auto refresh=abuseipdb_->refresh_quotas(quota_refresh_budget_);
+                std::lock_guard guard(mutex_);auto result=abuseipdb_view();result["quota_refresh"]=refresh;return result;
             }
             const auto endpoint=required_string(request,"endpoint",32);
             if(!request.contains("input"))throw AbuseError("input","Provide AbuseIPDB parameters.");
@@ -1263,6 +1268,7 @@ private:
     std::vector<std::string> domains_;
     std::mutex mutex_;
     std::unique_ptr<AbuseIpDb> abuseipdb_;
+    std::chrono::milliseconds quota_refresh_budget_{18000};
     struct Rate { std::chrono::steady_clock::time_point expires; unsigned count = 0; };
     std::map<std::string, Rate> attempts_;
     Rate global_attempts_{};

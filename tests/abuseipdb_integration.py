@@ -28,6 +28,11 @@ def run(s):
     assert not initial["api_key_configured"] and len(initial["quotas"]) == 8
     assert all(row["limit"] is None and row["used"] is None for row in initial["quotas"])
     assert all("api_key" not in row for row in (initial, initial["settings"]))
+    assert request("POST", "/quotas/refresh", {}, {"Cookie": session["Cookie"]})[0] == 403
+    assert request("POST", "/quotas/refresh", {"endpoint": "report"})[0] == 400
+    status, _, quota_state = request("POST", "/quotas/refresh", {})
+    assert status == 200 and quota_state["quota_refresh"]["status"] == "not_configured"
+    assert quota_state["revision"] == 1 and not quota_state["settings"]["enabled"]
     assert s.http("web", "GET", "/abuseipdb-verification.html")[0] == 404
     secret = "private-abuse-test-secret-never-return"
     token = "abuseipdb-verification-PostPlusTest_2026"
@@ -61,6 +66,7 @@ def run(s):
     assert request("POST", "/check", {"ipAddress": "8.8.8.8"}, ro)[2]["code"] == "abuseipdb_not_configured"
     assert request("POST", "/clear-address", {"ipAddress": "8.8.8.8"}, ro)[0] == 403
     assert request("PUT", "/settings", {"revision": 2, "settings": {}}, ro)[0] == 403
+    assert request("POST", "/quotas/refresh", {}, ro)[0] == 403
     assert s.http("web", "GET", "/api/admin/abuseipdb", headers=session)[0] == 404
     s.stop("auth"); s.start("auth")
     status, _, loaded = request()
@@ -68,6 +74,8 @@ def run(s):
     assert loaded["revision"] == 2 and secret not in json.dumps(loaded)
     status, _, cleared = request("PUT", "/settings", {"revision": 2, "settings": {"clear_api_key": True, "verification_token": ""}})
     assert status == 200 and not cleared["api_key_configured"]
+    status, _, quota_state = request("POST", "/quotas/refresh", {}, rw)
+    assert status == 200 and quota_state["quota_refresh"]["status"] == "not_configured"
     assert s.http("web", "GET", "/abuseipdb-verification.html")[0] == 404
     logs = "\n".join(path.read_text(encoding="utf-8") for path in (s.directory / "data/logs").glob("auth.jsonl*"))
     assert secret not in logs

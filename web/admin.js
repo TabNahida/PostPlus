@@ -2,7 +2,7 @@
 const t = (...args) => PostPlusI18n.t(...args);
 const $ = id => document.getElementById(id);
 const state = {user:null,view:"overview",userMode:"create"};
-const viewLabels = {overview:"Overview",domains:"Domains",accounts:"User accounts",queue:"Delivery queue",logs:"Service logs",security:"Login security","api-keys":"API keys",settings:"Server settings",maintenance:"Server maintenance",restart:"Restart and shutdown"};
+const viewLabels = {overview:"Overview",domains:"Domains",accounts:"User accounts",queue:"Delivery queue",logs:"Service logs",security:"Security","api-keys":"API keys",settings:"Server settings",maintenance:"Server maintenance",restart:"Restart and shutdown"};
 const inspectionReader=PostPlusMailReader.create($("inspect-body"));
 let settingsData = null;
 let settingsEditor = null;
