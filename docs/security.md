@@ -1,7 +1,7 @@
-# Login security and IP bans
+# Security events and IP bans
 
 Administration → **Security** configures live login protection and shows the
-current ban pool. Password logins to Webmail, administration, SMTP, IMAP and
+recent security events and the current ban pool. Password logins to Webmail, administration, SMTP, IMAP and
 POP3, and Bearer API key authentication share the authentication service's IP
 failure counters. Reconnecting or switching protocols does not reset them.
 
@@ -58,9 +58,37 @@ Authentication logs include source IP, protocol, attempted account and outcome
 for success, failure and blocked attempts. Ban creation, expiry, removal and
 policy changes are logged. Rejected connections record their socket IP and
 reason in the public service log, with the ban check also audited by `auth`.
-Search the IP in **Service logs**.
+The Security page shows structured failures, blocks, ban creation/removal/expiry,
+policy changes and AbuseIPDB outcomes directly. Detailed diagnostic messages
+remain available under **Logs**.
 Passwords, complete API keys and SASL payloads are never logged. Log rotation
 and retention continue to apply; the ban pool is a current-state view.
+
+## Recent events
+
+Opening **Security** automatically loads the latest 50 events. Each row shows
+the timestamp, event, source IP, protocol and outcome or reason. Refresh the
+event list independently or page to older and newer records without losing
+unsaved policy changes.
+
+The authentication database retains the most recent 10,000 structured events
+across restarts. These records are included in existing database backups and
+are removed by the existing data-reset workflow. Recording starts with this
+update; earlier freeform service logs are not imported. Attempted account
+names, passwords, API keys, raw third-party responses and administrator freeform
+ban notes are excluded from this feed.
+
+Repeated blocked connections with the same IP, protocol and reason produce at
+most one timeline entry every 30 seconds. This keeps a connection flood from
+overwriting useful history or adding a database commit for every rejected
+connection. These entries are observations, not exact aggregate counters;
+full repeated-attempt details remain in service logs. Failed authentications,
+ban changes and administrator actions are recorded individually.
+
+The event view uses `security:read`; a key does not need `logs:read` to access
+it. Background AbuseIPDB outcomes use a bounded queue, persisted on the next
+authentication RPC or event refresh. The authentication path reads local
+reputation caches and never waits for an external lookup.
 
 ## Administration API
 
@@ -71,6 +99,7 @@ Existing keys do not gain these permissions automatically.
 | Method | Endpoint | Body |
 | --- | --- | --- |
 | GET | `/api/admin/security` | None |
+| GET | `/api/admin/security/events?limit=50&cursor=...` | None |
 | PUT | `/api/admin/security/policy` | `{"revision":1,"policy":{...}}` |
 | POST | `/api/admin/security/ban` | `{"ip":"192.0.2.10","seconds":900,"reason":"Repeated login attempts"}` |
 | POST | `/api/admin/security/ban` | `{"ip":"192.0.2.10","permanent":true,"reason":"Permanent administrator ban"}` |
@@ -85,6 +114,11 @@ ban duration from 1 to 604,800 seconds. Manual timed bans use the same duration
 range. The optional `permanent` field must be a boolean: `true` requires
 omitting `seconds`, while `false` or an omitted `permanent` requires a valid
 `seconds` value. Invalid changes leave an existing ban unchanged.
+
+The events endpoint accepts a limit from 1 to 100. It returns `events`,
+`next_cursor`, `has_more`, `retention_limit` and `server_time`. Follow the returned
+cursor for older events; IDs stay stable when newer events arrive. Unknown
+query parameters and invalid limits or cursors are rejected.
 
 Each ban includes `permanent`. Timed bans expose an integer Unix `expires_at`;
 permanent bans expose `expires_at:null`. This is compatible with existing timed

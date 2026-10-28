@@ -1,6 +1,6 @@
 # PACE backend integration
 
-PostPlus uses the unmodified PACE 0.2.0 Xmake package. Production source no longer
+PostPlus uses the unmodified PACE 0.4.0 Xmake package. Production source no longer
 depends on Asio; an independent Asio TLS client remains in interoperability tests.
 The public APIs, configuration schema, and on-disk formats are unchanged.
 
@@ -9,8 +9,8 @@ The public APIs, configuration schema, and on-disk formats are unchanged.
 | TCP listeners and connections | PACE TCP, including IPv4, IPv6, dual-stack listeners and numeric scope IDs |
 | Timers and cancellation | PACE reactor callback timers and socket readiness cancellation |
 | Hostname resolution | PACE DNS / c-ares |
-| Public DNS diagnostics | Existing validated DNS wire protocol over PACE UDP/TCP |
-| Internal RPC client | PACE HTTP/1 client with bounded headers/body and an absolute exchange deadline |
+| Public DNS diagnostics | PACE UDP `async_exchange` with source filtering and a shared deadline; validated DNS wire format and TCP fallback |
+| Internal RPC client | PACE HTTP/1 `async_fetch` with bounded headers/body and an absolute exchange deadline |
 | HTTP servers | Existing PostPlus framing, admission, response and file streaming policy over PACE transport |
 | Mail and HTTPS TLS | OpenSSL application adapter over PACE-owned sockets and readiness |
 | ACME, ClamAV, relay, MX delivery, port probes | Shared PACE connection/listener facade |
@@ -45,26 +45,29 @@ connections retain their own certificate-selection state.
 
 ## High-level API boundaries
 
-PACE 0.2.0's HTTP admission callback is synchronous on the reactor. PostPlus
-preflight can call authentication RPC, so moving it directly into that callback
-would either deadlock or serialize network progress. The server keeps its current
-header-first authorization, Host/CSRF checks, duplicate/framing rejection, request
-body limits, absolute receive budget, bounded rejection drain, and streamed backup
-responses. The transport beneath that code is PACE.
+PostPlus 1.3.0 adopts PACE 0.4.0's `http::async_fetch` for internal RPC and
+`udp::async_exchange` for public DNS. The executor's deadline overload wraps both
+in `pace::with_deadline`, including dispatch delay and nested socket waits, and
+maps timeout errors to the existing application exception. PACE owns and closes
+each exchange's socket before completion. This removes the RPC socket-pointer
+handoff and manual cancellation timer, along with the hand-written UDP receive
+and source-filtering loop. The shared reactor remains in use; direct blocking
+clients that create a context for every request are unnecessary here.
 
-PACE's owning HTTP server coroutine also does not expose a lifetime-safe handle
-for canceling one transferred connection. Retaining only its numeric socket handle
-would be unsafe after library-owned close and operating-system handle reuse.
-Adopting that server API is a separate follow-up requiring asynchronous admission
-and safe per-connection cancellation, tracked upstream in
-[PACE #12](https://github.com/TabNahida/PACE/issues/12) and
-[PACE #13](https://github.com/TabNahida/PACE/issues/13).
+RPC preserves its bearer token, loopback endpoint, request framing, 32 KiB header
+limit, configured body bound and response validation. DNS keeps its 8 KiB receive
+bound, truncation checks, transaction/question validation and TCP fallback.
+Filtering by IP, port, address family and scope is provided by PACE's exchange.
 
-PACE TLS cancellation currently closes the underlying transport. A reusable TLS
-input poll is requested in [PACE #14](https://github.com/TabNahida/PACE/issues/14). The application
-adapter keeps PostPlus's reusable TLS poll/read cancellation and exact readiness
-pinning semantics without patching or forking PACE. It does not claim to use the
-PACE TLS stream or HTTP server parser.
+The application HTTP server still owns header-first authorization, Host/CSRF
+checks, duplicate/framing rejection, body limits, bounded rejection drain and
+streamed backup responses. Its handlers perform synchronous database and RPC
+work on the bounded worker pool. The existing TLS adapter also retains per-domain
+SNI, platform trust, reusable mail input polling and exact readiness pinning.
+Those application policies are outside this targeted client API migration.
+
+See PACE's [0.4.0 client migration guide](https://github.com/TabNahida/PACE/blob/v0.4.0/docs/reference/direct-clients.md)
+and [deadline contracts](https://github.com/TabNahida/PACE/blob/v0.4.0/docs/reference/structured-concurrency.md).
 
 ## Validation and performance
 
@@ -73,7 +76,7 @@ connection, DNS, outbound delivery, certificate selection and TLS polling tests.
 `python tests/integration.py --bin-dir <directory>` exercises real temporary
 services, including HTTP security, STARTTLS/IDLE, portals, setup, restart and update.
 
-Validation on 2026-10-23:
+Historical migration validation on 2026-10-23 (before the 0.4.0 upgrade):
 
 - Windows x64 / MSVC: release build and all 16 native tests passed. The full
   integration suite passed during migration; HTTP security, TLS transfer, IMAP,

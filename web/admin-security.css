@@ -19,6 +19,24 @@
 .security-policy-actions>.button { min-height:44px; }
 .security-status:empty { display:none; }
 .security-status { margin:0 0 18px; font-size:12px; }
+.security-events { margin:0 0 36px; }
+.security-events .section-heading { align-items:flex-start; margin-bottom:16px; }
+.security-events .section-heading h2 { font-size:20px; font-weight:500; }
+.security-events .section-heading p { max-width:85ch; line-height:1.7; }
+.security-events-status { margin:12px 0; font-size:12px; }
+.security-events-table { max-height:460px; overflow:auto; }
+.security-events-table table { min-width:850px; }
+.security-events-table thead { position:sticky; top:0; z-index:1; }
+.security-events-table td { vertical-align:top; line-height:1.7; }
+.security-events-table td:nth-child(2),.security-events-table td:last-child { min-width:150px; max-width:320px; white-space:normal; overflow-wrap:anywhere; }
+.security-event-actor,.security-event-reason { display:block; margin-top:5px; font-size:11px; line-height:1.7; color:var(--muted); }
+.security-event-outcome { display:inline-block; padding:2px 7px; border-radius:4px; background:var(--surface-soft); font-size:11px; }
+.security-event-failed,.security-event-error { color:var(--danger-ink); background:var(--danger-surface); }
+.security-event-blocked { color:var(--ink); background:var(--surface-selected); }
+.security-event-success { color:var(--ink); background:var(--surface-selected); }
+.security-events-empty { padding:22px 0; }
+.security-events-pagination { display:flex; align-items:center; flex-wrap:wrap; gap:12px; margin-top:16px; }
+.security-events-pagination>p { margin:0; flex:1 1 220px; font-size:12px; }
 .security-scope { max-width:96ch; margin:26px 0 38px; padding:0 6px; }
 .security-scope .field-hint { margin:10px 0 0; }
 .security-pool { margin:0; }
@@ -48,6 +66,8 @@
 .security-manual-actions { display:flex; margin:0; padding-top:18px; border-top:1px solid var(--line); }
 .security-manual-actions>.button { min-height:44px; }
 @media(max-width:650px) {
+  .security-events .section-heading { flex-wrap:wrap; }
+  .security-events-pagination>.button { flex:1 1 140px; }
   .security-policy { padding:22px 20px; }
   .security-policy-grid { grid-template-columns:1fr; gap:22px; }
   .security-policy-grid input { max-width:none; }

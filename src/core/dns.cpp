@@ -84,35 +84,17 @@ Bytes question(const std::string& name,std::uint16_t type) {
     result.insert(result.end(),{0,0,0,0});append_number(result,0);
     return result;
 }
-pace::task<Bytes> udp_query(const Bytes& request,Clock::time_point deadline) {
-    auto& io=network_executor().context();
-    pace::udp::socket socket(io,pace::address_family::ipv4);
-    NetworkDeadline timer(io,deadline,[&]{socket.close();});
-    try {
-        const auto sent=co_await socket.send_to(
-            std::string_view(reinterpret_cast<const char*>(request.data()),request.size()),{"1.1.1.1",53});
-        timer.check();
-        if(sent!=request.size())throw std::runtime_error("incomplete DNS datagram");
-        std::array<char,max_packet> buffer{};
-        for(;;) {
-            if(Clock::now()>=deadline)throw NetworkTimeout();
-            const auto received=co_await socket.receive_from(buffer);
-            timer.check();
-            // PACE's UDP API is unconnected: preserve connected-UDP source
-            // filtering before the DNS transaction/question checks run below.
-            if(received.sender.address!="1.1.1.1" || received.sender.port!=53 ||
-               received.sender.family!=pace::address_family::ipv4 || received.sender.scope_id!=0) {
-                co_await io.yield();
-                continue;
-            }
-            if(received.truncated || !received.size)throw std::runtime_error("invalid DNS datagram");
-            co_return Bytes(buffer.begin(),buffer.begin()+received.size);
-        }
-    }catch(...){if(timer.expired())throw NetworkTimeout();throw;}
-}
 Bytes native_query(const Bytes& request,Clock::time_point deadline) {
     const auto limit=std::min(deadline,Clock::now()+std::chrono::milliseconds(1500));
-    try {return network_executor().run(udp_query(request,limit));}
+    try {
+        auto& executor=network_executor();
+        // PACE filters replies by IP, port, family and scope without resetting
+        // the shared deadline. DNS transaction/question validation follows below.
+        const auto response=executor.run(pace::udp::async_exchange(executor.context(),{"1.1.1.1",53},
+            std::string(reinterpret_cast<const char*>(request.data()),request.size()),max_packet),limit);
+        if(response.truncated || response.data.empty())throw std::runtime_error("invalid DNS datagram");
+        return {response.data.begin(),response.data.end()};
+    }
     catch(const NetworkTimeout&){throw DnsError("dns_timeout","The public DNS resolver did not answer in time. Allow outbound UDP port 53 and retry.");}
     catch(const std::exception&){throw DnsError("dns_unavailable","Cannot read a response from the public DNS resolver. Check network access and retry.");}
 }

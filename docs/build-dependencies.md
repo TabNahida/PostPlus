@@ -16,7 +16,7 @@ PostPlus executables do not require Xmake, CMake, or the package cache at runtim
 
 ```lua
 add_repositories("postplus-packages .")
-add_requires("pace 0.2.0", {system = false, configs = {
+add_requires("pace 0.4.0", {system = false, configs = {
     tls = true, dns = true, http1 = true, websocket = false, shared = false
 }})
 add_requireconfs("pace.openssl3", {override = true, version = "3.6.1",
@@ -25,8 +25,8 @@ add_requireconfs("pace.c-ares", {override = true, system = false,
     configs = {shared = false}})
 ```
 
-The local recipe pins the official v0.2.0 source archive with SHA-256
-`f909829aa3f6ba430b4cd772f66a091ad8e142e0919693a9749f066d780460fb`.
+The local recipe pins the official v0.4.0 source archive with SHA-256
+`46957eec8edaecc1d0806810f9114a8bfd3af685dad44018579288151afbeed6`.
 It is included so clean builds do not depend on an external recipe update.
 
 The selected modules are `pace_runtime`, `pace_net`, `pace_http1`, `pace_tls`, and

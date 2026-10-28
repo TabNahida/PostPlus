@@ -15,8 +15,8 @@ class Element{
   reportValidity(){return nodes(this).every(item=>item.disabled||!item.validationMessage);}
 }
 const nodes=root=>[root,...root.children.flatMap(nodes)];
-const defaults={enabled:true,api_key_env:"POSTPLUS_ABUSEIPDB_API_KEY",verification_token:"",auto_ban:false,score_threshold:90,min_reports:3,ban_seconds:900,max_age_days:30,cache_seconds:3600,auto_report:false,report_threshold:20,report_categories:[18],report_cooldown_seconds:900};
-const data=(revision=1)=>({ok:true,revision,settings:{...defaults},api_key_configured:true,quotas:[{endpoint:"bulk-check",supported:false}]});
+const defaults={enabled:true,api_key_env:"POSTPLUS_ABUSEIPDB_API_KEY",verification_token:"",auto_ban:false,score_threshold:90,min_reports:3,ban_seconds:900,max_age_days:30,cache_seconds:3600,auto_report:false,report_threshold:20,report_categories:[18],report_cooldown_seconds:900,blacklist_enabled:true,blacklist_refresh_seconds:21600,automatic_check_budget:800,automatic_report_budget:800,automatic_blacklist_budget:4};
+const data=(revision=1)=>({ok:true,revision,settings:{...defaults},api_key_configured:true,quotas:[{endpoint:"bulk-check",supported:false}],automation:{storage_available:true,persistent:true,budgets:{check:{limit:800,used:5,remaining:795},report:{limit:800,used:2,remaining:798},blacklist:{limit:4,used:1,remaining:3}},blacklist:{cached_ips:3,next_refresh_at:1793052000}}});
 function fixture(){const root=new Element(),requests=[],waits=[],sandbox={window:{},document:{createElement:tag=>new Element(tag)},Date,setTimeout:(callback,milliseconds)=>{waits.push(milliseconds);Promise.resolve().then(callback);},PostPlusI18n:{language:"en",t:(key,args={})=>key.replace(/\{(\w+)\}/g,(all,name)=>args[name]??all)}};vm.runInNewContext(script,sandbox);const control=sandbox.window.PostPlusAdminAbuseIPDB.mount(root,{api:(url,options)=>new Promise((resolve,reject)=>requests.push({url,options,resolve,reject}))});return {root,requests,waits,control,id:id=>nodes(root).find(item=>item.id==="abuse-"+id),button:text=>nodes(root).find(item=>item.tagName==="BUTTON"&&item.textContent===text),forms:()=>nodes(root).filter(item=>item.tagName==="FORM")};}
 const tick=async()=>{for(let i=0;i<10;i++)await Promise.resolve();};
 async function run(){
@@ -24,6 +24,8 @@ async function run(){
   let pending=f.control.refresh();f.requests.at(-1).resolve(data());await pending;
   assert.match(f.root.textContent,/Uses check capacity/);assert.match(f.root.textContent,/Unknown/);assert.equal(f.id("api-key").value,"");assert.equal(f.id("score_threshold").value,"90");
   assert.equal(f.id("report_threshold").min,"2","The browser enforces the backend's minimum local failure threshold");
+  assert.equal(f.id("automatic_check_budget").value,"800");assert.equal(f.id("automatic_report_budget").value,"800");assert.equal(f.id("automatic_blacklist_budget").value,"4");assert.equal(f.id("blacklist_refresh_seconds").value,"6");assert.equal(f.id("blacklist_refresh_seconds-unit").value,"hours");
+  assert.match(f.root.textContent,/Local reservations are tracked across restarts and key changes/);assert.match(f.root.textContent,/blacklist responses do not include report counts/);assert.equal(nodes(f.root).some(item=>item.tagName==="TR"&&item.children.map(child=>child.textContent).join("|")==="check|800|5|795"),true,"Local request budgets remain distinct from unknown upstream capacities");
   f.id("endpoint").value="blacklist";await f.id("endpoint").fire("change");assert.equal(f.id("tool-limit").max,"10000","The blacklist form matches the server's bounded result limit");
   f.id("endpoint").value="reports";await f.id("endpoint").fire("change");assert.equal(f.id("tool-page").max,"1000000");
   f.id("tool-ipAddress").value="8.8.8.8";pending=f.forms()[3].fire("submit");f.requests.at(-1).resolve({ok:true,data:[],meta:{lastPage:3}});await pending;assert.match(f.root.textContent,/lastPage/,"Pagination metadata must remain inspectable");

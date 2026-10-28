@@ -12,6 +12,7 @@
 #include <chrono>
 #include <climits>
 #include <charconv>
+#include <deque>
 #include <mutex>
 #include <set>
 #include <stdexcept>
@@ -279,12 +280,19 @@ public:
                 migration.commit();
             }
             execute("CREATE TABLE IF NOT EXISTS abuseipdb_settings (id INTEGER PRIMARY KEY CHECK(id=1),settings TEXT NOT NULL,revision INTEGER NOT NULL);");
+            execute("CREATE TABLE IF NOT EXISTS security_events (id INTEGER PRIMARY KEY AUTOINCREMENT,time INTEGER NOT NULL,event TEXT NOT NULL);");
             {
                 Statement initial(db_, "INSERT OR IGNORE INTO abuseipdb_settings VALUES(1,?,1)");
                 initial.text(1, abuseipdb_defaults().dump()); initial.done();
-                Statement saved(db_, "SELECT settings FROM abuseipdb_settings WHERE id=1");
-                if (saved.step() != SQLITE_ROW) throw std::runtime_error("cannot read AbuseIPDB settings");
-                abuseipdb_ = std::make_unique<AbuseIpDb>(); abuseipdb_->configure(Json::parse(saved.string(0)));
+                Json settings;
+                {
+                    Statement saved(db_, "SELECT settings FROM abuseipdb_settings WHERE id=1");
+                    if (saved.step() != SQLITE_ROW) throw std::runtime_error("cannot read AbuseIPDB settings");
+                    settings=Json::parse(saved.string(0));
+                }
+                abuseipdb_ = std::make_unique<AbuseIpDb>(AbuseTransport{},directory/"auth.sqlite3");
+                abuseipdb_->set_event_sink([this](Json event){queue_security_event(std::move(event));});
+                abuseipdb_->configure(settings);
             }
 #ifndef _WIN32
             std::filesystem::permissions(directory / "auth.sqlite3", std::filesystem::perms::owner_read | std::filesystem::perms::owner_write);
@@ -295,14 +303,20 @@ public:
             throw;
         }
     }
-    ~AuthStore() { if (db_) sqlite3_close(db_); }
+    ~AuthStore() {
+        abuseipdb_.reset();
+        try {drain_security_events();}catch(const std::exception&){}
+        if (db_) sqlite3_close(db_);
+    }
 
     Json handle(const Json& request) {
         const auto operation = required_string(request, "op", 32);
+        drain_security_events();
         if (operation == "verify") return verify(request);
         if (operation == "api_key_verify") return verify_api_key(request);
         if (operation == "security_check") return security_check(request);
         if (operation == "security_failure") return security_failure(request);
+        if (operation == "security_events") return security_events(request);
         if (operation == "abuseipdb_verification") {
             std::lock_guard guard(mutex_);
             return {{"ok",true},{"verification_token",abuseipdb_->settings().at("verification_token")}};
@@ -422,10 +436,114 @@ private:
             peer.username = lower(trim(request.at("username").get<std::string>()));
         return peer;
     }
-    void auth_audit(const AuthPeer& peer, const std::string& outcome, const std::string& reason = {}) const {
+    static constexpr std::int64_t max_security_events = 10000;
+    static constexpr int blocked_event_interval_seconds = 30;
+    std::map<std::string,std::chrono::steady_clock::time_point> recent_blocked_events_;
+    std::chrono::steady_clock::time_point next_blocked_event_prune_{};
+    std::mutex pending_security_mutex_;
+    std::deque<Json> pending_security_events_;
+    void queue_security_event(Json event) {
+        // The AbuseIPDB worker never acquires the authentication DB mutex.
+        // The next RPC, including an events refresh, persists its outcomes.
+        std::lock_guard guard(pending_security_mutex_);
+        if (pending_security_events_.size() >= 1000) pending_security_events_.pop_front();
+        event["time"] = unix_seconds(); pending_security_events_.push_back(std::move(event));
+    }
+    void record_security_event(const Json& input) {
+        // Only known structured fields enter this feed. Account attempts,
+        // credentials, arbitrary upstream bodies and raw log messages stay out.
+        static const std::set<std::string> kinds{"auth_failure","auth_blocked","ip_banned","ip_unbanned","ban_expired","policy_changed",
+            "abuseipdb_settings_changed","abuseipdb_check","abuseipdb_report","abuseipdb_clear_address","abuseipdb_bulk_report","abuseipdb_blacklist","abuseipdb_quota_refresh"};
+        if (!input.is_object() || !input.contains("kind") || !input.at("kind").is_string() || !kinds.contains(input.at("kind").get<std::string>())) return;
+        Json event{{"kind",input.at("kind")},{"ip",""},{"protocol",""},{"reason",""},{"outcome",""}};
+        for (const auto& field : {"ip","protocol","reason","outcome","actor","source"}) {
+            if (!input.contains(field) || !input.at(field).is_string()) continue;
+            auto value=input.at(field).get<std::string>();
+            if (value.size()>254 || std::any_of(value.begin(),value.end(),[](unsigned char ch){return ch<32 || ch==127;})) continue;
+            if (std::string_view(field)=="ip" && !value.empty()) { try {value=canonical_ip(value);}catch(const std::exception&){continue;} }
+            if (std::string_view(field)=="actor" && !valid_address(value)) continue;
+            if (std::string_view(field)=="source" && value!="blacklist" && value!="check")continue;
+            if ((std::string_view(field)=="protocol" || std::string_view(field)=="reason" || std::string_view(field)=="outcome") &&
+                value.find_first_not_of("abcdefghijklmnopqrstuvwxyz0123456789_-")!=value.npos)continue;
+            event[field]=value;
+        }
+        for (const auto& field : {"failures","unknown_failures","expires_at","score","status","revision","total_reports","count"}) {
+            if (!input.contains(field)) continue;
+            const auto& value=input.at(field);
+            if (std::string_view(field)=="expires_at" && value.is_null()) {event[field]=nullptr;continue;}
+            if (value.is_number_integer() && !(value.is_number_unsigned() && value.get<std::uint64_t>()>INT64_C(9007199254740991)) && value.get<std::int64_t>()>=0)event[field]=value;
+        }
+        const auto now=unix_seconds();
+        const auto time=input.contains("time") && input.at("time").is_number_integer() && input.at("time").get<std::int64_t>()>0 && input.at("time").get<std::int64_t>()<=now ? input.at("time").get<std::int64_t>() : now;
+        Statement insert(db_,"INSERT INTO security_events(time,event) VALUES(?,?)");insert.integer64(1,time);insert.text(2,event.dump());insert.done();
+        const auto maximum=sqlite3_last_insert_rowid(db_);
+        if (maximum>max_security_events) {
+            Statement prune(db_,"DELETE FROM security_events WHERE id<=?");prune.integer64(1,maximum-max_security_events);prune.done();
+        }
+    }
+    void drain_security_events() {
+        std::deque<Json> events;
+        {std::lock_guard guard(pending_security_mutex_);events.swap(pending_security_events_);}
+        if(events.empty())return;
+        std::lock_guard guard(mutex_);Transaction transaction(db_);
+        for(const auto& event:events)record_security_event(event);
+        transaction.commit();
+    }
+    Json security_events(const Json& request) {
+        const auto actor=lower(trim(required_string(request,"actor",254)));
+        std::lock_guard guard(mutex_);
+        Statement administrator(db_,"SELECT admin FROM users WHERE username=?");administrator.text(1,actor);
+        if(administrator.step()!=SQLITE_ROW || administrator.integer(0)!=1)
+            return {{"ok",false},{"code","administrator_required"},{"error","Administrator access is required."}};
+        int limit=50;
+        if(request.contains("limit")) {
+            const auto& value=request.at("limit");
+            if(!value.is_number_integer() || (value.is_number_unsigned() && value.get<std::uint64_t>()>100) || value.get<std::int64_t>()<1 || value.get<std::int64_t>()>100)
+                return {{"ok",false},{"code","invalid_security_events"},{"error","Event limit must be between 1 and 100."}};
+            limit=value.get<int>();
+        }
+        std::int64_t before=INT64_MAX;
+        if(request.contains("cursor")) {
+            if(!request.at("cursor").is_string())return {{"ok",false},{"code","invalid_security_events"},{"error","Invalid security event cursor."}};
+            const auto cursor=request.at("cursor").get<std::string>();
+            if(!cursor.empty()) {
+                if(cursor.size()>24 || !cursor.starts_with("e1:"))return {{"ok",false},{"code","invalid_security_events"},{"error","Invalid security event cursor."}};
+                const auto value=std::string_view(cursor).substr(3);const auto [end,issue]=std::from_chars(value.data(),value.data()+value.size(),before);
+                if(value.empty() || issue!=std::errc{} || end!=value.data()+value.size() || before<=0)
+                    return {{"ok",false},{"code","invalid_security_events"},{"error","Invalid security event cursor."}};
+            }
+        }
+        Statement query(db_,"SELECT id,time,event FROM security_events WHERE id<? ORDER BY id DESC LIMIT ?");
+        query.integer64(1,before);query.integer(2,limit+1);
+        auto events=Json::array();bool more=false;
+        for(int code;(code=query.step())!=SQLITE_DONE;) {
+            if(code!=SQLITE_ROW)throw std::runtime_error("cannot read security events");
+            if(events.size()==static_cast<unsigned>(limit)){more=true;break;}
+            auto event=Json::parse(query.string(2));event["id"]=std::to_string(query.integer64(0));event["time"]=query.integer64(1);events.push_back(std::move(event));
+        }
+        return {{"ok",true},{"events",events},{"has_more",more},{"next_cursor",more?Json("e1:"+events.back().at("id").get<std::string>()):Json(nullptr)},
+            {"retention_limit",max_security_events},{"blocked_event_interval_seconds",blocked_event_interval_seconds},{"server_time",unix_seconds()}};
+    }
+    void auth_audit(const AuthPeer& peer, const std::string& outcome, const std::string& reason = {}) {
         log("auth", "login " + outcome + " ip=" + (peer.ip.empty() ? "internal" : peer.ip) +
             " protocol=" + peer.protocol + " username=" + audit_value(peer.username) +
             (reason.empty() ? "" : " reason=" + reason), outcome == "success" ? "info" : "warn");
+        if(outcome=="blocked") {
+            // Keep every raw log entry, but persist at most one identical
+            // blocked IP/protocol/reason observation per 30 seconds. Admission
+            // stays free of repeated SQLite fsyncs during a banned-peer flood.
+            // This feed is a recent observation history, not an exact counter.
+            const auto now=std::chrono::steady_clock::now();
+            const auto key=peer.ip+'\n'+peer.protocol+'\n'+reason;
+            if(const auto found=recent_blocked_events_.find(key);found!=recent_blocked_events_.end() && found->second>now)return;
+            if(now>=next_blocked_event_prune_) {
+                std::erase_if(recent_blocked_events_,[now](const auto& event){return event.second<=now;});
+                next_blocked_event_prune_=now+std::chrono::seconds(5);
+            }
+            if(recent_blocked_events_.size()>=static_cast<std::size_t>(max_security_events))return;
+            recent_blocked_events_[key]=now+std::chrono::seconds(blocked_event_interval_seconds);
+        }
+        if(outcome!="success")record_security_event({{"kind",outcome=="blocked"?"auth_blocked":"auth_failure"},{"ip",peer.ip},{"protocol",peer.protocol},{"reason",reason},{"outcome",outcome}});
     }
     Json security_policy_view() {
         Statement query(db_, "SELECT policy,revision FROM security_policy WHERE id=1");
@@ -449,6 +567,7 @@ private:
             Statement remove(db_, "DELETE FROM security_bans WHERE ip=? AND expires_at>0 AND expires_at<=?");
             remove.text(1, ip); remove.integer64(2, now); remove.done();
             log("auth", "login ban expired ip=" + ip);
+            record_security_event({{"kind","ban_expired"},{"ip",ip},{"reason","expired"},{"outcome","success"}});
         }
         Statement prune(db_, "DELETE FROM security_attempts WHERE window_start<=?");
         prune.integer64(1, now - security_policy_view().at("policy").at("window_seconds").get<int>()); prune.done();
@@ -475,18 +594,24 @@ private:
     // AbuseIPDB worker; this indexed/cache-only path also covers a second AUTH
     // attempt made on the same SMTP, IMAP or POP3 connection.
     std::optional<Json> cached_abuse_ban(const AuthPeer& peer,std::int64_t now) {
-        const auto reputation=abuseipdb_->reputation(peer.ip,true);
-        if(!reputation)return {};
         const auto settings=abuseipdb_->settings();
-        if(!settings.at("enabled").get<bool>() || !settings.at("auto_ban").get<bool>() ||
+        if(!settings.at("enabled").get<bool>() || !settings.at("auto_ban").get<bool>())return {};
+        const bool blacklisted=abuseipdb_->blacklisted(peer.ip);
+        const auto reputation=blacklisted?std::optional<Json>{}:abuseipdb_->reputation(peer.ip,true);
+        if(!blacklisted && (!reputation ||
             reputation->at("abuseConfidenceScore").get<std::int64_t>()<settings.at("score_threshold").get<int>() ||
-            reputation->at("totalReports").get<std::int64_t>()<settings.at("min_reports").get<int>())return {};
+            reputation->at("totalReports").get<std::int64_t>()<settings.at("min_reports").get<int>()))return {};
         Statement size(db_,"SELECT COUNT(*) FROM security_bans");
         if(size.step()!=SQLITE_ROW || size.integer(0)>=max_security_ips)return {};
         const auto expires=now+settings.at("ban_seconds").get<int>();
-        Statement ban(db_,"INSERT OR REPLACE INTO security_bans VALUES(?,?,?,'abuseipdb_reputation',0,0)");
-        ban.text(1,peer.ip);ban.integer64(2,now);ban.integer64(3,expires);ban.done();
-        log("auth","login IP banned ip="+peer.ip+" reason=abuseipdb_reputation score="+std::to_string(reputation->at("abuseConfidenceScore").get<int>()),"warn");
+        const std::string reason=blacklisted?"abuseipdb_blacklist":"abuseipdb_reputation";
+        const int score=blacklisted?100:reputation->at("abuseConfidenceScore").get<int>();
+        Statement ban(db_,"INSERT OR REPLACE INTO security_bans VALUES(?,?,?,?,0,0)");
+        ban.text(1,peer.ip);ban.integer64(2,now);ban.integer64(3,expires);ban.text(4,reason);ban.done();
+        log("auth","login IP banned ip="+peer.ip+" reason="+reason+" score="+std::to_string(score),"warn");
+        Json event{{"kind","ip_banned"},{"ip",peer.ip},{"protocol",peer.protocol},{"reason",reason},{"outcome","blocked"},{"expires_at",expires},{"score",score},{"source",blacklisted?"blacklist":"check"}};
+        if(reputation)event["total_reports"]=reputation->at("totalReports");
+        record_security_event(event);
         return banned_response(expires,now);
     }
     // Called under mutex_ before a hash. Reservations bound concurrent expensive
@@ -578,6 +703,8 @@ private:
         Statement reset(db_, "DELETE FROM security_attempts WHERE ip=?"); reset.text(1, peer.ip); reset.done();
         log("auth", "login IP banned ip=" + peer.ip + " reason=" + why + " failures=" + std::to_string(failures) +
             " unknown_failures=" + std::to_string(unknown) + " expires_at=" + std::to_string(expires), "warn");
+        record_security_event({{"kind","ip_banned"},{"ip",peer.ip},{"protocol",peer.protocol},{"reason",why},{"outcome","blocked"},
+            {"failures",failures},{"unknown_failures",unknown},{"expires_at",expires}});
         return banned_response(expires, now);
     }
     Json security_check(const Json& request) {
@@ -650,19 +777,35 @@ private:
                         Statement save(db_,"UPDATE abuseipdb_settings SET settings=?,revision=revision+1 WHERE id=1");save.text(1,settings.dump());save.done();
                         abuseipdb_->configure(settings);
                         log("auth","AbuseIPDB settings changed actor="+audit_value(actor));
+                        record_security_event({{"kind","abuseipdb_settings_changed"},{"actor",actor},{"reason","settings_saved"},{"outcome","success"}});
                     }
                     return abuseipdb_view();
                 }
             }
             if(operation=="abuseipdb_quotas_refresh") {
                 const auto refresh=abuseipdb_->refresh_quotas(quota_refresh_budget_);
-                std::lock_guard guard(mutex_);auto result=abuseipdb_view();result["quota_refresh"]=refresh;return result;
+                std::lock_guard guard(mutex_);
+                record_security_event({{"kind","abuseipdb_quota_refresh"},{"actor",actor},{"reason","quota_refresh"},{"outcome",refresh.value("ok",false)?"success":"error"}});
+                auto result=abuseipdb_view();result["quota_refresh"]=refresh;return result;
             }
             const auto endpoint=required_string(request,"endpoint",32);
             if(!request.contains("input"))throw AbuseError("input","Provide AbuseIPDB parameters.");
             auto result=abuseipdb_->perform(endpoint,request.at("input"));
             if(endpoint=="report" || endpoint=="bulk-report" || endpoint=="clear-address")
                 log("auth","AbuseIPDB "+endpoint+" actor="+audit_value(actor)+" outcome="+(result.value("ok",false)?"success":"failed"));
+            {
+                const auto& input=request.at("input");
+                const auto kind=endpoint=="report"?"abuseipdb_report":endpoint=="bulk-report"?"abuseipdb_bulk_report":endpoint=="clear-address"?"abuseipdb_clear_address":endpoint=="blacklist"?"abuseipdb_blacklist":"abuseipdb_check";
+                Json event{{"kind",kind},{"actor",actor},{"reason","manual_request"},{"outcome",result.value("ok",false)?"success":"error"},{"status",result.value("status",0)}};
+                if(input.contains("ip") && input.at("ip").is_string())event["ip"]=input.at("ip");
+                else if(input.contains("ipAddress") && input.at("ipAddress").is_string())event["ip"]=input.at("ipAddress");
+                if(endpoint=="check" && result.value("ok",false) && result.contains("data") && result.at("data").is_object()) {
+                    const auto& data=result.at("data");
+                    if(data.contains("abuseConfidenceScore"))event["score"]=data.at("abuseConfidenceScore");
+                    if(data.contains("totalReports"))event["total_reports"]=data.at("totalReports");
+                }
+                std::lock_guard guard(mutex_);record_security_event(event);
+            }
             return result;
         } catch(const AbuseError& error) {return {{"ok",false},{"status",400},{"code","invalid_abuseipdb"},{"field",error.field},{"error",error.what()}};}
     }
@@ -715,6 +858,7 @@ private:
                 // explicit until expiry or an administrator removes them.
                 execute("DELETE FROM security_attempts");
                 log("auth", "login security policy changed actor=" + audit_value(actor) + " revision=" + std::to_string(revision + 1));
+                record_security_event({{"kind","policy_changed"},{"actor",actor},{"reason","policy_saved"},{"outcome","success"},{"revision",revision+1}});
             }
         } else if (operation == "security_unban" || operation == "security_ban") {
             std::string ip;
@@ -723,6 +867,7 @@ private:
                 Statement remove(db_, "DELETE FROM security_bans WHERE ip=?"); remove.text(1, ip); remove.done();
                 Statement clear(db_, "DELETE FROM security_attempts WHERE ip=?"); clear.text(1, ip); clear.done();
                 log("auth", "login IP unbanned ip=" + ip + " actor=" + audit_value(actor));
+                record_security_event({{"kind","ip_unbanned"},{"ip",ip},{"actor",actor},{"reason","administrator"},{"outcome","success"}});
             } else {
                 if (request.contains("permanent") && !request.at("permanent").is_boolean()) return invalid("permanent");
                 const bool permanent = request.value("permanent", false);
@@ -745,6 +890,7 @@ private:
                 ban.integer64(3, expires); ban.text(4, reason); ban.done();
                 log("auth", "login IP manually banned ip=" + ip + " actor=" + audit_value(actor) + " reason=" + audit_value(reason) +
                     (permanent ? " permanent=true" : " expires_at=" + std::to_string(expires)), "warn");
+                record_security_event({{"kind","ip_banned"},{"ip",ip},{"actor",actor},{"reason","administrator"},{"outcome","blocked"},{"expires_at",permanent?Json(nullptr):Json(expires)}});
             }
         }
         auto result = security_view(); transaction.commit(); return result;

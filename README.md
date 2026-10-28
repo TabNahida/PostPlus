@@ -58,7 +58,7 @@ Keep the executables and `web` folder together. No compiler, Python, or Node.js 
 
 Install [xmake](https://xmake.io/) 2.9.8 or newer and a C++20 compiler. Windows users need Visual Studio 2022's **Desktop development with C++** workload; Linux users can use GCC 12 or newer; macOS users need current Xcode Command Line Tools.
 
-Xmake resolves PACE 0.2.0 from the bundled, checksum-pinned [package recipe](packages/p/pace/xmake.lua), with HTTP/1, TLS, and DNS enabled. PACE and PostPlus use the same static OpenSSL 3.6.1; c-ares 1.34.8 supplies asynchronous DNS. See [build dependencies](docs/build-dependencies.md) for package configuration and repository troubleshooting.
+Xmake resolves PACE 0.4.0 from the bundled, checksum-pinned [package recipe](packages/p/pace/xmake.lua), with HTTP/1, TLS, and DNS enabled. PACE and PostPlus use the same static OpenSSL 3.6.1; c-ares 1.34.8 supplies asynchronous DNS. See [build dependencies](docs/build-dependencies.md) for package configuration and repository troubleshooting.
 
 From the repository root:
 

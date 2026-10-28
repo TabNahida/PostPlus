@@ -1,6 +1,7 @@
 #pragma once
 #include <postplus/ip.hpp>
 #include <pace/io_context.hpp>
+#include <pace/operation.hpp>
 #include <pace/tcp.hpp>
 #include <condition_variable>
 #include <deque>
@@ -32,6 +33,11 @@ struct tcp {
     };
 };
 
+class NetworkTimeout : public std::system_error {
+public:
+    NetworkTimeout() : std::system_error(std::make_error_code(std::errc::timed_out), "connection timed out") {}
+};
+
 // Application handlers are synchronous; only this bounded bridge executes their
 // network operations on PACE's context-affine reactor. No nested event loops.
 class NetworkExecutor {
@@ -47,6 +53,15 @@ public:
         auto result = promise.get_future();
         io_.spawn(complete(std::move(operation), std::move(promise)));
         return result.get();
+    }
+    // PACE owns cancellation and drains the operation before returning. Keep
+    // the application's timeout type and include time spent awaiting dispatch.
+    template<class T> T run(pace::task<T> operation, std::chrono::steady_clock::time_point deadline) {
+        try { return run(pace::with_deadline(pace::deadline{deadline}, std::move(operation))); }
+        catch (const std::system_error& error) {
+            if (error.code() == std::errc::timed_out) throw NetworkTimeout();
+            throw;
+        }
     }
     template<class F> auto invoke(F function) -> std::invoke_result_t<F> {
         using T = std::invoke_result_t<F>;
@@ -73,10 +88,6 @@ private:
 };
 NetworkExecutor& network_executor();
 
-class NetworkTimeout : public std::system_error {
-public:
-    NetworkTimeout() : std::system_error(std::make_error_code(std::errc::timed_out), "connection timed out") {}
-};
 class NetworkEof : public std::runtime_error {
 public:
     NetworkEof() : std::runtime_error("connection closed") {}

@@ -471,29 +471,6 @@ void serve_rpc(const Config& config, const std::string& service, std::function<J
         return json_response(wire_encode(handler(input)));
     });
 }
-namespace {
-pace::task<pace::http::response> rpc_exchange(int port, pace::http::request request, std::size_t maximum,
-                                           std::chrono::steady_clock::time_point deadline) {
-    auto& io = network_executor().context();
-    pace::tcp::stream socket(io);
-    pace::tcp::stream* active = &socket;
-    NetworkDeadline timer(io, deadline, [&] { io.cancel(active->native_handle()); });
-    try {
-        co_await socket.connect({"127.0.0.1", static_cast<std::uint16_t>(port)});
-        socket.set_no_delay();
-        pace::http::limits limits;
-        limits.max_header_bytes = 32768;
-        limits.max_body_bytes = maximum;
-        pace::http::client client(std::move(socket), limits);
-        active = &client.transport();
-        // The pointer is reset before client destruction, including exceptional exits.
-        struct Reset { pace::tcp::stream*& active; pace::tcp::stream& socket; ~Reset() { active = &socket; } } reset{active, socket};
-        auto response = co_await client.send(std::move(request));
-        timer.check();
-        co_return response;
-    } catch (...) { timer.check(); throw; }
-}
-}
 Json rpc(const Config& config, const std::string& service, const Json& request,
          std::optional<std::chrono::steady_clock::time_point> deadline) {
     int timeout = service == "transfer" ? (config.outbound_mode()=="direct" ? config.number("direct_timeout_seconds",120) : config.number("smarthost_timeout_seconds",30)) + 10 : config.number("timeout_seconds",30);
@@ -507,7 +484,13 @@ Json rpc(const Config& config, const std::string& service, const Json& request,
     outgoing.body = wire_encode(request).dump();
     auto expires = std::chrono::steady_clock::now() + std::chrono::seconds(timeout);
     if (deadline) expires = std::min(expires, *deadline);
-    const auto response = network_executor().run(rpc_exchange(config.port(service), std::move(outgoing), rpc_limit(config), expires));
+    pace::http::limits limits;
+    limits.max_header_bytes = 32768;
+    limits.max_body_bytes = rpc_limit(config);
+    auto& executor = network_executor();
+    const auto response = executor.run(pace::http::async_fetch(executor.context(),
+        pace::tcp::endpoint{"127.0.0.1", static_cast<std::uint16_t>(config.port(service))},
+        std::move(outgoing), limits), expires);
     if (response.version != "HTTP/1.1" || response.status != 200) throw std::runtime_error(service + " RPC unavailable (HTTP " + std::to_string(response.status) + ")");
     const auto result = wire_decode(Json::parse(response.body));
     if (!result.is_object() || !result.contains("ok") || !result.at("ok").is_boolean()) throw std::runtime_error("invalid RPC response");

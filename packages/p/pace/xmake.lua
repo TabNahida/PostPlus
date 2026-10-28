@@ -1,5 +1,5 @@
 -- Adapted from https://github.com/TabNahida/repo-xmake, MIT license: ../../LICENSE.
--- Adds the checksum-verified official PACE v0.2.0 release.
+-- Pins the checksum-verified official PACE v0.4.0 release.
 package("pace")
     set_homepage("https://github.com/TabNahida/PACE")
     set_description("Parallel Async Coroutine Engine: C++20 coroutine networking from sockets to HTTP/3.")
@@ -7,9 +7,7 @@ package("pace")
 
     add_urls("https://github.com/TabNahida/PACE/archive/refs/tags/v$(version).tar.gz",
              "https://github.com/TabNahida/PACE.git")
-    add_versions("0.2.0", "f909829aa3f6ba430b4cd772f66a091ad8e142e0919693a9749f066d780460fb")
-    add_versions("0.1.1", "2311af9f7c67c75fc83ad923a996924b93e640dfba6665cf2a8c62aea3d6de80")
-    add_versions("0.1.0", "38ff58ebb3a3d529d720a102238fc8c03c16123998130effe96ba6528210f8a9")
+    add_versions("0.4.0", "46957eec8edaecc1d0806810f9114a8bfd3af685dad44018579288151afbeed6")
 
     add_configs("shared", {description = "Build shared libraries.", default = false, type = "boolean", readonly = true})
     add_configs("http1", {description = "Enable HTTP/1.0 and HTTP/1.1.", default = true, type = "boolean"})
@@ -81,7 +79,7 @@ package("pace")
                 pace::io_context io;
                 pace::tcp::stream socket(io);
             #ifdef PACE_HAS_HTTP1
-                auto request = pace::http::get(io, {"127.0.0.1", 8080});
+                auto request = pace::http::async_get(io, pace::tcp::endpoint{"127.0.0.1", 8080});
             #endif
             #ifdef PACE_HAS_WEBSOCKET
                 pace::websocket::stream websocket(std::move(socket), pace::websocket::role::client);
@@ -96,10 +94,10 @@ package("pace")
                 pace::quic::context quic;
             #endif
             #ifdef PACE_HAS_HTTP2
-                auto http2 = pace::http2::exchange(pace::tcp::stream(io), "localhost", {});
+                auto http2 = pace::http2::async_exchange(pace::tcp::stream(io), "localhost", {});
             #endif
             #ifdef PACE_HAS_HTTP3
-                auto http3 = pace::http3::exchange(pace::quic::connection(io, quic), "localhost", {});
+                auto http3 = pace::http3::async_exchange(pace::quic::connection(io, quic), "localhost", {});
             #endif
             }
         ]]}, {configs = {languages = "c++20"}}))

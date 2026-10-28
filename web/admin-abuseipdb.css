@@ -25,5 +25,8 @@
 .abuse-tools textarea { min-height:130px; resize:vertical; }
 .abuse-result { overflow:auto; max-height:480px; padding:18px; border:1px solid var(--line); border-radius:8px; background:var(--paper); white-space:pre; font:12px/1.7 Consolas,monospace; }
 .abuse-summary { overflow-wrap:anywhere; }
+.abuse-automation-plan { padding:26px 28px; margin:28px 0; }
+.abuse-automation-plan>.field-hint { max-width:100ch; margin:12px 0 18px; }
+@media(max-width:600px) { .abuse-automation-plan { padding:20px 16px; } }
 @media(max-width:900px) { .abuse-credentials { grid-template-columns:minmax(0,1fr); } }
 @media(max-width:600px) { .abuse-settings,.abuse-tools,.abuse-key-card,.abuse-verification-card { padding:20px 16px; } }

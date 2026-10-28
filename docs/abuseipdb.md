@@ -57,6 +57,47 @@ it does not remove other users' reports or unblock an IP locally.
 
 ## Automatic protection
 
+### Default plan for Standard accounts
+
+The [official Standard daily allowances](https://docs.abuseipdb.com/#api-daily-rate-limits)
+are 1,000 checks, 1,000 reports and 5 blacklist requests. PostPlus defaults to:
+
+| Work | Default plan | Headroom |
+| --- | --- | --- |
+| Full confidence-100 blacklist | Every 6 hours; automation stops after 4 local blacklist requests in the UTC day | At least 1 of the 5 requests |
+| Individual reputation checks | On an actual failed sign-in, at most 800 local requests per UTC day; new configurations cache an IP for 24 hours | At least 200 of 1,000 requests |
+| Abuse reports | Only observed local failures; at most 800 local requests per UTC day, with per-IP cooldown | At least 200 of 1,000 requests |
+
+Every blacklist request counts, including the capacity probe made after saving a
+key and explicit manual queries. Thus a key probe normally leaves at most three
+scheduled full refreshes that UTC day. Automatic work also stops when observed
+provider remaining quota reaches 20% of its limit (at least one request). Explicit
+manual tools may use this reserve but still obey provider rate limits. Budgets
+are configurable for other plans; PostPlus never guesses your subscription.
+
+The automatic plan table shows **local reservations**, separately from the API's
+observed usage. A request reserves its local count before contacting AbuseIPDB;
+failed or interrupted requests are conservatively counted. Counts, successful
+full-list refresh times, and the complete list survive restarts in the private
+authentication database. Changing a key does not reset the installation's daily
+counts, since a replacement key can belong to the same account. Calls made by
+other software are reflected only when the provider returns fresh quota headers.
+
+Blacklist refresh runs only while AbuseIPDB, automatic blocking and the dedicated
+blacklist option are enabled. Its request uses `confidenceMinimum=100` and
+`limit=10000`, compatible with Standard accounts. Only a successful full scheduled
+response replaces the security cache; small manual queries and capacity probes
+never replace it. The full cache expires after 24 hours and is tied to its key.
+Cached blacklist membership is checked locally before new authentication; no
+external call blocks admission. Individual checks still require both your chosen
+confidence score and minimum report count. Blacklist membership has a separate
+rule because its response does not include report counts; PostPlus invents none.
+
+Existing explicitly saved cache durations remain unchanged. Reports, check-block,
+bulk reports and report deletion are not periodically invoked. Failed scheduled
+refreshes back off, retain an unexpired valid cache and respect the durable daily
+budget and any provider rate limit.
+
 Enable reputation blocking and choose the minimum confidence score, minimum
 report count, report lookback, cache duration and temporary block duration.
 Checks are triggered by failed sign-ins. The normal IP allowlist applies.

@@ -1,5 +1,5 @@
 set_project("PostPlus")
-set_version("1.2.1")
+set_version("1.3.0")
 set_xmakever("2.9.8")
 set_languages("c++20")
 set_warnings("allextra")
@@ -9,7 +9,7 @@ add_rules("mode.debug", "mode.release")
 
 -- Keep the PACE release digest with the project until tab-repo supplies it.
 add_repositories("postplus-packages .")
-add_requires("pace 0.2.0", {system = false, configs = {
+add_requires("pace 0.4.0", {system = false, configs = {
     tls = true, dns = true, http1 = true, websocket = false, shared = false
 }})
 -- PACE and PostPlus must share one pinned static OpenSSL implementation.
@@ -29,7 +29,7 @@ target("postplus-core")
     add_files("src/core/*.cpp")
     add_headerfiles("include/(postplus/*.hpp)")
     add_includedirs("include", {public = true})
-    add_defines('POSTPLUS_VERSION="1.2.1"', {public = true})
+    add_defines('POSTPLUS_VERSION="1.3.0"', {public = true})
     add_packages("pace", "nlohmann_json", "openssl3", "sqlite3", "zlib", {public = true})
     if is_plat("windows") then
         add_defines("_WIN32_WINNT=0x0A00", "WIN32_LEAN_AND_MEAN", "NOMINMAX", "_CRT_SECURE_NO_WARNINGS", {public = true})

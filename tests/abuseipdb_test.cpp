@@ -7,16 +7,25 @@
 #include <mutex>
 #include <set>
 #include <thread>
+#include <sqlite3.h>
 
 using namespace postplus;
 namespace {
 void check(bool value,const char* message){if(!value)throw std::runtime_error(message);}
 template<class F>void rejects(F action){try{action();}catch(const AbuseError&){return;}throw std::runtime_error("unsafe AbuseIPDB input accepted");}
-Json settings(){auto value=abuseipdb_defaults();value["enabled"]=true;value["api_key_env"]="";value["api_key"]="private-test-secret";return value;}
+Json settings(){auto value=abuseipdb_defaults();value["enabled"]=true;value["blacklist_enabled"]=false;value["api_key_env"]="";value["api_key"]="private-test-secret";return value;}
+struct FixtureDirectory {
+    std::filesystem::path path=std::filesystem::current_path()/"build"/"test-runs"/("abuse-planner-"+random_hex(8));
+    FixtureDirectory(){std::filesystem::create_directories(path);}
+    ~FixtureDirectory(){std::error_code error;std::filesystem::remove_all(path,error);}
+};
+void database_edit(const std::filesystem::path& path,const std::string& sql){sqlite3* db=nullptr;const auto text=path.string();check(sqlite3_open(text.c_str(),&db)==SQLITE_OK,"fixture database open failed");const int code=sqlite3_exec(db,sql.c_str(),nullptr,nullptr,nullptr);sqlite3_close(db);check(code==SQLITE_OK,"fixture database edit failed");}
 }
 int main(){try{
     auto config=settings();
     check(!abuseipdb_defaults().at("enabled").get<bool>(),"integration enabled by default");
+    check(abuseipdb_defaults().at("cache_seconds")==86400&&abuseipdb_defaults().at("blacklist_refresh_seconds")==21600,"free-account defaults missing");
+    auto legacy=config;legacy["cache_seconds"]=3600;legacy.erase("automatic_check_budget");check(validate_abuseipdb_settings(legacy,Json::object()).at("cache_seconds")==3600,"legacy cache setting was overwritten");
     rejects([&]{validate_abuseipdb_settings(config,{{"api_key","oops\r\nInjected: true"}});});
     rejects([&]{validate_abuseipdb_settings(config,{{"verification_token","<script>bad</script>"}});});
     rejects([&]{validate_abuseipdb_settings(config,{{"verification_token","abuseipdb-verification-"}});});
@@ -165,6 +174,42 @@ int main(){try{
         const auto busy=occupied.refresh_quotas();release.set_value();first.get();second.get();
         check(busy.at("status")=="busy" && busy.at("checked_at").is_null(),"unsent quota probes entered cooldown");
         check(occupied.refresh_quotas().at("status")=="complete","capacity remained blocked after request slots freed");
+    }
+    {
+        FixtureDirectory directory;const auto database=directory.path/"auth.sqlite3";int calls=0;
+        auto budgeted=settings();budgeted["automatic_check_budget"]=2;
+        auto transport=[&](const auto&,const auto&,auto){++calls;return AbuseHttpResponse{200,{},R"({"data":{"ipAddress":"8.8.8.8","isPublic":true,"abuseConfidenceScore":99,"totalReports":20}})"};};
+        {AbuseIpDb first(transport,database);first.configure(budgeted);check(first.perform("check",{{"ipAddress","8.8.8.8"}}).at("ok").get<bool>(),"manual check failed");}
+        {AbuseIpDb restarted(transport,database);restarted.configure(budgeted);budgeted["auto_ban"]=true;restarted.configure(budgeted);check(restarted.reputation("8.8.8.8").has_value(),"remaining automatic budget was lost");check(!restarted.reputation("1.1.1.1")&&calls==2,"restart reset automatic daily budget");check(restarted.perform("check",{{"ipAddress","1.1.1.1"}}).at("ok").get<bool>()&&calls==3,"manual action could not use reserved headroom");budgeted["api_key"]="replacement-secret";restarted.configure(budgeted);check(!restarted.reputation("8.8.4.4")&&calls==3,"key rotation replenished same-account daily budget");check(restarted.view().at("automation").at("budgets").at("check").at("used")==3,"local reservations not exposed separately");}
+        database_edit(database,"UPDATE abuseipdb_daily_usage SET day=day-1;");
+        {AbuseIpDb next_day(transport,database);next_day.configure(budgeted);check(next_day.reputation("8.8.8.8").has_value()&&calls==4,"previous UTC day consumed current-day budget");}
+    }
+    {
+        int calls=0;AbuseIpDb headroom([&](const auto&,const auto&,auto){++calls;return AbuseHttpResponse{200,{{"x-ratelimit-limit","1000"},{"x-ratelimit-remaining","200"}},R"({"data":{"ipAddress":"8.8.8.8","isPublic":true,"abuseConfidenceScore":99,"totalReports":20}})"};});
+        auto config=settings();config["auto_ban"]=true;headroom.configure(config);headroom.perform("check",{{"ipAddress","8.8.8.8"}});check(!headroom.reputation("1.1.1.1")&&calls==1,"automation spent observed twenty-percent reserve");headroom.perform("check",{{"ipAddress","1.1.1.1"}});check(calls==2,"explicit action could not use actual remaining quota");
+    }
+    {
+        FixtureDirectory directory;const auto database=directory.path/"auth.sqlite3";std::atomic<int> blacklist_calls{0},events{0};
+        auto config=settings();config["enabled"]=false;config["auto_ban"]=true;config["blacklist_enabled"]=true;
+        auto transport=[&](const AbuseHttpRequest& request,const auto&,auto){if(request.target.starts_with("blacklist?")){++blacklist_calls;return AbuseHttpResponse{200,{{"x-ratelimit-limit","5"},{"x-ratelimit-remaining",std::to_string(5-blacklist_calls.load())}},request.target.find("limit=10000")!=request.target.npos?R"({"data":[{"ipAddress":"8.8.4.4","abuseConfidenceScore":100}]})":R"({"data":[{"ipAddress":"1.1.1.1","abuseConfidenceScore":100}]})"};}return AbuseHttpResponse{200,{{"x-ratelimit-limit","1000"},{"x-ratelimit-remaining","999"}},R"({"data":{}})"};};
+        {AbuseIpDb scheduled(transport,database);scheduled.set_event_sink([&](Json event){if(event.at("kind")=="abuseipdb_blacklist"&&event.at("outcome")=="success")++events;});scheduled.configure(config);scheduled.refresh_quotas();check(blacklist_calls==1&&!scheduled.blacklisted("1.1.1.1"),"quota probe installed a truncated security cache");config["enabled"]=true;scheduled.configure(config);const auto deadline=std::chrono::steady_clock::now()+std::chrono::seconds(4);while(!scheduled.blacklisted("8.8.4.4")&&std::chrono::steady_clock::now()<deadline)std::this_thread::sleep_for(std::chrono::milliseconds(2));check(scheduled.blacklisted("8.8.4.4")&&blacklist_calls==2,"capacity probe prevented initial full sync");scheduled.perform("blacklist",{{"limit",1}});check(scheduled.blacklisted("8.8.4.4")&&!scheduled.blacklisted("1.1.1.1"),"manual small blacklist replaced full security cache");check(scheduled.view().at("automation").at("budgets").at("blacklist").at("used")==3,"blacklist probe and manual call escaped daily count");}
+        const auto before=blacklist_calls.load();
+        {AbuseIpDb restored(transport,database);restored.configure(config);const auto deadline=std::chrono::steady_clock::now()+std::chrono::seconds(2);while(!restored.blacklisted("8.8.4.4")&&std::chrono::steady_clock::now()<deadline)std::this_thread::sleep_for(std::chrono::milliseconds(2));check(restored.blacklisted("8.8.4.4")&&blacklist_calls==before,"restart lost full cache or repeated scheduled request");config["api_key"]="replacement-secret";restored.configure(config);check(!restored.blacklisted("8.8.4.4"),"key rotation retained old-key list");}
+        check(events==1,"scheduled refresh outcome event missing");
+    }
+    {
+        FixtureDirectory directory;const auto database=directory.path/"auth.sqlite3";std::promise<void> started,release;auto released=release.get_future().share();std::atomic<int> full_calls{0};
+        auto scheduled_config=settings();scheduled_config["auto_ban"]=true;scheduled_config["blacklist_enabled"]=true;
+        AbuseIpDb rotating([&](const AbuseHttpRequest& request,const std::string& key,auto){check(request.target.starts_with("blacklist?"),"rotation fixture made unrelated request");++full_calls;if(key=="private-test-secret"){started.set_value();released.wait_for(std::chrono::seconds(3));return AbuseHttpResponse{200,{},R"({"data":[{"ipAddress":"8.8.4.4","abuseConfidenceScore":100}]})"};}return AbuseHttpResponse{200,{},R"({"data":[{"ipAddress":"1.1.1.1","abuseConfidenceScore":100}]})"};},database);
+        rotating.configure(scheduled_config);if(started.get_future().wait_for(std::chrono::seconds(3))!=std::future_status::ready){release.set_value();check(false,"scheduled rotation fixture failed to start");}
+        sqlite3* blocker=nullptr;check(sqlite3_open(database.string().c_str(),&blocker)==SQLITE_OK,"rotation fixture database open failed");check(sqlite3_exec(blocker,"BEGIN IMMEDIATE",nullptr,nullptr,nullptr)==SQLITE_OK,"rotation fixture could not hold cache write");release.set_value();std::this_thread::sleep_for(std::chrono::milliseconds(25));scheduled_config["api_key"]="replacement-secret";rotating.configure(scheduled_config);sqlite3_exec(blocker,"COMMIT",nullptr,nullptr,nullptr);sqlite3_close(blocker);
+        const auto rotation_deadline=std::chrono::steady_clock::now()+std::chrono::seconds(4);while(!rotating.blacklisted("1.1.1.1")&&std::chrono::steady_clock::now()<rotation_deadline)std::this_thread::sleep_for(std::chrono::milliseconds(2));check(rotating.blacklisted("1.1.1.1")&&!rotating.blacklisted("8.8.4.4")&&full_calls==2,"old-key success delayed or replaced the new-key full cache");
+        scheduled_config["enabled"]=false;rotating.configure(scheduled_config);check(!rotating.blacklisted("1.1.1.1"),"disabled policy honored cached blacklist");
+    }
+    {
+        FixtureDirectory directory;const auto database=directory.path/"auth.sqlite3";auto strict=settings();strict["auto_ban"]=true;strict["blacklist_enabled"]=true;
+        std::atomic<int> rejected_lists{0};AbuseIpDb invalid_list([&](const auto&,const auto&,auto){++rejected_lists;return AbuseHttpResponse{200,{},R"({"data":[{"ipAddress":"8.8.8.8","abuseConfidenceScore":100},{"ipAddress":"127.0.0.1","abuseConfidenceScore":100}]})"};},database);invalid_list.configure(strict);
+        const auto invalid_deadline=std::chrono::steady_clock::now()+std::chrono::seconds(3);while(rejected_lists==0&&std::chrono::steady_clock::now()<invalid_deadline)std::this_thread::sleep_for(std::chrono::milliseconds(2));std::this_thread::sleep_for(std::chrono::milliseconds(10));check(!invalid_list.blacklisted("8.8.8.8")&&!invalid_list.blacklisted("127.0.0.1"),"partly invalid provider list was installed");
     }
     check(!required_api_permission("POST","/api/admin/abuseipdb/unknown"),"unknown endpoint permitted");
     std::cout<<"AbuseIPDB request validation, quotas, caching, backoff, report evidence and permissions passed\n";return 0;

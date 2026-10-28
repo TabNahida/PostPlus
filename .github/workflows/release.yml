@@ -65,7 +65,7 @@ jobs:
         with:
           xmake-version: '3.1.1'
           actions-cache-folder: '.xmake-cache'
-          actions-cache-key: 'package-${{ matrix.platform }}-${{ matrix.arch }}-pace-020-static-v3'
+          actions-cache-key: 'package-${{ matrix.platform }}-${{ matrix.arch }}-pace-040-static-v4'
       - uses: actions/setup-python@v5
         with:
           python-version: '3.13'

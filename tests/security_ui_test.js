@@ -16,11 +16,11 @@ class Element{
 }
 const nodes=root=>[root,...root.children.flatMap(nodes)];
 const defaults={enabled:true,window_seconds:300,failure_threshold:20,unknown_user_threshold:5,ban_seconds:900,allowlist:[]};
-function fixture(){
-  const root=new Element(),requests=[],notices=[],sandbox={window:{},document:{createElement:tag=>new Element(tag)},Date,TextEncoder,PostPlusI18n:{language:"en",t:(key,args={})=>key.replace(/\{(\w+)\}/g,(all,name)=>args[name]??all)}};
+function fixture({deferEvents=false}={}){
+  const root=new Element(),requests=[],eventRequests=[],notices=[],sandbox={window:{},document:{createElement:tag=>new Element(tag)},Date,TextEncoder,PostPlusI18n:{language:"en",t:(key,args={})=>key.replace(/\{(\w+)\}/g,(all,name)=>args[name]??all)}};
   vm.runInNewContext(script,sandbox);
-  const control=sandbox.window.PostPlusAdminSecurity.mount(root,{api:(url,options)=>new Promise((resolve,reject)=>requests.push({url,options,resolve,reject})),notice:message=>notices.push(message)});
-  return {root,requests,notices,control,id:id=>nodes(root).find(item=>item.id===id),button:text=>nodes(root).find(item=>item.tagName==="BUTTON"&&item.textContent===text),forms:()=>nodes(root).filter(item=>item.tagName==="FORM")};
+  const control=sandbox.window.PostPlusAdminSecurity.mount(root,{api:(url,options)=>new Promise((resolve,reject)=>{const item={url,options,resolve,reject};if(url.startsWith("/api/admin/security/events")){eventRequests.push(item);if(!deferEvents)resolve({ok:true,events:[],has_more:false,next_cursor:null});}else requests.push(item);}),notice:message=>notices.push(message)});
+  return {root,requests,eventRequests,notices,control,id:id=>nodes(root).find(item=>item.id===id),button:text=>nodes(root).find(item=>item.tagName==="BUTTON"&&item.textContent===text),forms:()=>nodes(root).filter(item=>item.tagName==="FORM")};
 }
 const result=(revision=1,bans=[])=>({policy:{...defaults,allowlist:[]},revision,bans,server_time:1700000000});
 const tick=async()=>{for(let i=0;i<8;i++)await Promise.resolve();};
@@ -53,9 +53,25 @@ async function run(){
   pending=f.control.refresh();const stale=f.requests.at(-1);f.control.dispose();stale.resolve(result(4,[{ip:"private",reason:"private",expires_at:1700000900}]));await pending;assert.equal(f.root.children.length,0,"A response after logout cannot restore private security data");
   const failed=fixture();pending=failed.control.refresh();failed.requests[0].reject(new Error("Offline"));await pending;assert.match(failed.root.textContent,/Offline/);assert.equal(failed.button("Save security policy").disabled,true);pending=failed.control.refresh();failed.requests.at(-1).resolve(result());await pending;assert.equal(failed.id("security-enabled").disabled,false,"Failed initial load remains recoverable");
   await durationsRoundtrip();
+  await securityEvents();
   assert.doesNotMatch(script,/innerHTML|localStorage|sessionStorage/);
   const html=fs.readFileSync(path.join(__dirname,"../web/admin.html"),"utf8");assert.match(html,/id="nav-security"/);assert.match(html,/src="\/admin-security.js"/);assert.match(html,/href="\/admin-security.css"/);
-  console.log("Security UI checks passed: exact duration units and limits, timed/permanent blocks, policy conflicts, safe rows and logout isolation.");
+  console.log("Security UI checks passed: recent event auto-load/pagination/retry, exact duration units and limits, timed/permanent blocks, policy conflicts, safe rows and logout isolation.");
+}
+async function securityEvents(){
+  const f=fixture({deferEvents:true});let pending=f.control.refresh();
+  assert.equal(f.eventRequests.length,1,"Opening Security requests recent events immediately beside policy");assert.equal(f.eventRequests[0].url,"/api/admin/security/events?limit=50");assert.match(f.id("security-events-status").textContent,/Loading recent/);
+  f.requests[0].resolve(result());await tick();assert.equal(f.id("security-failure-threshold").disabled,false,"A slow event feed does not delay policy controls");
+  const unsafe='<img src=x onerror=alert(1)>',cursor='opaque+/="&cursor=injected';
+  f.eventRequests[0].resolve({ok:true,events:[{id:"3",time:1700000000,kind:"auth_failure",ip:"192.0.2.8",protocol:"smtp",outcome:"failed",reason:"invalid_credentials",failures:3},{id:"2",time:1700000001,kind:"abuseipdb_check",ip:"2001:db8::1",protocol:"imap",outcome:"success",reason:unsafe,score:95}],has_more:true,next_cursor:cursor});await pending;
+  assert.match(f.id("security-events-body").textContent,/Failed sign-in/);assert.match(f.id("security-events-body").textContent,/SMTP/);assert.match(f.id("security-events-body").textContent,/Invalid credentials/);assert.match(f.id("security-events-body").textContent,/95%/);assert.match(f.id("security-events-body").textContent,/<img src=x onerror=alert\(1\)>/);assert.equal(f.id("security-events-empty").hidden,true);assert.equal(f.button("Older events").hidden,false);
+  const top=f.root.children.findIndex(item=>item.id==="security-events"),policy=f.root.children.findIndex(item=>item.className==="settings-group security-policy");assert.ok(top<policy,"Recent events appear before protection settings");
+  f.id("security-failure-threshold").value="27";f.id("security-failure-threshold").fire("input");pending=f.button("Older events").fire("click");assert.equal(f.eventRequests.at(-1).url,"/api/admin/security/events?limit=50&cursor="+encodeURIComponent(cursor));f.eventRequests.at(-1).resolve({ok:true,events:[{id:"1",time:1700000002,kind:"policy_changed",ip:"",protocol:"",outcome:"success",reason:"",actor:"admin@example.com"}],has_more:false,next_cursor:null});await pending;assert.match(f.id("security-events-body").textContent,/By admin@example.com/);assert.doesNotMatch(f.id("security-events-body").textContent,/192.0.2.8/);assert.equal(f.button("Newer events").hidden,false);assert.equal(f.button("Older events").hidden,true);assert.equal(f.id("security-failure-threshold").value,"27","Event pagination never changes policy drafts");
+  pending=f.button("Newer events").fire("click");assert.equal(f.eventRequests.at(-1).url,"/api/admin/security/events?limit=50");f.eventRequests.at(-1).reject(new Error("Feed unavailable"));await pending;assert.match(f.id("security-events-error").textContent,/Feed unavailable/);assert.equal(f.button("Retry security events").hidden,false);assert.match(f.id("security-events-body").textContent,/By admin@example.com/,"A feed failure retains the last visible page");
+  pending=f.button("Retry security events").fire("click");f.eventRequests.at(-1).resolve({ok:true,events:[],has_more:false,next_cursor:null});await pending;assert.equal(f.id("security-events-empty").hidden,false);assert.equal(f.id("security-events-error").hidden,true);assert.equal(f.id("security-failure-threshold").value,"27");
+  f.control.translate();assert.equal(f.id("security-failure-threshold").value,"27");
+  pending=f.control.refresh();const stalePolicy=f.requests.at(-1),staleEvents=f.eventRequests.at(-1);f.control.dispose();stalePolicy.resolve(result());staleEvents.resolve({ok:true,events:[{time:1700000000,kind:"auth_failure",ip:"private",reason:unsafe}],has_more:false});await pending;assert.equal(f.root.children.length,0,"Late event/policy replies cannot restore private data after logout");
+  const ordered=fixture({deferEvents:true});const first=ordered.control.refresh(),second=ordered.control.refresh();ordered.requests[1].resolve(result());ordered.eventRequests[1].resolve({ok:true,events:[{time:1700000000,kind:"ip_banned",ip:"newest",outcome:"blocked"}],has_more:false});await second;ordered.requests[0].resolve(result());ordered.eventRequests[0].resolve({ok:true,events:[{time:1700000000,kind:"ip_banned",ip:"stale",outcome:"blocked"}],has_more:false});await first;assert.match(ordered.id("security-events-body").textContent,/newest/);assert.doesNotMatch(ordered.id("security-events-body").textContent,/stale/);ordered.control.dispose();
 }
 async function durationsRoundtrip(){
   const f=fixture(),legacy={...defaults,window_seconds:301,ban_seconds:901},load=f.control.refresh();f.requests[0].resolve({...result(),policy:legacy});await load;

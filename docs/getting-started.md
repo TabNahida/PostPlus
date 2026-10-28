@@ -24,7 +24,7 @@ xmake run postplus
 
 The first build downloads and builds dependencies, so it can take longer than later builds. The server runs until you press **Ctrl+C**. Keep that terminal open while you use the web interfaces. You do not need a Python launcher or a separately installed web server.
 
-The pinned network dependencies are PACE 0.2.0 and c-ares 1.34.8; PACE and PostPlus use the same static OpenSSL 3.6.1 libraries. Xmake downloads these automatically; see [build dependencies](build-dependencies.md) for the enabled PACE modules and repository troubleshooting.
+The pinned network dependencies are PACE 0.4.0 and c-ares 1.34.8; PACE and PostPlus use the same static OpenSSL 3.6.1 libraries. Xmake downloads these automatically; see [build dependencies](build-dependencies.md) for the enabled PACE modules and repository troubleshooting.
 
 If you already have a built distribution, keep the launcher, every `postplus-*` service executable, and the `web` directory together. Run `postplus` (`postplus.exe` on Windows) from that directory. Use `--config` to select a configuration elsewhere; the parent directory must be writable by the server account.
 

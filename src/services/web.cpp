@@ -968,6 +968,13 @@ private:
             if (path == "/api/admin/security" || path.starts_with("/api/admin/security/")) {
                 Json command{{"actor",session.username}};
                 if (path == "/api/admin/security" && request.method == "GET") command["op"] = "security_get";
+                else if(path=="/api/admin/security/events" && request.method=="GET") {
+                    for(const auto& [name,value]:query){(void)value;if(name!="limit" && name!="cursor")throw ApiError(400,"Unexpected security event query field.");}
+                    const auto value=parameter("limit","50");int limit=0;
+                    const auto [end,issue]=std::from_chars(value.data(),value.data()+value.size(),limit);
+                    if(value.empty() || issue!=std::errc{} || end!=value.data()+value.size() || limit<1 || limit>100)throw ApiError(400,"Event limit must be between 1 and 100.");
+                    command["op"]="security_events";command["limit"]=limit;command["cursor"]=parameter("cursor");
+                }
                 else {
                     const auto input = request_json(request);
                     std::set<std::string> allowed;

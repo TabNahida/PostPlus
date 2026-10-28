@@ -1,4 +1,5 @@
 #include <postplus/core.hpp>
+#include <pace/udp.hpp>
 #include <atomic>
 #include <condition_variable>
 #include <cstdlib>
@@ -367,6 +368,119 @@ void synchronous_deadline_check() {
     });
     std::cout << "PASS NetworkDeadline checks wall clock before its callback can execute\n";
 }
+
+void rpc_client_contract() {
+    const auto token_path = std::filesystem::temp_directory_path() / ("postplus-rpc-" + random_hex() + ".token");
+    struct RemoveToken {
+        std::filesystem::path path;
+        ~RemoveToken() { std::error_code error; std::filesystem::remove(path, error); }
+    } remove_token{token_path};
+    const std::string token(40, 't');
+    { std::ofstream file(token_path); file << token; }
+    const std::string body = R"({"ok":true,"value":"ready"})";
+    const auto valid = "HTTP/1.1 200 OK\r\nContent-Length: " + std::to_string(body.size()) + "\r\n\r\n" + body;
+    const std::vector<std::string> replies{
+        valid,
+        "HTTP/1.1 200 OK\r\nContent-Length: 1054721\r\n\r\n",
+        "HTTP/1.1 200 OK\r\nX-Large: " + std::string(32768, 'a') + "\r\nContent-Length: 0\r\n\r\n",
+        "HTTP/1.1 503 Unavailable\r\nContent-Length: 0\r\n\r\n",
+        "HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\n[]"};
+    for (std::size_t index = 0; index < replies.size() + 1; ++index) {
+        SocketListener listener({ip::address_v4::loopback(), 0});
+        Connection peer(2s);
+        Config config;
+        config.values = {{"ports", {{"auth", listener.local_endpoint().port()}}},
+            {"service_token_env", "POSTPLUS_NETWORK_TEST_UNUSED_TOKEN"},
+            {"service_token_file", token_path.string()}, {"max_message_bytes", 1024}};
+        Pending server([&] {
+            listener.accept(peer, 2s);
+            check(peer.line() == "POST /rpc HTTP/1.1", "RPC method/path/version changed");
+            bool authorized = false, host = false;
+            std::size_t size = 0;
+            for (;;) {
+                const auto line = peer.line();
+                if (line.empty()) break;
+                const auto colon = line.find(':');
+                const auto name = lower(line.substr(0, colon));
+                const auto value = trim(line.substr(colon + 1));
+                if (name == "authorization") authorized = value == "Bearer " + token;
+                if (name == "host") host = value == "localhost";
+                if (name == "content-length") size = std::stoul(value);
+            }
+            check(authorized && host, "RPC authorization/host headers changed");
+            check(Json::parse(peer.read(size)).at("op") == "probe", "RPC request body changed");
+            if (index < replies.size()) {
+                try { peer.write(replies[index]); }
+                catch (const std::system_error&) { if (index == 0) throw; }
+            }
+            else {
+                // Keep providing bytes so only the absolute budget can end the call.
+                peer.write("HTTP/1.1 200 OK\r\nContent-Length: 100\r\n\r\n");
+                for (int fragment = 0; fragment < 15; ++fragment) {
+                    std::this_thread::sleep_for(20ms);
+                    try { peer.write(" "); } catch (const std::exception&) { break; }
+                }
+            }
+        }, [&] { listener.close(); peer.request_stop(); });
+        const bool timeout_case = index == replies.size();
+        bool rejected = false;
+        Json result;
+        try {
+            result = rpc(config, "auth", {{"op", "probe"}}, Clock::now() + (timeout_case ? 120ms : 2s));
+        } catch (const NetworkTimeout&) {
+            check(timeout_case, "RPC waited for peer close or failed to reject an invalid response");
+            rejected = true;
+        } catch (const std::exception&) {
+            check(index != 0 && !timeout_case, "RPC success or timeout contract changed");
+            rejected = true;
+        }
+        check(rejected == (index != 0), "RPC rejection mismatch");
+        if (index == 0) check(result.at("value") == "ready", "RPC response changed");
+        server.require_ready(); server.result.get();
+        // peer remains alive here: a framed response must not await its close.
+    }
+    std::cout << "PASS RPC helper preserves credentials, framing, bounds and absolute deadlines\n";
+}
+
+pace::task<void> udp_peer(pace::udp::socket& server, pace::udp::socket& unrelated, bool reply) {
+    const auto incoming = co_await server.receive();
+    check(incoming.data == "query", "UDP query changed");
+    for (int attempt = 0; attempt < (reply ? 1 : 10); ++attempt) {
+        co_await unrelated.send("wrong source", incoming.sender);
+        co_await server.context().sleep_for(10ms);
+    }
+    if (reply) co_await server.send(std::string("\0ok\xff", 4), incoming.sender);
+}
+
+void udp_exchange_contract() {
+    auto& executor = network_executor();
+    for (const bool reply : {true, false}) {
+        std::unique_ptr<pace::udp::socket> server, unrelated;
+        const auto endpoint = executor.invoke([&] {
+            server = std::make_unique<pace::udp::socket>(executor.context(), pace::udp::endpoint{"127.0.0.1", 0});
+            unrelated = std::make_unique<pace::udp::socket>(executor.context(), pace::udp::endpoint{"127.0.0.1", 0});
+            return server->local_endpoint();
+        });
+        struct Cleanup {
+            NetworkExecutor& executor;
+            std::unique_ptr<pace::udp::socket>& server;
+            std::unique_ptr<pace::udp::socket>& unrelated;
+            ~Cleanup() { executor.invoke([&] { server.reset(); unrelated.reset(); }); }
+        } cleanup{executor, server, unrelated};
+        Pending responding([&] { executor.run(udp_peer(*server, *unrelated, reply), Clock::now() + 2s); },
+            [&] { executor.invoke([&] { server->close(); unrelated->close(); }); });
+        bool timed_out = false;
+        try {
+            const auto packet = executor.run(pace::udp::async_exchange(executor.context(), endpoint, "query", 8192),
+                Clock::now() + (reply ? 2s : 60ms));
+            check(reply && !packet.truncated && packet.data == std::string("\0ok\xff", 4),
+                "UDP exchange accepted another sender or changed binary data");
+        } catch (const NetworkTimeout&) { timed_out = true; }
+        check(timed_out != reply, "unrelated UDP replies extended the absolute deadline");
+        responding.require_ready(); responding.result.get();
+    }
+    std::cout << "PASS UDP helper filters unrelated senders and retains a shared absolute deadline\n";
+}
 }
 
 int main() {
@@ -382,6 +496,8 @@ int main() {
         stop_pending_operations();
         independent_connections();
         synchronous_deadline_check();
+        rpc_client_contract();
+        udp_exchange_contract();
         return 0;
     } catch (const std::exception& error) {
         std::cerr << "FAIL " << error.what() << '\n';

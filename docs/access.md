@@ -1,6 +1,6 @@
 # Mailbox features and API permissions
 
-[Login security and IP bans](security.md) documents the shared authentication policy, audit logs and dedicated API-key permissions.
+[Security events and IP bans](security.md) documents the shared authentication policy, recent event feed and dedicated API-key permissions.
 
 In 0.5.2, login hostname restrictions are enabled only when `admin_hostname` is explicitly nonempty. A missing or empty value keeps compatibility access and allows accounts from all active domains on Webmail, including after upgrades and first-run setup. Setup does not automatically select an administration hostname; shared Webmail is off by default. Under **Administration → Domains → Login addresses**, enabling the restrictions checkbox prefills the first mail domain. Review its DNS and certificate before saving to activate the policy.
 

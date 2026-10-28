@@ -24,7 +24,7 @@ xmake run postplus
 
 第一次编译需要下载和构建依赖，耗时通常比后续编译长。启动后请保持终端打开；按 **Ctrl+C** 会停止主程序及其管理的全部服务。不需要 Python 启动脚本，也不需要另外安装 Web 服务器。
 
-网络依赖固定为 PACE 0.2.0、c-ares 1.34.8，并让 PACE 与 PostPlus 共用同一套静态 OpenSSL 3.6.1。Xmake 会自动下载；启用的 PACE 模块和仓库问题排查见[构建依赖说明](build-dependencies.md)。
+网络依赖固定为 PACE 0.4.0、c-ares 1.34.8，并让 PACE 与 PostPlus 共用同一套静态 OpenSSL 3.6.1。Xmake 会自动下载；启用的 PACE 模块和仓库问题排查见[构建依赖说明](build-dependencies.md)。
 
 如果使用已经编译好的程序，请把 `postplus`、所有 `postplus-*` 服务程序和 `web` 目录放在一起，从该目录运行主程序。Windows 的主程序是 `postplus.exe`。可以用 `--config` 指定配置文件位置；运行账户必须有权限在目标目录写入配置。
 

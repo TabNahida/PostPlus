@@ -372,6 +372,8 @@ def main():
                         "--bin-dir", str(binaries)], check=True)
         subprocess.run([os.sys.executable, str(ROOT / "tests/security_http_integration.py"),
                         "--bin-dir", str(binaries)], check=True)
+        subprocess.run([os.sys.executable, str(ROOT / "tests/security_events_integration.py"),
+                        "--bin-dir", str(binaries)], check=True)
         subprocess.run([os.sys.executable, str(ROOT / "tests/abuseipdb_integration.py"),
                         "--bin-dir", str(binaries)], check=True)
         subprocess.run([os.sys.executable, str(ROOT / "tests/login_ip_protocol_integration.py"),

@@ -23,11 +23,14 @@ Json validate_abuseipdb_settings(const Json& current, const Json& patch);
 AbuseHttpRequest abuseipdb_request(const std::string& endpoint, const Json& input);
 class AbuseIpDb {
 public:
-    explicit AbuseIpDb(AbuseTransport transport = {});
+    explicit AbuseIpDb(AbuseTransport transport = {}, const std::filesystem::path& database = {});
     ~AbuseIpDb();
     void configure(const Json& settings);
     Json settings() const;
     Json view() const;
+    void set_event_sink(std::function<void(Json)> sink);
+    // Cache-only membership in the unexpired confidence-100 provider list.
+    bool blacklisted(const std::string& ip) const;
     // Fixed read-only probes discover observed endpoint limits, even while
     // protection is disabled. Never submits or removes an abuse report.
     Json refresh_quotas(std::chrono::milliseconds budget = std::chrono::seconds(18));

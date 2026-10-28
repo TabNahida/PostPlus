@@ -132,4 +132,7 @@
 <symbol id="check" viewBox="0 0 24 24">
   <path d="M5 12l5 5l10 -10" />
 </symbol>
+<symbol id="power" viewBox="0 0 24 24">
+  <path d="M12 3v9M7 5.7a8 8 0 1 0 10 0" />
+</symbol>
 </svg>
